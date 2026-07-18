@@ -67,6 +67,7 @@ class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: 
     fun showServers() = update { it.copy(screen = Screen.SERVERS) }
     fun refresh() { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.workspaces() to api.agents() } }.onSuccess { pair -> update { it.copy(workspaces = pair.first, agents = pair.second) } }.onFailure(::fail) } }
 
+    fun addWorkspace(label: String, rootPath: String) { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.addWorkspace(label, rootPath) } }.onSuccess { workspace -> update { it.copy(workspaces = it.workspaces + workspace) } }.onFailure(::fail) } }
     fun browse(workspace: Workspace, path: String = ".") {
         val api = client ?: return
         update { it.copy(screen = Screen.BROWSER, workspace = workspace, treePath = path, file = null) }

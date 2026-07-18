@@ -67,18 +67,33 @@ import com.remotepi.app.data.*
 
 @Composable private fun HomeScreen(state: AppState, vm: RemotePiViewModel) {
     var createFor by remember { mutableStateOf<Workspace?>(null) }
+    var addingWorkspace by remember { mutableStateOf(false) }
+    var choosingWorkspace by remember { mutableStateOf(false) }
     LaunchedEffect(createFor) { createFor?.let { vm.loadSessions(it,".") } }
-    Scaffold(topBar = { TopAppBar(title = { Column { Text(state.activeProfile?.name ?: "Remote Pi"); Text(state.activeProfile?.baseUrl.orEmpty(), style = MaterialTheme.typography.labelSmall) } }, actions = { IconButton(onClick = vm::refresh) { Icon(Icons.Default.Refresh, "刷新") }; IconButton(onClick = vm::showServers) { Icon(Icons.Default.Storage, "Servers") } }) }) { padding ->
+    fun startAgentCreation() { if (state.workspaces.size == 1) createFor = state.workspaces.first() else choosingWorkspace = true }
+    Scaffold(
+        topBar = { TopAppBar(title = { Column { Text(state.activeProfile?.name ?: "Remote Pi"); Text(state.activeProfile?.baseUrl.orEmpty(), style = MaterialTheme.typography.labelSmall) } }, actions = {
+            IconButton(onClick = { addingWorkspace = true }) { Icon(Icons.Default.CreateNewFolder, "添加 Workspace") }
+            IconButton(onClick = vm::refresh) { Icon(Icons.Default.Refresh, "刷新") }
+            IconButton(onClick = vm::showServers) { Icon(Icons.Default.Storage, "Servers") }
+        }) },
+        floatingActionButton = { if (state.workspaces.isNotEmpty()) ExtendedFloatingActionButton(onClick = ::startAgentCreation, icon = { Icon(Icons.Default.Add, null) }, text = { Text("创建 Agent") }) }
+    ) { padding ->
         LazyColumn(Modifier.padding(padding)) {
             item { SectionTitle("Workspaces") }
+            if (state.workspaces.isEmpty()) item { Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) { Text("还没有 Workspace"); Button(onClick = { addingWorkspace = true }, modifier = Modifier.padding(top = 12.dp)) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("添加 Workspace") } } }
             items(state.workspaces, key = { it.id }) { workspace -> ListItem(headlineContent = { Text(workspace.label) }, supportingContent = { Text(workspace.rootPath) }, leadingContent = { Icon(Icons.Default.Folder, null) }, trailingContent = { IconButton(onClick = { createFor = workspace }) { Icon(Icons.Default.AddCircle, "创建 Agent") } }, modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { vm.browse(workspace) }, onLongClick = { createFor = workspace })); HorizontalDivider() }
             item { SectionTitle("Agents") }
-            if (state.agents.isEmpty()) item { Text("暂无 Agent。请在 Workspace 上点击 + 创建。", Modifier.padding(16.dp)) }
+            if (state.agents.isEmpty()) item { Text(if (state.workspaces.isEmpty()) "请先添加 Workspace。" else "暂无 Agent，点击右下角按钮创建。", Modifier.padding(16.dp, 16.dp, 16.dp, 96.dp)) }
             items(state.agents, key = { it.agentId }) { agent -> ListItem(headlineContent = { Text(agent.agentId.take(20)) }, supportingContent = { Text("${agent.status} · ${agent.cwd}") }, leadingContent = { StatusDot(agent.status) }, trailingContent = { IconButton(onClick = { vm.stopAgent(agent) }) { Icon(Icons.Default.Stop, "停止") } }, modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { vm.openAgent(agent) }, onLongClick = { vm.stopAgent(agent) })); HorizontalDivider() }
         }
     }
+    if (addingWorkspace) WorkspaceDialog({ addingWorkspace = false }) { label, path -> addingWorkspace = false; vm.addWorkspace(label, path) }
+    if (choosingWorkspace) AlertDialog(onDismissRequest = { choosingWorkspace = false }, title = { Text("选择 Workspace") }, text = { Column { state.workspaces.forEach { workspace -> TextButton(onClick = { choosingWorkspace = false; createFor = workspace }) { Text("${workspace.label}\n${workspace.rootPath}") } } } }, confirmButton = {})
     createFor?.let { workspace -> CwdDialog(workspace,state.sessions, { createFor = null }) { cwd,session -> createFor = null; vm.createAgent(workspace, cwd,session) } }
 }
+
+@Composable private fun WorkspaceDialog(dismiss: () -> Unit, add: (String,String) -> Unit) { var label by remember { mutableStateOf("") }; var path by remember { mutableStateOf("") }; AlertDialog(onDismissRequest = dismiss, title = { Text("添加 Workspace") }, text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) { OutlinedTextField(label, { label = it }, label = { Text("名称") }, singleLine = true); OutlinedTextField(path, { path = it }, label = { Text("Remote 主机绝对路径") }, supportingText = { Text("例如 /home/user/project") }, singleLine = true) } }, confirmButton = { Button(enabled = label.isNotBlank() && path.startsWith('/'), onClick = { add(label.trim(), path.trim()) }) { Text("添加") } }, dismissButton = { TextButton(onClick = dismiss) { Text("取消") } }) }
 
 @Composable private fun SectionTitle(text: String) { Text(text, Modifier.fillMaxWidth().padding(16.dp, 18.dp, 16.dp, 8.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
 @Composable private fun StatusDot(status: String) { val color = when (status) { "streaming" -> Color(0xff16a34a); "error" -> Color.Red; "stopped" -> Color.Gray; else -> Color(0xff2563eb) }; Icon(Icons.Default.Circle, status, tint = color, modifier = Modifier.size(14.dp)) }

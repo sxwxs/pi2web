@@ -24,6 +24,15 @@ class RemotePiClientTest {
         assertEquals("1", request.getHeader("X-Remote-Pi-Protocol"))
     }
 
+    @Test fun `creates workspace with remote path`() {
+        server.enqueue(json("""{"data":{"id":"ws-1","label":"Project","rootPath":"/srv/project","createdAt":"now"}}""", 201))
+        val workspace = client.addWorkspace("Project", "/srv/project")
+        assertEquals("ws-1", workspace.id)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertTrue(request.body.readUtf8().contains("/srv/project"))
+    }
+
     @Test fun `decodes model and thinking capabilities`() {
         server.enqueue(json("""{"data":{"model":{"provider":"p","id":"m"},"models":[{"provider":"p","id":"m"}],"thinkingLevel":"high","thinkingLevels":["off","high"],"supportsThinking":true}}"""))
         val result = client.capabilities("agent-1")

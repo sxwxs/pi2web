@@ -38,6 +38,7 @@ class RemotePiClient(private val baseUrl: String, private val token: String, val
     fun status(): SystemStatus = call("GET", "/api/v1/system/status")
     fun login(): Boolean = call<JsonObject>("POST", "/api/v1/auth/login", mapOf("token" to token)).get("authenticated").asBoolean
     fun workspaces(): List<Workspace> = call("GET", "/api/v1/workspaces")
+    fun addWorkspace(label: String, rootPath: String): Workspace = call("POST", "/api/v1/workspaces", mapOf("label" to label, "rootPath" to rootPath))
     fun tree(id: String, path: String): List<TreeEntry> = call("GET", "/api/v1/workspaces/$id/tree", query = mapOf("path" to path))
     fun file(id: String, path: String, offset: Long = 0, limit: Int = 256 * 1024): FileContent = call("GET", "/api/v1/workspaces/$id/file", query = mapOf("path" to path, "offset" to "$offset", "limit" to "$limit"))
     fun agents(): List<AgentSummary> = call("GET", "/api/v1/agents")
