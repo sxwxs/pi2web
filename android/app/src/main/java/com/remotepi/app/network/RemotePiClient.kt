@@ -55,7 +55,8 @@ class RemotePiClient(private val baseUrl: String, private val token: String, val
     fun extensionResponse(id: String, requestId: String, value: Any?): Boolean = call<JsonObject>("POST", "/api/v1/agents/$id/extension-response", mapOf("requestId" to requestId, "value" to value)).get("success").asBoolean
     fun command(id: String, command: String, message: String = ""): Boolean = call<JsonObject>("POST", "/api/v1/agents/$id/$command", mapOf("message" to message)).get("success").asBoolean
     fun stop(id: String): Boolean = call<JsonObject>("DELETE", "/api/v1/agents/$id").get("stopped").asBoolean
-    fun wsUrl(): HttpUrl = url("/api/v1/ws").newBuilder().scheme(if (baseUrl.startsWith("https")) "wss" else "ws").build()
+    /** OkHttp's WebSocket API expects an HTTP(S) URL and performs the WS(S) upgrade itself. */
+    fun wsUrl(): HttpUrl = url("/api/v1/ws")
     fun wsRequest(): Request = Request.Builder().url(wsUrl()).header("Authorization", "Bearer $token").header("X-Remote-Pi-Protocol", "1").build()
 
     companion object {

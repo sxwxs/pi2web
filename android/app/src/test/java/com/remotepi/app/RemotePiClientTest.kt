@@ -24,6 +24,14 @@ class RemotePiClientTest {
         assertEquals("1", request.getHeader("X-Remote-Pi-Protocol"))
     }
 
+    @Test fun `websocket request keeps okhttp compatible http scheme`() {
+        val request = client.wsRequest()
+        assertEquals("http", request.url.scheme)
+        assertEquals("/api/v1/ws", request.url.encodedPath)
+        assertEquals("Bearer secret", request.header("Authorization"))
+        assertEquals("https", RemotePiClient("https://example.com", "token").wsRequest().url.scheme)
+    }
+
     @Test fun `creates workspace with remote path`() {
         server.enqueue(json("""{"data":{"id":"ws-1","label":"Project","rootPath":"/srv/project","createdAt":"now"}}""", 201))
         val workspace = client.addWorkspace("Project", "/srv/project")

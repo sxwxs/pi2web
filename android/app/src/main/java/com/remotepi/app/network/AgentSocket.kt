@@ -31,7 +31,8 @@ class AgentSocket(
     fun connect() {
         if (stopped) return
         onStatus(if (attempt == 0) "connecting" else "reconnecting")
-        socket = client.http.newWebSocket(client.wsRequest(), object : WebSocketListener() {
+        val request = try { client.wsRequest() } catch (_: IllegalArgumentException) { reconnect(); return }
+        socket = client.http.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 attempt = 0; onStatus("connected")
                 val command = JsonObject().apply { addProperty("type", "subscribe"); addProperty("agentId", agentId); addProperty("lastSequence", lastSequence) }
