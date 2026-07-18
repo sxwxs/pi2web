@@ -1,7 +1,7 @@
 # Remote Pi 实现要点、当前状态与 Android App 实施计划
 
 > 更新时间：2026-07-18  
-> 当前阶段：Web Server + Native HTML5 Web UI 可用原型，Android App 尚未开始
+> 当前阶段：Web Server + Native HTML5 Web UI + Android 原生 App 可用；protocol v1、snapshot、Session/Model/Thinking/Extension UI 已接入
 
 ## 1. 当前实现概览
 
@@ -347,19 +347,18 @@ node --check web/app.js
 
 ### 4.1 协议与类型
 
-- 尚未提供正式 OpenAPI 文件。
-- 尚未提供 WebSocket JSON Schema。
+- 已提供 `packages/protocol/openapi.yaml`。
+- 已提供 `packages/protocol/websocket.schema.json`。
 - HTTP body 尚未使用完整 schema 校验。
 - Web UI 仍手写请求和响应字段。
 - Android 开发前必须固定协议版本和错误码。
 
 ### 4.2 Agent 与 Session
 
-- 尚未提供 session 列表 API。
-- 尚未提供新 session、切换 session、fork 和 tree navigation API。
-- 尚未提供 compact API。
-- 尚未提供 model 列表和 model 切换 API。
-- 尚未提供 thinking level 修改 API。
+- 已提供 session 列表、创建/打开、fork 和 tree navigation API。
+- 已提供 compact API。
+- 已提供 model 列表和 model 切换 API。
+- 已提供 thinking level 查询和修改 API。
 - 当前恢复是启动时恢复，不是懒加载。
 - Agent 运行时错误状态和崩溃恢复还不完整。
 - Agent 元数据尚未在每个事件后立即持久化 lastActiveAt。
@@ -376,14 +375,14 @@ node --check web/app.js
 ### 4.4 事件恢复
 
 - Server 内存中只缓存最近 1000 个事件。
-- 缓存不足时尚未自动返回完整 state/messages 快照。
-- Server 重启后 Remote Pi 事件 sequence 会重新开始。
-- 客户端没有持久化每个 Agent 的最后 sequence。
-- Native Web UI 尚未实现 WebSocket 指数退避自动重连。
+- 缓存不足时 Server 会返回 `agent_snapshot` 完整 state/messages 快照。
+- Server 重启后 Remote Pi 事件 sequence 仍会重新开始。
+- Android 客户端会持久化每个 Agent 的最后 sequence 并进行去重/gap 检测。
+- Android 客户端已实现 WebSocket 指数退避自动重连；Native Web UI 尚未实现。
 
 ### 4.5 Extension UI
 
-尚未实现以下 Pi Extension UI 的 Web 转换：
+Android 已实现以下 Pi Extension UI 转换：
 
 - select
 - confirm
@@ -394,6 +393,8 @@ node --check web/app.js
 - setWidget
 - setTitle
 - extension response
+
+Native Web UI 仍待接入这些事件。
 
 ### 4.6 文件和附件
 

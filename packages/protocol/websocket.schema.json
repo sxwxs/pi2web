@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://remote-pi.local/protocol/v1/websocket.schema.json",
+  "title": "Remote Pi WebSocket v1",
+  "oneOf": [
+    {"$ref":"#/$defs/subscribe"}, {"$ref":"#/$defs/command"}, {"$ref":"#/$defs/subscribed"},
+    {"$ref":"#/$defs/commandResult"}, {"$ref":"#/$defs/agentEvent"}, {"$ref":"#/$defs/agentSnapshot"}
+  ],
+  "$defs": {
+    "subscribe": {"type":"object","additionalProperties":false,"required":["type","agentId"],"properties":{"type":{"const":"subscribe"},"agentId":{"type":"string"},"lastSequence":{"type":"integer","minimum":0}}},
+    "command": {"type":"object","additionalProperties":false,"required":["type","requestId","agentId"],"properties":{"type":{"enum":["prompt","steer","follow-up","abort"]},"requestId":{"type":"string"},"agentId":{"type":"string"},"message":{"type":"string","maxLength":2097152}}},
+    "subscribed": {"type":"object","required":["type","agentId","protocolVersion"],"properties":{"type":{"const":"subscribed"},"agentId":{"type":"string"},"protocolVersion":{"const":1}}},
+    "commandResult": {"type":"object","required":["type","success"],"properties":{"type":{"const":"command_result"},"requestId":{"type":"string"},"success":{"type":"boolean"},"error":{"type":"object"}}},
+    "agentEvent": {"type":"object","required":["type","agentId","eventId","sequence","event"],"properties":{"type":{"const":"agent_event"},"agentId":{"type":"string"},"eventId":{"type":"string"},"sequence":{"type":"integer","minimum":1},"event":{"type":"object","required":["type"]}}},
+    "agentSnapshot": {"type":"object","required":["type","agentId","lastSequence","state","messages"],"properties":{"type":{"const":"agent_snapshot"},"agentId":{"type":"string"},"lastSequence":{"type":"integer","minimum":0},"state":{"type":"object"},"messages":{"type":"array"}}}
+  }
+}

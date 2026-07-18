@@ -39,4 +39,8 @@ python3 -m http.server 8080
 
 浏览器访问 `http://127.0.0.1:8080`，输入 API 地址和首次启动显示的 Token，即可测试 workspace、文件浏览、agent、prompt、流式事件和 abort。目录树支持右键设为新 Agent 的 cwd，文件和目录支持右键添加 `@路径`；页面重新连接后会加载并重新选择已有 Agent。workspace/agent 元数据保存在 `workspaces.json` 和 `agents.json`，服务重启后从原 Pi session 文件恢复，不会重放未完成的 prompt。页面使用 `fetch` 和原生 `WebSocket`，WebSocket Token 通过 subprotocol 发送，不放入 URL。服务端已提供基础 CORS 响应头，便于静态页面跨端口访问。
 
+## Android App
+
+`android/` 包含 Kotlin + Jetpack Compose 原生客户端，支持多 Server、Keystore Token、Workspace/文件浏览、Agent 创建与列表、实时对话、abort、sequence 去重及 WebSocket 自动重连。构建和连接说明见 [`android/README.md`](android/README.md)。
+
 运行时默认使用真实 `@earendil-works/pi-coding-agent` SDK，并复用 Pi CLI 的 `~/.pi/agent` 模型、认证和设置；agent 可正常使用 read/bash/edit/write 工具并持久化 Pi session。`MockBackend` 仅由自动化测试显式注入，运行服务器不会使用 mock response。测试覆盖 token hash/轮换、路径穿越、符号链接逃逸、分页、大小限制、agent 事件顺序和停止行为，且不依赖真实 LLM key。

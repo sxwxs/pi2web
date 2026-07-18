@@ -1,0 +1,38 @@
+openapi: 3.1.0
+info: {title: Remote Pi API, version: 1.0.0}
+servers: [{url: /api/v1}]
+security: [{bearerAuth: []}]
+paths:
+  /system/status:
+    get: {operationId: systemStatus, responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /workspaces:
+    get: {operationId: listWorkspaces, responses: {'200': {$ref: '#/components/responses/Success'}}}
+    post: {operationId: addWorkspace, requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'201': {$ref: '#/components/responses/Success'}}}
+  /workspaces/{id}/tree:
+    get: {operationId: workspaceTree, parameters: [{$ref: '#/components/parameters/Id'}, {name: path, in: query, schema: {type: string}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /workspaces/{id}/stat:
+    get: {operationId: workspaceStat, parameters: [{$ref: '#/components/parameters/Id'}, {name: path, in: query, schema: {type: string}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /workspaces/{id}/file:
+    get: {operationId: workspaceFile, parameters: [{$ref: '#/components/parameters/Id'}, {name: path, in: query, schema: {type: string}}, {name: offset, in: query, schema: {type: integer}}, {name: limit, in: query, schema: {type: integer, maximum: 1048576}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /sessions:
+    get: {operationId: listSessions, parameters: [{name: workspaceId, in: query, required: true, schema: {type: string}}, {name: path, in: query, schema: {type: string}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /agents:
+    get: {operationId: listAgents, responses: {'200': {$ref: '#/components/responses/Success'}}}
+    post: {operationId: createAgent, requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'201': {$ref: '#/components/responses/Success'}}}
+  /agents/{id}/{action}:
+    get: {operationId: getAgentResource, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [state,messages,capabilities,session]}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+    post: {operationId: agentCommand, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [prompt,steer,follow-up,abort,compact,model,thinking,navigate,fork,extension-response]}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
+components:
+  securitySchemes: {bearerAuth: {type: http, scheme: bearer}}
+  parameters:
+    Id: {name: id, in: path, required: true, schema: {type: string}}
+  requestBodies:
+    Json: {required: true, content: {application/json: {schema: {type: object}}}}
+  responses:
+    Success: {description: Successful response, content: {application/json: {schema: {type: object, required: [data], properties: {data: {}}}}}}
+    Error: {description: Error, content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}}
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties: {error: {type: object, required: [code,message,requestId], properties: {code: {type: string}, message: {type: string}, requestId: {type: string}}}}
