@@ -21,7 +21,7 @@ paths:
     post: {operationId: createAgent, requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'201': {$ref: '#/components/responses/Success'}}}
   /agents/{id}/{action}:
     get: {operationId: getAgentResource, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [state,messages,capabilities,session]}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
-    post: {operationId: agentCommand, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [prompt,steer,follow-up,abort,compact,model,thinking,navigate,fork,extension-response]}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
+    post: {operationId: agentCommand, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [prompt,steer,follow-up,abort,compact,model,thinking,session-name,navigate,fork,extension-response]}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
 components:
   securitySchemes: {bearerAuth: {type: http, scheme: bearer}}
   parameters:

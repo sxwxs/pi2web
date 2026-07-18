@@ -7,6 +7,8 @@ import com.google.gson.JsonElement
 import com.remotepi.app.BuildConfig
 import com.remotepi.app.data.*
 import com.remotepi.app.network.AgentSocket
+import com.remotepi.app.network.AgentNotificationMonitor
+import com.remotepi.app.notifications.AgentNotifier
 import com.remotepi.app.network.RemotePiClient
 import com.remotepi.app.security.SecureTokenStore
 import kotlinx.coroutines.Dispatchers
@@ -25,14 +27,16 @@ data class AppState(
     val file: FileContent? = null, val agents: List<AgentSummary> = emptyList(), val agent: AgentSummary? = null,
     val messages: List<ChatItem> = emptyList(), val socketStatus: String = "disconnected",
     val capabilities: AgentCapabilities? = null, val sessionDetails: SessionDetails? = null, val sessions: List<SessionInfo> = emptyList(),
-    val extensionRequest: ExtensionRequest? = null, val extensionStatus: String? = null, val extensionTitle: String? = null, val extensionWidgets: Map<String,List<String>> = emptyMap()
+    val extensionRequest: ExtensionRequest? = null, val extensionStatus: String? = null, val extensionTitle: String? = null, val extensionWidgets: Map<String,List<String>> = emptyMap(),
+    val mentionWorkspace: Workspace? = null, val mentionPath: String? = null, val mentionEntries: List<TreeEntry> = emptyList()
 )
 
-class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: SecureTokenStore) : ViewModel() {
+class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: SecureTokenStore, private val notifier: AgentNotifier) : ViewModel() {
     private val mutable = MutableStateFlow(AppState(profiles = profiles.list()))
     val state = mutable.asStateFlow()
     private var client: RemotePiClient? = null
     private var socket: AgentSocket? = null
+    private var notificationMonitor: AgentNotificationMonitor? = null
     private var streamKey = UUID.randomUUID().toString()
 
     init { profiles.selectedId()?.let { id -> mutable.value.profiles.find { it.id == id }?.let(::connect) } }
@@ -59,13 +63,14 @@ class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: 
             withContext(Dispatchers.IO) { api.login(); val status=api.status();if(status.protocolVersion!=1)throw RemotePiException("PROTOCOL_INCOMPATIBLE","Server protocol ${status.protocolVersion} is not supported") }
             val (workspaces, agents) = withContext(Dispatchers.IO) { api.workspaces() to api.agents() }
             client = api; profiles.select(profile.id)
+            notificationMonitor?.close();notificationMonitor=AgentNotificationMonitor(profile.id,api,profiles,agents,notifier::completed).also { it.connect() }
             update { it.copy(screen = Screen.HOME, activeProfile = profile.copy(lastConnectedAt = Instant.now().toString()), connecting = false, workspaces = workspaces, agents = agents) }
         }.onFailure(::fail) }
     }
-    fun disconnect() { socket?.close(); socket = null; client = null; update { AppState(profiles = profiles.list()) } }
+    fun disconnect() { socket?.close(); socket = null; notificationMonitor?.close();notificationMonitor=null; client = null; update { AppState(profiles = profiles.list()) } }
     fun goHome() { socket?.close(); socket = null; update { it.copy(screen = Screen.HOME, file = null) }; refresh() }
     fun showServers() = update { it.copy(screen = Screen.SERVERS) }
-    fun refresh() { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.workspaces() to api.agents() } }.onSuccess { pair -> update { it.copy(workspaces = pair.first, agents = pair.second) } }.onFailure(::fail) } }
+    fun refresh() { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.workspaces() to api.agents() } }.onSuccess { pair -> notificationMonitor?.update(pair.second);update { it.copy(workspaces = pair.first, agents = pair.second) } }.onFailure(::fail) } }
 
     fun addWorkspace(label: String, rootPath: String) { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.addWorkspace(label, rootPath) } }.onSuccess { workspace -> update { it.copy(workspaces = it.workspaces + workspace) } }.onFailure(::fail) } }
     fun browse(workspace: Workspace, path: String = ".") {
@@ -82,7 +87,7 @@ class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: 
     private fun loadFile(workspace: Workspace, path: String, offset: Long = 0) { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.file(workspace.id, path, offset) } }.onSuccess { file -> update { it.copy(file = file) } }.onFailure(::fail) } }
     fun nextFilePage() { val s = mutable.value; val f = s.file ?: return; val ws = s.workspace ?: return; if (f.offset + f.limit < f.size) loadFile(ws, f.path, f.offset + f.limit) }
 
-    fun createAgent(workspace: Workspace, cwd: String, sessionFile: String? = null) { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.createAgent(workspace.id, cwd, sessionFile) } }.onSuccess { agent -> update { it.copy(agents = it.agents + agent) }; openAgent(agent) }.onFailure(::fail) } }
+    fun createAgent(workspace: Workspace, cwd: String, sessionFile: String? = null) { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.createAgent(workspace.id, cwd, sessionFile) } }.onSuccess { agent -> update { it.copy(agents = it.agents + agent) };notificationMonitor?.update(mutable.value.agents); openAgent(agent) }.onFailure(::fail) } }
     fun loadSessions(workspace: Workspace, cwd: String) { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.sessions(workspace.id, cwd) } }.onSuccess { sessions -> update { it.copy(sessions = sessions) } }.onFailure(::fail) } }
     fun stopAgent(agent: AgentSummary) { val api = client ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.stop(agent.agentId) } }.onSuccess { refresh() }.onFailure(::fail) } }
     fun openAgent(agent: AgentSummary) {
@@ -127,6 +132,7 @@ class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: 
     }
     private fun appendDelta(items: MutableList<ChatItem>, prefix: String, delta: String, kind: ChatItem.Kind) { val key = "$prefix-$streamKey"; val i = items.indexOfLast { it.key == key }; if (i >= 0) items[i] = items[i].copy(text = items[i].text + delta) else items += ChatItem(key, "assistant", delta, kind) }
     fun send(message: String, command: String = "prompt") { val api = client ?: return; val agent = mutable.value.agent ?: return; update { it.copy(messages = it.messages + ChatItem(UUID.randomUUID().toString(), "user", message)) }; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.command(agent.agentId, command, message) } }.onFailure(::fail) } }
+    fun setSessionName(name:String) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.setSessionName(agent.agentId,name)} }.onSuccess { details->update { it.copy(sessionDetails=details) } }.onFailure(::fail) } }
     fun setModel(model: ModelInfo) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.setModel(agent.agentId,model.provider,model.id)} }.onSuccess { value->update { it.copy(capabilities=value) } }.onFailure(::fail) } }
     fun setThinking(level:String) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.setThinking(agent.agentId,level)} }.onSuccess { value->update { it.copy(capabilities=value) } }.onFailure(::fail) } }
     fun compact(instructions:String="") { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.compact(agent.agentId,instructions)} }.onSuccess { reloadMessages(agent) }.onFailure(::fail) } }
@@ -134,9 +140,15 @@ class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: 
     fun fork(entryId:String) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.fork(agent.agentId,entryId)} }.onSuccess { forked->update { it.copy(agents=it.agents+forked) };openAgent(forked) }.onFailure(::fail) } }
     fun respondExtension(value:Any?) { val request=mutable.value.extensionRequest?:return;val api=client?:return;val agent=mutable.value.agent?:return;update { it.copy(extensionRequest=null) };viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.extensionResponse(agent.agentId,request.requestId,value)} }.onFailure(::fail) } }
     fun abort() { val api = client ?: return; val agent = mutable.value.agent ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.command(agent.agentId, "abort") } }.onFailure(::fail) } }
-    override fun onCleared() { socket?.close() }
+    fun startMention() { val state=mutable.value;val agent=state.agent?:return;val workspace=state.workspaces.find { it.id==agent.workspaceId }?:return;val path=MentionPaths.initialPath(workspace.rootPath,agent.cwd);loadMention(workspace,path) }
+    fun openMentionDirectory(name:String) { val state=mutable.value;val workspace=state.mentionWorkspace?:return;val base=state.mentionPath?:".";loadMention(workspace,MentionPaths.child(base,name)) }
+    fun mentionUp() { val state=mutable.value;val workspace=state.mentionWorkspace?:return;val path=state.mentionPath?:return;if(path==".")return;loadMention(workspace,MentionPaths.parent(path)) }
+    fun cancelMention()=update { it.copy(mentionWorkspace=null,mentionPath=null,mentionEntries=emptyList()) }
+    fun mentionText(name:String?=null):String? { val state=mutable.value;val workspace=state.mentionWorkspace?:return null;val agent=state.agent?:return null;val base=state.mentionPath?:return null;val relative=if(name==null)base else MentionPaths.child(base,name);return MentionPaths.reference(workspace.rootPath,agent.cwd,relative) }
+    private fun loadMention(workspace:Workspace,path:String){val api=client?:return;update { it.copy(mentionWorkspace=workspace,mentionPath=path,mentionEntries=emptyList()) };viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.tree(workspace.id,path)} }.onSuccess { entries->update { it.copy(mentionEntries=entries) } }.onFailure(::fail) } }
+    override fun onCleared() { socket?.close();notificationMonitor?.close() }
 }
 
-class RemotePiViewModelFactory(private val profiles: ProfileStore, private val tokens: SecureTokenStore) : ViewModelProvider.Factory {
-    @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T = RemotePiViewModel(profiles, tokens) as T
+class RemotePiViewModelFactory(private val profiles: ProfileStore, private val tokens: SecureTokenStore, private val notifier: AgentNotifier) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(modelClass: Class<T>): T = RemotePiViewModel(profiles, tokens, notifier) as T
 }

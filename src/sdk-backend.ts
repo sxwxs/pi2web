@@ -32,6 +32,7 @@ export class SdkBackend implements AgentBackend {
   compact(instructions?:string){return this.session.compact(instructions)}
   async setModel(provider:string,modelId:string){const model=this.session.modelRuntime.getModel(provider,modelId);if(!model)throw Object.assign(new Error('Model not found'),{code:'MODEL_NOT_FOUND'});await this.session.setModel(model)}
   async setThinkingLevel(level:string){if(!['off','minimal','low','medium','high','xhigh'].includes(level))throw Object.assign(new Error('Invalid thinking level'),{code:'INVALID_THINKING_LEVEL'});this.session.setThinkingLevel(level as any)}
+  async setSessionName(name:string){const value=name.trim();if(!value||value.length>200)throw Object.assign(new Error('Session name must be 1-200 characters'),{code:'INVALID_SESSION_NAME'});this.session.setSessionName(value)}
   navigate(entryId:string){return this.session.navigateTree(entryId)}
   async fork(entryId:string){if(!this.session.sessionManager.getEntry(entryId))throw Object.assign(new Error('Session entry not found'),{code:'SESSION_ENTRY_NOT_FOUND'});return this.session.sessionManager.createBranchedSession(entryId)}
   async extensionResponse(requestId:string,value:unknown){const pending=this.pendingUi.get(requestId);if(!pending)throw Object.assign(new Error('Extension UI request not found'),{code:'EXTENSION_REQUEST_NOT_FOUND'});clearTimeout(pending.timer);this.pendingUi.delete(requestId);pending.resolve(value)}

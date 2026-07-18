@@ -19,4 +19,6 @@ class ProfileStore(context: Context) {
     fun select(id: String) { prefs.edit().putString("selected", id).apply() }
     fun cursor(agentId: String): Long = prefs.getLong("cursor_$agentId", 0)
     fun setCursor(agentId: String, sequence: Long) { prefs.edit().putLong("cursor_$agentId", sequence).apply() }
+    fun notificationCursor(serverId: String, agentId: String): Long = prefs.getLong("notify_${serverId}_$agentId", -1)
+    fun setNotificationCursor(serverId: String, agentId: String, sequence: Long) { prefs.edit().putLong("notify_${serverId}_$agentId", sequence).apply() }
 }

@@ -27,7 +27,7 @@ data class ExtensionRequest(val requestId: String, val kind: String, val title: 
 
 data class AgentEventEnvelope(
     val type: String, val agentId: String?, val eventId: String?, val sequence: Long?, val event: JsonElement?,
-    val requestId: String? = null, val success: Boolean? = null, val lastSequence: Long? = null,
+    val requestId: String? = null, val success: Boolean? = null, val lastSequence: Long? = null, val timestamp: Long? = null, val currentSequence: Long? = null,
     val state: JsonElement? = null, val messages: List<JsonElement>? = null
 )
 

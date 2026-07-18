@@ -14,6 +14,9 @@
 - Session 新建/恢复、tree navigation 和 compact
 - Model 与 thinking level 查询和切换
 - Extension UI select/confirm/input/editor/notify/status 映射
+- Session 自定义名称
+- 输入 `@` 从 Agent cwd 开始浏览目录、选择文件/目录并自动插入引用
+- 多 Agent 完成事件监听和 Android 本地通知（Unix 时间戳转换为设备本地时间）
 
 ## 构建
 

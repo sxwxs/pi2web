@@ -48,6 +48,7 @@ class RemotePiClient(private val baseUrl: String, private val token: String, val
     fun capabilities(id: String): AgentCapabilities = call("GET", "/api/v1/agents/$id/capabilities")
     fun session(id: String): SessionDetails = call("GET", "/api/v1/agents/$id/session")
     fun setModel(id: String, provider: String, modelId: String): AgentCapabilities = call("POST", "/api/v1/agents/$id/model", mapOf("provider" to provider, "modelId" to modelId))
+    fun setSessionName(id: String, name: String): SessionDetails = call("POST", "/api/v1/agents/$id/session-name", mapOf("name" to name))
     fun setThinking(id: String, level: String): AgentCapabilities = call("POST", "/api/v1/agents/$id/thinking", mapOf("level" to level))
     fun compact(id: String, instructions: String = ""): JsonElement = call("POST", "/api/v1/agents/$id/compact", mapOf("instructions" to instructions))
     fun navigate(id: String, entryId: String): JsonElement = call("POST", "/api/v1/agents/$id/navigate", mapOf("entryId" to entryId))

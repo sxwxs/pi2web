@@ -41,6 +41,12 @@ class RemotePiClientTest {
         assertTrue(request.body.readUtf8().contains("/srv/project"))
     }
 
+    @Test fun `sets session name`() {
+        server.enqueue(json("""{"data":{"sessionId":"s1","sessionFile":null,"sessionName":"Review","leafId":null,"entries":[],"tree":[]}}"""))
+        assertEquals("Review", client.setSessionName("agent-1", "Review").sessionName)
+        assertTrue(server.takeRequest().body.readUtf8().contains("Review"))
+    }
+
     @Test fun `decodes model and thinking capabilities`() {
         server.enqueue(json("""{"data":{"model":{"provider":"p","id":"m"},"models":[{"provider":"p","id":"m"}],"thinkingLevel":"high","thinkingLevels":["off","high"],"supportsThinking":true}}"""))
         val result = client.capabilities("agent-1")
