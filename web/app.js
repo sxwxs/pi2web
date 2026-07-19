@@ -5,7 +5,7 @@
     base: localStorage.rpBase || location.origin, token: '', workspace: null, workspaces: [], treePath: '.',
     filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], ws: null,
     reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
-    mentionPath: '.', extensionStatus: new Map(), widgets: new Map(), connected: false,
+    mentionPath: '.', extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false,
   };
   $('api').value = state.base;
   $('pairBase').value = state.base;
@@ -136,33 +136,50 @@
   const closeMention = () => $('mentionPicker').hidden = true;
 
   function agentLabel(agent) { return agent.sessionName || agent.name || agent.agentId; }
+  const formatTokens = value => { const n=Number(value); if(!Number.isFinite(n)||n<=0)return '0'; if(n>=1e6)return `${(n/1e6).toFixed(1)}M`;if(n>=1e3)return `${(n/1e3).toFixed(n>=1e4?0:1)}k`;return String(Math.round(n)); };
+  const usageLevel = usage => Number(usage?.percent)>90?'usage-danger':Number(usage?.percent)>70?'usage-warning':'';
+  const usageText = usage => { if(!usage)return 'Context ?';const percent=usage.percent==null?'?':`${Number(usage.percent).toFixed(1)}%`;return `${percent} · ${formatTokens(usage.tokens)}/${formatTokens(usage.contextWindow)}`; };
+  function renderAgentList() {
+    const selected=state.agent?.agentId;
+    $('agents').replaceChildren(...state.agents.map(agent => {
+      const usage=state.contexts.get(agent.agentId),el=document.createElement('div');el.dataset.agentId=agent.agentId;el.className=`agent ${agent.status}${selected===agent.agentId?' selected':''}`;
+      el.innerHTML=`<div class="agent-top"><b>${esc(agentLabel(agent))}</b><span class="state-badge state-${esc(agent.status)}">${esc(agent.status)}</span></div><small>${esc(agent.cwd)}</small><div class="agent-context ${usageLevel(usage)}"><span>Context</span><div class="mini-track"><i style="width:${Math.min(100,Math.max(0,Number(usage?.percent)||0))}%"></i></div><span>${esc(usageText(usage))}</span></div>`;
+      el.onclick=()=>selectAgent(agent);return el;
+    }));
+  }
+  async function loadAgentContexts(agents=state.agents) {
+    await Promise.allSettled(agents.map(async agent=>{const session=await api(`/api/v1/agents/${agent.agentId}/session`);if(session.sessionName)agent.sessionName=session.sessionName;state.contexts.set(agent.agentId,session.contextUsage||null);}));
+    renderAgentList();if(state.agent)updateAgentHeader();
+  }
   async function refreshAgents(selectPrevious = false) {
     if (!state.connected) return;
     state.agents = await api('/api/v1/agents'); const previous = state.agent?.agentId || localStorage.rpAgentId;
-    $('agents').replaceChildren(...state.agents.map(agent => {
-      const el = document.createElement('div'); el.className = `agent${previous === agent.agentId ? ' selected' : ''}`;
-      el.innerHTML = `<b>${esc(agentLabel(agent))}</b><small>${esc(agent.status)} · ${esc(agent.cwd)}</small>`;
-      el.onclick = () => selectAgent(agent); return el;
-    }));
+    if(state.agent){const fresh=state.agents.find(x=>x.agentId===state.agent.agentId);if(fresh)state.agent=Object.assign(state.agent,fresh);}
+    renderAgentList();void loadAgentContexts([...state.agents]);
     if (selectPrevious) { const found = state.agents.find(x => x.agentId === previous); if (found) await selectAgent(found); else connectSocket(); }
-    else connectSocket();
+    else if (!state.ws) connectSocket();
+  }
+  function setAgentStatus(agentId,status) {
+    const agent=state.agents.find(x=>x.agentId===agentId);if(!agent){void refreshAgents();return null;}agent.status=status;if(state.agent?.agentId===agentId)state.agent.status=status;renderAgentList();updateAgentHeader();return agent;
   }
   function updateAgentHeader(agent = state.agent) {
     if (!agent) return;
-    $('agentTitle').textContent = agentLabel(agent); $('agentStatus').textContent = `${agent.agentId} · ${agent.status} · ${agent.cwd}`;
+    $('agentTitle').textContent = agentLabel(agent); $('agentStatus').textContent = `${agent.agentId} · ${agent.cwd}`;
+    const badge=$('agentStateBadge');badge.textContent=agent.status;badge.className=`state-badge state-${agent.status}`;
+    const usage=state.contexts.get(agent.agentId),panel=$('contextUsage');panel.hidden=false;$('contextText').textContent=`Context ${usageText(usage)}`;const percent=Math.min(100,Math.max(0,Number(usage?.percent)||0));$('contextBar').style.width=`${percent}%`;panel.className=`context-usage ${usageLevel(usage)}`;
   }
   async function selectAgent(agent) {
     state.agent = agent; localStorage.rpAgentId = agent.agentId; updateAgentHeader();
     if (state.workspace && isInside(clean(agent.cwd), clean(state.workspace.rootPath))) $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
     $('messages').replaceChildren(); state.streams.clear();
     try { renderMessages(await api(`/api/v1/agents/${agent.agentId}/messages`)); await loadSessionIdentity(); } catch (error) { addCard('加载消息失败', error.message, 'error', true); }
-    document.querySelectorAll('.agent').forEach((el, i) => el.classList.toggle('selected', state.agents[i]?.agentId === agent.agentId));
+    renderAgentList();
     connectSocket();
   }
   async function loadSessionIdentity() {
     if (!state.agent) return;
     const session = await api(`/api/v1/agents/${state.agent.agentId}/session`);
-    if (session.sessionName) { state.agent.sessionName = session.sessionName; updateAgentHeader(); }
+    if (session.sessionName) state.agent.sessionName = session.sessionName; state.contexts.set(state.agent.agentId,session.contextUsage||null);renderAgentList();updateAgentHeader();
   }
 
   function textContent(content) {
@@ -217,13 +234,14 @@
     if (message.type !== 'agent_event') return;
     const key = `rpSeq:${message.agentId}`, last = Number(localStorage[key] || 0); if (message.sequence <= last) return; localStorage[key] = message.sequence;
     const ev = message.event || {}, selected = state.agent?.agentId === message.agentId;
-    if (ev.type === 'agent_end') {
-      const agent = state.agents.find(x => x.agentId === message.agentId); if (agent) agent.status = 'idle';
-      if (selected) { state.streams.clear(); updateAgentHeader(agent || state.agent); }
-      notifyComplete(agent || {agentId:message.agentId}, message.timestamp); refreshAgents();
-    }
+    let eventAgent=state.agents.find(x=>x.agentId===message.agentId);
+    if (ev.type === 'agent_start' || ev.type === 'auto_retry_start') eventAgent=setAgentStatus(message.agentId,'streaming')||eventAgent;
+    else if (ev.type === 'agent_end') {
+      const final=!ev.willRetry;eventAgent=setAgentStatus(message.agentId,final?'idle':'streaming')||eventAgent;
+      if(final){if(selected)state.streams.clear();notifyComplete(eventAgent||{agentId:message.agentId},message.timestamp);if(eventAgent)void loadAgentContexts([eventAgent]);}
+    } else if (ev.type === 'agent_settled') { eventAgent=setAgentStatus(message.agentId,'idle')||eventAgent;if(eventAgent)void loadAgentContexts([eventAgent]); }
     if (!selected) return;
-    if (ev.type === 'agent_start') { $('messages').querySelector('.empty')?.remove(); state.agent.status = 'streaming'; updateAgentHeader(); }
+    if (ev.type === 'agent_start') { $('messages').querySelector('.empty')?.remove(); }
     else if (ev.type === 'message_update') {
       const update = ev.assistantMessageEvent || {};
       if (update.type === 'text_delta') { const c=ensureStream('assistant','Assistant','assistant'); c.body.textContent += update.delta || ''; c.summary.firstChild.textContent = (c.body.textContent || 'Assistant').slice(0,60); }
@@ -237,7 +255,7 @@
     else if (ev.type === 'extension_ui_widget') { ev.content ? state.widgets.set(ev.key, ev.content) : state.widgets.delete(ev.key); renderWidgets(); }
     else if (ev.type === 'extension_ui_title') { state.agent.sessionName = ev.title; updateAgentHeader(); }
     else if (ev.type === 'extension_ui_working_message') { ev.message ? state.extensionStatus.set('working',ev.message) : state.extensionStatus.delete('working'); renderExtensionStatus(); }
-    else if (!['message_start','message_end','agent_end'].includes(ev.type)) addCard(ev.title || ev.type || 'Event', JSON.stringify(ev, null, 2), 'system', false, message.timestamp);
+    else if (!['message_start','message_end','agent_end','agent_settled'].includes(ev.type)) addCard(ev.title || ev.type || 'Event', JSON.stringify(ev, null, 2), 'system', false, message.timestamp);
     $('messages').scrollTop = $('messages').scrollHeight;
   }
   function renderExtensionStatus() { let row=$('extensionStatus'); if (!state.extensionStatus.size) { row?.remove(); return; } if(!row){row=document.createElement('div');row.id='extensionStatus';row.className='status-row';$('widgets').after(row);} row.textContent=[...state.extensionStatus.values()].join(' · '); }
