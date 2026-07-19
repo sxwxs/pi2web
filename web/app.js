@@ -247,15 +247,26 @@
     if (!state.connected) return;
     clearTimeout(state.reconnectTimer); state.manuallyClosed = true; const previous=state.ws; state.ws=null; previous?.close(); state.manuallyClosed = false;
     const ws = new WebSocket(state.base.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + state.token]); state.ws = ws;
-    ws.onopen = () => { state.reconnectAttempt = 0; $('status').textContent = '已配对 · 实时'; for (const agent of state.agents) { const key=`rpSeq:${agent.agentId}`, cursor=localStorage[key]; ws.send(JSON.stringify(cursor===undefined?{type:'subscribe',agentId:agent.agentId,fromNow:true}:{type:'subscribe',agentId:agent.agentId,lastSequence:Number(cursor)})); } };
+    ws.onopen = () => { state.reconnectAttempt = 0; $('status').textContent = '已配对 · 实时'; for (const agent of state.agents) { const key=`rpSeq:${agent.agentId}`, cursor=localStorage[key]; ws.send(JSON.stringify(cursor===undefined?{type:'subscribe',agentId:agent.agentId,fromNow:true}:{type:'subscribe',agentId:agent.agentId,lastSequence:Number(cursor)})); } ws.send(JSON.stringify({type:'subscribe_all',fromNow:true})); };
     ws.onmessage = event => { try { handleAgentEvent(JSON.parse(event.data)); } catch (error) { console.error(error); } };
     ws.onclose = () => { if (!state.connected || state.manuallyClosed || ws !== state.ws) return; $('status').textContent = '正在重连…'; const delays=[1000,2000,4000,8000,15000,30000], delay=delays[Math.min(state.reconnectAttempt++,delays.length-1)]; state.reconnectTimer=setTimeout(connectSocket,delay); };
     ws.onerror = () => {};
   }
-  async function notifyComplete(agent, timestamp) {
-    if (!('Notification' in window) || document.visibilityState === 'visible') return;
-    if (Notification.permission === 'default') await Notification.requestPermission();
-    if (Notification.permission === 'granted') new Notification('Agent 完成', {body:`${agentLabel(agent)} 已转为空闲\n${new Date(timestamp*1000).toLocaleString()} · Unix ${timestamp}`, timestamp:timestamp*1000, tag:`remote-pi-${agent.agentId}-${timestamp}`});
+  function updateNotificationButton() {
+    const button=$('notifications');
+    if (!('Notification' in window)) { button.textContent='通知不受支持'; button.disabled=true; return; }
+    button.disabled=Notification.permission==='denied';
+    button.textContent=Notification.permission==='granted'?'通知已启用':Notification.permission==='denied'?'通知已禁用':'启用通知';
+  }
+  async function enableNotifications() {
+    if (!('Notification' in window)) return toast('当前浏览器不支持系统通知');
+    const permission=await Notification.requestPermission(); updateNotificationButton();
+    toast(permission==='granted'?'已启用所有 Agent 的完成通知':'未获得通知权限，请在浏览器设置中开启');
+  }
+  function notifyComplete(agent, timestamp) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const occurredAt=Number(timestamp)||Math.floor(Date.now()/1000);
+    try { new Notification('Agent 完成', {body:`${agentLabel(agent)} 已转为空闲\n本地时间：${new Date(occurredAt*1000).toLocaleString()}\nUnix 时间戳：${occurredAt}`, timestamp:occurredAt*1000, tag:`remote-pi-${agent.agentId}-${occurredAt}`}); } catch (error) { console.error('Unable to show notification',error); }
   }
 
   function modal(title, build, okText = '确定') {
@@ -287,7 +298,7 @@
 
   $('pairCancel').onclick=()=>$('pairDialog').close();
   $('pairForm').onsubmit=async event=>{event.preventDefault();$('pairSubmit').disabled=true;try{await connect($('pairBase').value,$('pairToken').value);}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
-  $('connect').onclick=openPair; $('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
+  $('connect').onclick=openPair; $('notifications').onclick=enableNotifications; $('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){await post('/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit));$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit);
@@ -299,5 +310,5 @@
   $('input').onkeydown=event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();return;}if(event.key==='Escape')closeMention();};$('input').oninput=()=>{const before=$('input').value.slice(0,$('input').selectionStart);if(/(^|\s)@[^\s]*$/.test(before)&&$('mentionPicker').hidden)openMention(state.treePath);};
   $('mentionUp').onclick=()=>openMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
   window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();});
-  openPair();
+  updateNotificationButton(); openPair();
 })();
