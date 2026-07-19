@@ -34,7 +34,7 @@ export class AgentManager {
  events(id:string,last=0){return this.get(id).events.filter(e=>e.sequence>last)}
  currentSequence(id:string){return this.get(id).nextSequence-1}
  async snapshot(id:string){const a=this.get(id);return {state:await a.backend.getState(),messages:await a.backend.getMessages(),lastSequence:a.nextSequence-1}}
- hasReplayGap(id:string,last:number){const a=this.get(id);return last>0&&a.events.length>0&&last<a.events[0].sequence-1}
+ hasReplayGap(id:string,last:number){const a=this.get(id);const current=a.nextSequence-1;return last>current||(last>0&&a.events.length>0&&last<a.events[0].sequence-1)}
  subscribe(id:string,listener:(e:{id:string,sequence:number,timestamp:number,event:AgentEvent})=>void){if(!this.listeners.has(id))this.listeners.set(id,new Set());this.listeners.get(id)!.add(listener);return()=>this.listeners.get(id)?.delete(listener)}
  async dispose(id:string){const a=this.get(id);await a.backend.dispose();a.record.status='stopped';}
  async state(id:string){return this.get(id).backend.getState()} async messages(id:string){return this.get(id).backend.getMessages()}

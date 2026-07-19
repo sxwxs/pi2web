@@ -31,7 +31,7 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。
 
 ## 连接开发 Server
 
-模拟器访问宿主机通常使用 `http://10.0.2.2:8787`。真机使用 VPN/Tailscale、局域网地址或 HTTPS 反向代理。Remote Pi Server 默认只监听 `127.0.0.1`，请勿为测试直接裸露到公网。
+模拟器访问宿主机通常使用 `http://10.0.2.2:11318`。真机使用 VPN/Tailscale、局域网地址或 HTTPS 反向代理。Remote Pi Server 默认只监听 `127.0.0.1`，请勿为测试直接裸露到公网。
 
 Release build 的 manifest 禁止 cleartext traffic，并且客户端会拒绝非 `https://` URL。TLS 错误不会绕过或静默接受。
 

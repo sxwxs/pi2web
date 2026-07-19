@@ -204,6 +204,13 @@
     card.body.append(controls);
   }
   function handleAgentEvent(message) {
+    if (message.type === 'subscribed') {
+      const key = `rpSeq:${message.agentId}`, saved = Number(localStorage[key] || 0), current = Number(message.currentSequence || 0);
+      // Agent event sequences restart when the server restores an Agent. A cursor
+      // from the previous process must not cause every new event to be discarded.
+      if (saved > current) localStorage[key] = current;
+      return;
+    }
     if (message.type === 'agent_snapshot') {
       localStorage[`rpSeq:${message.agentId}`] = message.lastSequence; if (state.agent?.agentId === message.agentId) { $('messages').replaceChildren(); renderMessages(message.messages); } return;
     }
@@ -288,7 +295,7 @@
   $('newAgent').onclick=createAgent;$('abort').onclick=()=>state.agent&&post(`/api/v1/agents/${state.agent.agentId}/abort`).catch(e=>toast(e.message));$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});state.agent=null;await refreshAgents();}};
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
   $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await post(`/api/v1/agents/${state.agent.agentId}/compact`,{instructions:instructions||undefined});toast('Compact 完成');}};
-  $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;const mode=$('sendMode').value;$('messages').querySelector('.empty')?.remove();addCard(text.slice(0,60),text,'user');$('input').value='';try{await post(`/api/v1/agents/${state.agent.agentId}/${mode}`,{message:text});}catch(e){addCard('发送失败',e.message,'error',true);}};
+  $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();addCard(text.slice(0,60),text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){const messages=await api(`/api/v1/agents/${agentId}/messages`);$('messages').replaceChildren();state.streams.clear();renderMessages(messages);}}catch(e){addCard('发送失败',e.message,'error',true);}};
   $('input').onkeydown=event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();return;}if(event.key==='Escape')closeMention();};$('input').oninput=()=>{const before=$('input').value.slice(0,$('input').selectionStart);if(/(^|\s)@[^\s]*$/.test(before)&&$('mentionPicker').hidden)openMention(state.treePath);};
   $('mentionUp').onclick=()=>openMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
   window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();});

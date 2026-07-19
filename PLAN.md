@@ -216,7 +216,7 @@ interface AgentBackend {
 ```bash
 remote-pi --print-access-token
 remote-pi --rotate-access-token
-remote-pi --host 127.0.0.1 --port 8787
+remote-pi --host 127.0.0.1 --port 11318
 ```
 
 认证接口：
@@ -1007,7 +1007,7 @@ Web UI 第一版不提供文件编辑、删除、重命名、上传和执行任�
 优先支持以下方式：
 
 ```bash
-remote-pi --host 127.0.0.1 --port 8787
+remote-pi --host 127.0.0.1 --port 11318
 ```
 
 远程访问通过 SSH tunnel、Tailscale 或反向代理实现。暂不把公网直连、自动证书和云端部署作为 MVP 目标。

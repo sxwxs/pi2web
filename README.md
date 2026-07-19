@@ -11,12 +11,12 @@ npm install -g remote-pi
 remote-pi
 ```
 
-启动后访问终端显示的地址（默认 <http://127.0.0.1:8787>）。服务首次启动只在终端显示一次配对码；Web UI **必须由用户手动输入配对码**，不会从 URL 或服务端自动注入。连接成功后页面会询问是否保存到 localStorage；只有用户明确确认后才会保存，请仅在可信设备上使用。
+启动后访问终端显示的地址（默认 <http://127.0.0.1:11318>）。服务首次启动只在终端显示一次配对码；Web UI **必须由用户手动输入配对码**，不会从 URL 或服务端自动注入。连接成功后页面会询问是否保存到 localStorage；只有用户明确确认后才会保存，请仅在可信设备上使用。
 
 常用选项：
 
 ```bash
-remote-pi --host 127.0.0.1 --port 8787
+remote-pi --host 127.0.0.1 --port 11318
 remote-pi --data-dir ~/.pi/remote-pi
 remote-pi --rotate-access-token   # 旧配对码立即失效，输出新配对码
 remote-pi --help
@@ -30,7 +30,7 @@ remote-pi --help
 npm install
 npm run check
 npm test
-npm run dev -- --port 8787
+npm run dev -- --port 11318
 ```
 
 元数据默认保存在 `~/.pi/remote-pi`。`auth.json` 只保存配对码的 SHA-256 hash，权限为 `0600`。Workspace/Agent 元数据分别保存在 `workspaces.json` 和 `agents.json`；完整 Session 仍由 Pi 管理。
