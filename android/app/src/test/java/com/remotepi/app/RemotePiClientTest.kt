@@ -2,12 +2,14 @@ package com.remotepi.app
 
 import com.remotepi.app.data.RemotePiException
 import com.remotepi.app.network.RemotePiClient
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 class RemotePiClientTest {
     private lateinit var server: MockWebServer
@@ -39,6 +41,13 @@ class RemotePiClientTest {
         val request = server.takeRequest()
         assertEquals("POST", request.method)
         assertTrue(request.body.readUtf8().contains("/srv/project"))
+    }
+
+    @Test fun `long running prompt does not use normal HTTP read timeout`() {
+        server.enqueue(json("""{"data":{"success":true}}""").setBodyDelay(200, TimeUnit.MILLISECONDS))
+        val shortHttp = OkHttpClient.Builder().readTimeout(20, TimeUnit.MILLISECONDS).build()
+        val commandClient = RemotePiClient(server.url("/").toString(), "secret", shortHttp)
+        assertTrue(commandClient.command("agent-1", "prompt", "work"))
     }
 
     @Test fun `sets session name`() {

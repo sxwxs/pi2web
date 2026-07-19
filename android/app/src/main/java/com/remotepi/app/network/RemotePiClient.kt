@@ -15,6 +15,8 @@ import java.util.concurrent.TimeUnit
 class RemotePiClient(private val baseUrl: String, private val token: String, val http: OkHttpClient = defaultClient) {
     private val gson = Gson()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
+    // prompt/steer/follow-up currently complete only when the Pi turn ends; never apply the normal 30s HTTP read timeout.
+    private val commandHttp = http.newBuilder().readTimeout(0, TimeUnit.MILLISECONDS).callTimeout(0, TimeUnit.MILLISECONDS).build()
     private fun url(path: String, query: Map<String, String> = emptyMap()): HttpUrl {
         val root = baseUrl.trimEnd('/').toHttpUrlOrNull() ?: throw RemotePiException("INVALID_URL", "Invalid server URL")
         return root.newBuilder().apply {
@@ -22,10 +24,10 @@ class RemotePiClient(private val baseUrl: String, private val token: String, val
             query.forEach { (key, value) -> addQueryParameter(key, value) }
         }.build()
     }
-    private inline fun <reified T> call(method: String, path: String, body: Any? = null, query: Map<String, String> = emptyMap()): T {
+    private inline fun <reified T> call(method: String, path: String, body: Any? = null, query: Map<String, String> = emptyMap(), callClient: OkHttpClient = http): T {
         val request = Request.Builder().url(url(path, query)).header("Authorization", "Bearer $token")
             .header("X-Remote-Pi-Protocol", "1").method(method, body?.let { gson.toJson(it).toRequestBody(jsonType) }).build()
-        http.newCall(request).execute().use { response ->
+        callClient.newCall(request).execute().use { response ->
             val raw = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 val error = runCatching { gson.fromJson(raw, ErrorEnvelope::class.java).error }.getOrNull()
@@ -54,7 +56,7 @@ class RemotePiClient(private val baseUrl: String, private val token: String, val
     fun navigate(id: String, entryId: String): JsonElement = call("POST", "/api/v1/agents/$id/navigate", mapOf("entryId" to entryId))
     fun fork(id: String, entryId: String): AgentSummary = call("POST", "/api/v1/agents/$id/fork", mapOf("entryId" to entryId))
     fun extensionResponse(id: String, requestId: String, value: Any?): Boolean = call<JsonObject>("POST", "/api/v1/agents/$id/extension-response", mapOf("requestId" to requestId, "value" to value)).get("success").asBoolean
-    fun command(id: String, command: String, message: String = ""): Boolean = call<JsonObject>("POST", "/api/v1/agents/$id/$command", mapOf("message" to message)).get("success").asBoolean
+    fun command(id: String, command: String, message: String = ""): Boolean = call<JsonObject>("POST", "/api/v1/agents/$id/$command", mapOf("message" to message), callClient = commandHttp).get("success").asBoolean
     fun stop(id: String): Boolean = call<JsonObject>("DELETE", "/api/v1/agents/$id").get("stopped").asBoolean
     /** OkHttp's WebSocket API expects an HTTP(S) URL and performs the WS(S) upgrade itself. */
     fun wsUrl(): HttpUrl = url("/api/v1/ws")
