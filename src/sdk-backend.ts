@@ -21,7 +21,7 @@ export class SdkBackend implements AgentBackend {
   steer(message:string){return this.session.steer(message)}
   followUp(message:string){return this.session.followUp(message)}
   abort(){return this.session.abort()}
-  async getState():Promise<AgentState>{return {agentId:this.agentId,sessionId:this.session.sessionId,sessionFile:this.session.sessionFile,cwd:this.cwd,status:this.disposed?'stopped':this.session.isStreaming?'streaming':'idle'}}
+  async getState():Promise<AgentState>{return {agentId:this.agentId,sessionId:this.session.sessionId,sessionFile:this.session.sessionFile,sessionName:this.session.sessionName,cwd:this.cwd,status:this.disposed?'stopped':this.session.isStreaming?'streaming':'idle'}}
   async getMessages():Promise<unknown[]>{return [...this.session.state.messages]}
   async getCapabilities(){
     const current=this.session.model as any;

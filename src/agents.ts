@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { relative as pathRelative } from 'node:path';
 import type { WorkspaceStore } from './workspaces.js';
 import { createSdkBackend } from './sdk-backend.js';
-export type AgentState={status:'starting'|'idle'|'streaming'|'waiting_for_user'|'error'|'stopping'|'stopped',agentId:string,sessionId:string,sessionFile?:string,cwd:string};
+export type AgentState={status:'starting'|'idle'|'streaming'|'waiting_for_user'|'error'|'stopping'|'stopped',agentId:string,sessionId:string,sessionFile?:string,sessionName?:string,cwd:string};
 export type AgentEvent={type:string,[key:string]:unknown};
 export interface AgentBackend {prompt(message:string):Promise<void>;steer(message:string):Promise<void>;followUp(message:string):Promise<void>;abort():Promise<void>;getState():Promise<AgentState>;getMessages():Promise<unknown[]>;getCapabilities():Promise<Record<string,unknown>>;getSession():Promise<Record<string,unknown>>;compact(instructions?:string):Promise<unknown>;setModel(provider:string,modelId:string):Promise<void>;setThinkingLevel(level:string):Promise<void>;setSessionName(name:string):Promise<void>;navigate(entryId:string):Promise<unknown>;fork(entryId:string):Promise<{sessionFile?:string,selectedText?:string}>;extensionResponse(requestId:string,value:unknown):Promise<void>;subscribe(listener:(e:AgentEvent)=>void):()=>void;dispose():Promise<void>}
 /** Deterministic backend used by the server and tests. The SDK adapter can implement the same contract. */
@@ -40,7 +40,7 @@ export class AgentManager {
  async state(id:string){return this.get(id).backend.getState()} async messages(id:string){return this.get(id).backend.getMessages()}
  async capabilities(id:string){return this.get(id).backend.getCapabilities()} async session(id:string){return this.get(id).backend.getSession()}
  async compact(id:string,instructions?:string){return this.get(id).backend.compact(instructions)} async setModel(id:string,provider:string,modelId:string){return this.get(id).backend.setModel(provider,modelId)}
- async setThinkingLevel(id:string,level:string){return this.get(id).backend.setThinkingLevel(level)} async setSessionName(id:string,name:string){return this.get(id).backend.setSessionName(name)} async navigate(id:string,entryId:string){return this.get(id).backend.navigate(entryId)}
+ async setThinkingLevel(id:string,level:string){return this.get(id).backend.setThinkingLevel(level)} async setSessionName(id:string,name:string){await this.get(id).backend.setSessionName(name);this.get(id).record.sessionName=name.trim()} async navigate(id:string,entryId:string){return this.get(id).backend.navigate(entryId)}
  async fork(id:string,entryId:string){const source=this.get(id),result=await source.backend.fork(entryId);if(!result.sessionFile)throw Object.assign(new Error('Session persistence is disabled'),{code:'SESSION_NOT_PERSISTED'});const ws=this.workspaces.get(source.record.workspaceId)!;const agent=await this.create(source.record.workspaceId,pathRelative(ws.rootPath,source.record.cwd),result.sessionFile);return {agent,selectedText:result.selectedText}}
  async extensionResponse(id:string,requestId:string,value:unknown){return this.get(id).backend.extensionResponse(requestId,value)}
 }

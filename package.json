@@ -1,15 +1,28 @@
 {
   "name": "remote-pi",
   "version": "0.1.0",
+  "description": "Secure remote web and Android client server for Pi coding agent",
   "type": "module",
   "bin": {
     "remote-pi": "dist/main.js"
   },
+  "files": [
+    "dist/",
+    "web/",
+    "README.md",
+    "ANDROID_APP_FEATURES.md"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "check": "npm run build",
     "test": "vitest run",
-    "dev": "tsx src/main.ts"
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=20.10"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.10",
@@ -21,5 +34,6 @@
     "tsx": "^4.19.0",
     "typescript": "^5.9.3",
     "vitest": "^3.0.0"
-  }
+  },
+  "keywords": ["pi", "coding-agent", "remote", "web-ui"]
 }
