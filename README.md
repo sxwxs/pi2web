@@ -41,6 +41,6 @@ python3 -m http.server 8080
 
 ## Android App
 
-`android/` 包含 Kotlin + Jetpack Compose 原生客户端，支持多 Server、Keystore Token、Workspace/文件浏览、Agent 创建与列表、实时对话、abort、sequence 去重及 WebSocket 自动重连。构建和连接说明见 [`android/README.md`](android/README.md)。
+`android/` 包含 Kotlin + Jetpack Compose 原生客户端，支持多 Server、Keystore Token、Workspace/文件浏览、Agent 创建与列表、实时对话、abort、sequence 去重及 WebSocket 自动重连。构建和连接说明见 [`android/README.md`](android/README.md)，完整功能和交互说明见 [`ANDROID_APP_FEATURES.md`](ANDROID_APP_FEATURES.md)。
 
 运行时默认使用真实 `@earendil-works/pi-coding-agent` SDK，并复用 Pi CLI 的 `~/.pi/agent` 模型、认证和设置；agent 可正常使用 read/bash/edit/write 工具并持久化 Pi session。`MockBackend` 仅由自动化测试显式注入，运行服务器不会使用 mock response。测试覆盖 token hash/轮换、路径穿越、符号链接逃逸、分页、大小限制、agent 事件顺序和停止行为，且不依赖真实 LLM key。

@@ -4,6 +4,7 @@ package com.remotepi.app.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -13,9 +14,11 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -85,7 +88,7 @@ import com.remotepi.app.data.*
             items(state.workspaces, key = { it.id }) { workspace -> ListItem(headlineContent = { Text(workspace.label) }, supportingContent = { Text(workspace.rootPath) }, leadingContent = { Icon(Icons.Default.Folder, null) }, trailingContent = { IconButton(onClick = { createFor = workspace }) { Icon(Icons.Default.AddCircle, "创建 Agent") } }, modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { vm.browse(workspace) }, onLongClick = { createFor = workspace })); HorizontalDivider() }
             item { SectionTitle("Agents") }
             if (state.agents.isEmpty()) item { Text(if (state.workspaces.isEmpty()) "请先添加 Workspace。" else "暂无 Agent，点击右下角按钮创建。", Modifier.padding(16.dp, 16.dp, 16.dp, 96.dp)) }
-            items(state.agents, key = { it.agentId }) { agent -> ListItem(headlineContent = { Text(agent.agentId.take(20)) }, supportingContent = { Text("${agent.status} · ${agent.cwd}") }, leadingContent = { StatusDot(agent.status) }, trailingContent = { IconButton(onClick = { vm.stopAgent(agent) }) { Icon(Icons.Default.Stop, "停止") } }, modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { vm.openAgent(agent) }, onLongClick = { vm.stopAgent(agent) })); HorizontalDivider() }
+            items(state.agents, key = { it.agentId }) { agent -> ListItem(headlineContent = { Text(state.agentNames[agent.agentId] ?: agent.agentId.take(20)) }, supportingContent = { Text("${agent.agentId.take(16)} · ${agent.status} · ${agent.cwd}") }, leadingContent = { StatusDot(agent.status) }, trailingContent = { IconButton(onClick = { vm.stopAgent(agent) }) { Icon(Icons.Default.Stop, "停止") } }, modifier = Modifier.fillMaxWidth().combinedClickable(onClick = { vm.openAgent(agent) }, onLongClick = { vm.stopAgent(agent) })); HorizontalDivider() }
         }
     }
     if (addingWorkspace) WorkspaceDialog({ addingWorkspace = false }) { label, path -> addingWorkspace = false; vm.addWorkspace(label, path) }
@@ -115,15 +118,18 @@ import com.remotepi.app.data.*
 @Composable private fun FilePreview(file: FileContent, next: () -> Unit) { Card(Modifier.fillMaxWidth().padding(8.dp)) { Column(Modifier.padding(12.dp)) { Text("${file.path} · ${file.offset + file.limit}/${file.size} bytes", style = MaterialTheme.typography.labelMedium); HorizontalDivider(Modifier.padding(vertical = 8.dp)); SelectionContainer { Text(if (file.binary) "二进制文件，无法预览" else file.content.orEmpty(), fontFamily = FontFamily.Monospace) }; if (file.offset + file.limit < file.size) TextButton(onClick = next) { Text("下一页") } } } }
 
 @Composable private fun ConversationScreen(state: AppState, vm: RemotePiViewModel) {
-    var input by remember { mutableStateOf("") }; var mode by remember { mutableStateOf("prompt") }; var settings by remember { mutableStateOf(false) }; val list = rememberLazyListState()
+    var input by remember { mutableStateOf("") }; var mode by remember { mutableStateOf("prompt") }; var settings by remember { mutableStateOf(false) }; var renaming by remember { mutableStateOf(false) }; var reverting by remember { mutableStateOf(false) }; val list = rememberLazyListState()
     fun applyMention(value: String?) { if (value == null) return; val at=input.lastIndexOf('@');input=(if(at>=0)input.substring(0,at) else input)+value+" ";vm.cancelMention() }
+    LaunchedEffect(state.composerDraft) { state.composerDraft?.let { input=it;vm.clearComposerDraft() } }
     LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.text?.length) { if (state.messages.isNotEmpty()) list.animateScrollToItem(state.messages.lastIndex) }
-    Scaffold(topBar = { TopAppBar(navigationIcon = { IconButton(onClick = vm::goHome) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }, title = { Column { Text(state.sessionDetails?.sessionName ?: state.extensionTitle ?: state.agent?.agentId?.take(20) ?: "Agent"); Text("${state.agent?.status} · WS ${state.socketStatus}${state.extensionStatus?.let { " · $it" }?:""}", style = MaterialTheme.typography.labelSmall) } }, actions = { IconButton(onClick = {settings=true}) {Icon(Icons.Default.Tune,"控制")}; IconButton(onClick = vm::abort) { Icon(Icons.Default.StopCircle, "Abort", tint = MaterialTheme.colorScheme.error) } }) }, bottomBar = { Column(Modifier.imePadding().navigationBarsPadding().padding(8.dp)) {
+    Scaffold(topBar = { TopAppBar(navigationIcon = { IconButton(onClick = vm::goHome) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } }, title = { Column { Text(state.sessionDetails?.sessionName ?: state.extensionTitle ?: state.agent?.agentId?.take(20) ?: "Agent"); Text("${state.agent?.status} · WS ${state.socketStatus}${state.extensionStatus?.let { " · $it" }?:""}", style = MaterialTheme.typography.labelSmall) } }, actions = { IconButton(onClick = {renaming=true}) {Icon(Icons.Default.Edit,"修改 Session 名称")}; IconButton(onClick = {reverting=true}) {Icon(Icons.AutoMirrored.Filled.Undo,"Revert")}; IconButton(onClick = {settings=true}) {Icon(Icons.Default.Tune,"控制")}; IconButton(onClick = vm::abort) { Icon(Icons.Default.StopCircle, "Abort", tint = MaterialTheme.colorScheme.error) } }) }, bottomBar = { Column(Modifier.imePadding().navigationBarsPadding().padding(8.dp)) {
         if(state.mentionPath!=null) MentionPicker(state,vm,::applyMention)
         Row { listOf("prompt", "steer", "follow-up").forEach { value -> FilterChip(selected = mode == value, onClick = { mode = value }, label = { Text(value) }, modifier = Modifier.padding(end = 6.dp)) } }
         Row(verticalAlignment = Alignment.Bottom) { OutlinedTextField(input, { value->input=value;if(value.endsWith('@'))vm.startMention() }, modifier = Modifier.weight(1f), label = { Text("消息（输入 @ 选择路径）") }, maxLines = 5); IconButton(enabled = input.isNotBlank(), onClick = { val text = input.trim(); input = "";vm.cancelMention(); vm.send(text, mode) }) { Icon(Icons.AutoMirrored.Filled.Send, "发送") } }
     } }) { padding -> LazyColumn(state = list, modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 8.dp), contentPadding = PaddingValues(vertical = 8.dp)) { if(state.extensionWidgets.isNotEmpty()) item {Card(Modifier.fillMaxWidth().padding(4.dp)){Column(Modifier.padding(8.dp)){state.extensionWidgets.forEach{(key,lines)->Text(key,fontWeight=FontWeight.Bold);lines.forEach{Text(it)}}}}}; items(state.messages, key = { it.key }) { MessageCard(it) } } }
     if(settings) AgentControlsDialog(state,{settings=false},vm)
+    if(renaming) SessionNameDialog(state.sessionDetails?.sessionName.orEmpty(),{renaming=false}){name->vm.setSessionName(name);renaming=false}
+    if(reverting) RevertDialog(state.sessionDetails?.userMessages.orEmpty(),{reverting=false}){entryId->reverting=false;vm.fork(entryId)}
 }
 
 @Composable private fun MentionPicker(state:AppState,vm:RemotePiViewModel,choose:(String?)->Unit){
@@ -140,4 +146,13 @@ import com.remotepi.app.data.*
 
 @Composable private fun ExtensionDialog(request:ExtensionRequest,respond:(Any?)->Unit){var text by remember(request.requestId){mutableStateOf(request.prefill?:"")};when(request.kind){"select"->AlertDialog(onDismissRequest={respond(null)},title={Text(request.title)},text={Column {request.options.forEach {option->TextButton(onClick={respond(option)}){Text(option)}}}},confirmButton={});"confirm"->AlertDialog(onDismissRequest={respond(false)},title={Text(request.title)},text={Text(request.message)},confirmButton={Button(onClick={respond(true)}){Text("确认")}},dismissButton={TextButton(onClick={respond(false)}){Text("取消")}});else->AlertDialog(onDismissRequest={respond(null)},title={Text(request.title)},text={OutlinedTextField(text,{text=it},label={Text(request.placeholder?:if(request.kind=="editor")"内容" else "输入")},minLines=if(request.kind=="editor")5 else 1)},confirmButton={Button(onClick={respond(text)}){Text("提交")}},dismissButton={TextButton(onClick={respond(null)}){Text("取消")}})}}
 
-@Composable private fun MessageCard(item: ChatItem) { val user = item.role == "user"; val color = when (item.kind) { ChatItem.Kind.TOOL -> MaterialTheme.colorScheme.secondaryContainer; ChatItem.Kind.THINKING -> MaterialTheme.colorScheme.surfaceVariant; ChatItem.Kind.SYSTEM -> MaterialTheme.colorScheme.errorContainer; else -> if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant }; Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) { Card(colors = CardDefaults.cardColors(containerColor = color), modifier = Modifier.padding(vertical = 4.dp).widthIn(max = 640.dp)) { Column(Modifier.padding(12.dp)) { Text(item.role, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold); SelectionContainer { Text(item.text, fontFamily = if (item.kind == ChatItem.Kind.TOOL) FontFamily.Monospace else FontFamily.Default) } } } } }
+@Composable private fun SessionNameDialog(current:String,dismiss:()->Unit,save:(String)->Unit){var name by remember(current){mutableStateOf(current)};AlertDialog(onDismissRequest=dismiss,title={Text(if(current.isBlank())"命名 Session" else "修改 Session 名称")},text={OutlinedTextField(name,{name=it},singleLine=true,label={Text("名称")})},confirmButton={Button(enabled=name.isNotBlank(),onClick={save(name.trim())}){Text("保存")}},dismissButton={TextButton(onClick=dismiss){Text("取消")}})}
+
+@Composable private fun RevertDialog(points:List<RevertPoint>,dismiss:()->Unit,revert:(String)->Unit){AlertDialog(onDismissRequest=dismiss,title={Text("Revert / Fork")},text={if(points.isEmpty())Text("没有可恢复的用户消息")else LazyColumn {items(points.asReversed(),key={it.entryId}){point->ListItem(headlineContent={Text(point.text.take(80))},supportingContent={Text(point.entryId.take(12))},modifier=Modifier.clickable{revert(point.entryId)})}}},confirmButton={TextButton(onClick=dismiss){Text("取消")}})}
+
+@Composable private fun MessageCard(item: ChatItem) {
+    var expanded by rememberSaveable(item.key){mutableStateOf(false)};val user=item.role=="user"
+    val color=when(item.kind){ChatItem.Kind.TOOL->MaterialTheme.colorScheme.secondaryContainer;ChatItem.Kind.THINKING->MaterialTheme.colorScheme.surfaceVariant;ChatItem.Kind.SYSTEM->MaterialTheme.colorScheme.errorContainer;else->if(user)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant}
+    val title=item.collapsedTitle()
+    Row(Modifier.fillMaxWidth(),horizontalArrangement=if(user)Arrangement.End else Arrangement.Start){Card(colors=CardDefaults.cardColors(containerColor=color),modifier=Modifier.padding(vertical=4.dp).widthIn(max=640.dp).clickable{expanded=!expanded}){Column(Modifier.padding(12.dp)){Row(verticalAlignment=Alignment.CenterVertically){Icon(if(expanded)Icons.Default.ExpandLess else Icons.Default.ExpandMore,null,Modifier.size(18.dp));Spacer(Modifier.width(6.dp));Text(if(title.isBlank())item.role else title,Modifier.weight(1f),maxLines=1,fontWeight=FontWeight.SemiBold);Text(item.role,style=MaterialTheme.typography.labelSmall)};if(expanded){HorizontalDivider(Modifier.padding(vertical=8.dp));SelectionContainer{Text(item.text,fontFamily=if(item.kind==ChatItem.Kind.TOOL)FontFamily.Monospace else FontFamily.Default)}}}}}
+}

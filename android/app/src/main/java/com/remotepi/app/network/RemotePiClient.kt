@@ -54,7 +54,7 @@ class RemotePiClient(private val baseUrl: String, private val token: String, val
     fun setThinking(id: String, level: String): AgentCapabilities = call("POST", "/api/v1/agents/$id/thinking", mapOf("level" to level))
     fun compact(id: String, instructions: String = ""): JsonElement = call("POST", "/api/v1/agents/$id/compact", mapOf("instructions" to instructions))
     fun navigate(id: String, entryId: String): JsonElement = call("POST", "/api/v1/agents/$id/navigate", mapOf("entryId" to entryId))
-    fun fork(id: String, entryId: String): AgentSummary = call("POST", "/api/v1/agents/$id/fork", mapOf("entryId" to entryId))
+    fun fork(id: String, entryId: String): ForkResult = call("POST", "/api/v1/agents/$id/fork", mapOf("entryId" to entryId))
     fun extensionResponse(id: String, requestId: String, value: Any?): Boolean = call<JsonObject>("POST", "/api/v1/agents/$id/extension-response", mapOf("requestId" to requestId, "value" to value)).get("success").asBoolean
     fun command(id: String, command: String, message: String = ""): Boolean = call<JsonObject>("POST", "/api/v1/agents/$id/$command", mapOf("message" to message), callClient = commandHttp).get("success").asBoolean
     fun stop(id: String): Boolean = call<JsonObject>("DELETE", "/api/v1/agents/$id").get("stopped").asBoolean

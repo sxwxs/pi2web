@@ -26,7 +26,7 @@ data class AppState(
     val workspace: Workspace? = null, val treePath: String = ".", val entries: List<TreeEntry> = emptyList(),
     val file: FileContent? = null, val agents: List<AgentSummary> = emptyList(), val agent: AgentSummary? = null,
     val messages: List<ChatItem> = emptyList(), val socketStatus: String = "disconnected",
-    val capabilities: AgentCapabilities? = null, val sessionDetails: SessionDetails? = null, val sessions: List<SessionInfo> = emptyList(),
+    val capabilities: AgentCapabilities? = null, val sessionDetails: SessionDetails? = null, val sessions: List<SessionInfo> = emptyList(), val agentNames: Map<String,String> = emptyMap(), val composerDraft: String? = null,
     val extensionRequest: ExtensionRequest? = null, val extensionStatus: String? = null, val extensionTitle: String? = null, val extensionWidgets: Map<String,List<String>> = emptyMap(),
     val mentionWorkspace: Workspace? = null, val mentionPath: String? = null, val mentionEntries: List<TreeEntry> = emptyList()
 )
@@ -62,9 +62,10 @@ class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: 
             val api = RemotePiClient(profile.baseUrl, token)
             withContext(Dispatchers.IO) { api.login(); val status=api.status();if(status.protocolVersion!=1)throw RemotePiException("PROTOCOL_INCOMPATIBLE","Server protocol ${status.protocolVersion} is not supported") }
             val (workspaces, agents) = withContext(Dispatchers.IO) { api.workspaces() to api.agents() }
+            val agentNames=withContext(Dispatchers.IO){agents.mapNotNull { agent->runCatching { api.session(agent.agentId).sessionName }.getOrNull()?.let { agent.agentId to it } }.toMap()}
             client = api; profiles.select(profile.id)
             notificationMonitor?.close();notificationMonitor=AgentNotificationMonitor(profile.id,api,profiles,agents,notifier::completed).also { it.connect() }
-            update { it.copy(screen = Screen.HOME, activeProfile = profile.copy(lastConnectedAt = Instant.now().toString()), connecting = false, workspaces = workspaces, agents = agents) }
+            update { it.copy(screen = Screen.HOME, activeProfile = profile.copy(lastConnectedAt = Instant.now().toString()), connecting = false, workspaces = workspaces, agents = agents, agentNames = agentNames) }
         }.onFailure(::fail) }
     }
     fun disconnect() { socket?.close(); socket = null; notificationMonitor?.close();notificationMonitor=null; client = null; update { AppState(profiles = profiles.list()) } }
@@ -94,7 +95,7 @@ class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: 
         val api = client ?: return; socket?.close()
         update { it.copy(screen = Screen.CONVERSATION, agent = agent, messages = emptyList()) }
         viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { Triple(api.messages(agent.agentId),api.capabilities(agent.agentId),api.session(agent.agentId)) } }.onSuccess { loaded ->
-            update { it.copy(messages = loaded.first.mapIndexedNotNull(::historyItem),capabilities=loaded.second,sessionDetails=loaded.third) }
+            update { it.copy(messages = loaded.first.mapIndexedNotNull(::historyItem),capabilities=loaded.second,sessionDetails=loaded.third,agentNames=loaded.third.sessionName?.let { name->it.agentNames+(agent.agentId to name) }?:it.agentNames) }
             socket = AgentSocket(api, agent.agentId, profiles.cursor(agent.agentId), ::event, ::snapshot, { reloadMessages(agent) }) { status -> update { it.copy(socketStatus = status) } }.also { it.connect() }
         }.onFailure(::fail) }
     }
@@ -132,12 +133,13 @@ class RemotePiViewModel(private val profiles: ProfileStore, private val tokens: 
     }
     private fun appendDelta(items: MutableList<ChatItem>, prefix: String, delta: String, kind: ChatItem.Kind) { val key = "$prefix-$streamKey"; val i = items.indexOfLast { it.key == key }; if (i >= 0) items[i] = items[i].copy(text = items[i].text + delta) else items += ChatItem(key, "assistant", delta, kind) }
     fun send(message: String, command: String = "prompt") { val api = client ?: return; val agent = mutable.value.agent ?: return; update { it.copy(messages = it.messages + ChatItem(UUID.randomUUID().toString(), "user", message)) }; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.command(agent.agentId, command, message) } }.onFailure(::fail) } }
-    fun setSessionName(name:String) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.setSessionName(agent.agentId,name)} }.onSuccess { details->update { it.copy(sessionDetails=details) } }.onFailure(::fail) } }
+    fun setSessionName(name:String) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.setSessionName(agent.agentId,name)} }.onSuccess { details->update { it.copy(sessionDetails=details,agentNames=details.sessionName?.let { name->it.agentNames+(agent.agentId to name) }?:it.agentNames) } }.onFailure(::fail) } }
     fun setModel(model: ModelInfo) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.setModel(agent.agentId,model.provider,model.id)} }.onSuccess { value->update { it.copy(capabilities=value) } }.onFailure(::fail) } }
     fun setThinking(level:String) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.setThinking(agent.agentId,level)} }.onSuccess { value->update { it.copy(capabilities=value) } }.onFailure(::fail) } }
     fun compact(instructions:String="") { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.compact(agent.agentId,instructions)} }.onSuccess { reloadMessages(agent) }.onFailure(::fail) } }
     fun navigate(entryId:String) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.navigate(agent.agentId,entryId)} }.onSuccess { reloadMessages(agent) }.onFailure(::fail) } }
-    fun fork(entryId:String) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.fork(agent.agentId,entryId)} }.onSuccess { forked->update { it.copy(agents=it.agents+forked) };openAgent(forked) }.onFailure(::fail) } }
+    fun fork(entryId:String) { val api=client?:return;val agent=mutable.value.agent?:return;viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.fork(agent.agentId,entryId)} }.onSuccess { result->update { it.copy(agents=it.agents+result.agent,composerDraft=result.selectedText) };openAgent(result.agent) }.onFailure(::fail) } }
+    fun clearComposerDraft()=update { it.copy(composerDraft=null) }
     fun respondExtension(value:Any?) { val request=mutable.value.extensionRequest?:return;val api=client?:return;val agent=mutable.value.agent?:return;update { it.copy(extensionRequest=null) };viewModelScope.launch { runCatching { withContext(Dispatchers.IO){api.extensionResponse(agent.agentId,request.requestId,value)} }.onFailure(::fail) } }
     fun abort() { val api = client ?: return; val agent = mutable.value.agent ?: return; viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { api.command(agent.agentId, "abort") } }.onFailure(::fail) } }
     fun startMention() { val state=mutable.value;val agent=state.agent?:return;val workspace=state.workspaces.find { it.id==agent.workspaceId }?:return;val path=MentionPaths.initialPath(workspace.rootPath,agent.cwd);loadMention(workspace,path) }

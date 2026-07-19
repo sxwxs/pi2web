@@ -56,6 +56,13 @@ class RemotePiClientTest {
         assertTrue(server.takeRequest().body.readUtf8().contains("Review"))
     }
 
+    @Test fun `fork response restores selected user text`() {
+        server.enqueue(json("""{"data":{"agent":{"agentId":"a2","workspaceId":"w","cwd":"/repo","sessionId":"s2","status":"idle"},"selectedText":"change this"}}""", 201))
+        val result = client.fork("a1", "entry-1")
+        assertEquals("a2", result.agent.agentId)
+        assertEquals("change this", result.selectedText)
+    }
+
     @Test fun `decodes model and thinking capabilities`() {
         server.enqueue(json("""{"data":{"model":{"provider":"p","id":"m"},"models":[{"provider":"p","id":"m"}],"thinkingLevel":"high","thinkingLevels":["off","high"],"supportsThinking":true}}"""))
         val result = client.capabilities("agent-1")

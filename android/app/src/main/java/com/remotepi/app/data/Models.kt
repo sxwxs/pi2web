@@ -17,12 +17,19 @@ data class DataEnvelope<T>(val data: T)
 
 data class ChatItem(val key: String, val role: String, val text: String, val kind: Kind = Kind.TEXT) {
     enum class Kind { TEXT, THINKING, TOOL, SYSTEM }
+    fun collapsedTitle(): String = when(kind) {
+        Kind.THINKING -> "Thinking"
+        Kind.TOOL, Kind.SYSTEM -> text.lineSequence().firstOrNull()?.take(60).orEmpty()
+        Kind.TEXT -> text.replace('\n',' ').take(60)
+    }.ifBlank { role }
 }
 
 data class ModelInfo(val provider: String, val id: String, val name: String? = null, val reasoning: Boolean = false)
 data class AgentCapabilities(val model: ModelInfo?, val models: List<ModelInfo> = emptyList(), val thinkingLevel: String = "off", val thinkingLevels: List<String> = emptyList(), val supportsThinking: Boolean = false)
 data class SessionInfo(val path: String, val id: String, val cwd: String, val name: String? = null, val created: String, val modified: String, val messageCount: Int, val firstMessage: String = "")
-data class SessionDetails(val sessionId: String, val sessionFile: String?, val sessionName: String?, val leafId: String?, val entries: List<JsonElement> = emptyList(), val tree: List<JsonElement> = emptyList(), val stats: JsonElement? = null)
+data class RevertPoint(val entryId: String, val text: String)
+data class SessionDetails(val sessionId: String, val sessionFile: String?, val sessionName: String?, val leafId: String?, val entries: List<JsonElement> = emptyList(), val tree: List<JsonElement> = emptyList(), val userMessages: List<RevertPoint> = emptyList(), val stats: JsonElement? = null)
+data class ForkResult(val agent: AgentSummary, val selectedText: String? = null)
 data class ExtensionRequest(val requestId: String, val kind: String, val title: String = "", val message: String = "", val placeholder: String? = null, val prefill: String? = null, val options: List<String> = emptyList())
 
 data class AgentEventEnvelope(
