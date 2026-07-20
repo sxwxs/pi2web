@@ -35,7 +35,7 @@
     <div class="toolbar">
       <div class="title-wrap"><div class="agent-heading"><strong id="agentTitle">请选择 Agent</strong><span id="agentStateBadge" class="state-badge state-none">未选择</span></div><small id="agentStatus" class="muted"></small><div id="contextUsage" class="context-usage" hidden><div class="context-track"><i id="contextBar"></i></div><small id="contextText"></small></div></div>
       <button id="sessionName" title="修改 Session 名称">命名</button>
-      <button id="undo" title="从历史用户消息前 Fork">Undo</button>
+      <button id="undo" title="在 Session Tree 中回退输入或 Agent 输出">Undo</button>
       <button id="sessionTree">Session</button>
       <button id="controls">模型</button>
       <button id="compact">Compact</button>
@@ -56,6 +56,7 @@
 </main>
 <div id="contextMenu" class="context-menu" hidden><button id="menuSetCwd">设为 Agent 工作路径</button><button id="menuMention">在输入框中引用</button></div>
 <dialog id="pairDialog"><form method="dialog" id="pairForm"><h2>连接 Remote Pi</h2><p class="muted">连接成功后可选择是否将配对码保存到浏览器本地存储。请仅在可信设备上保存。</p><label>服务地址<input id="pairBase" required></label><label>配对码<input id="pairToken" type="password" autocomplete="off" required autofocus></label><div class="dialog-actions"><button id="pairCancel" type="button">取消</button><button id="pairSubmit" value="default">连接</button></div></form></dialog>
+<div id="agentContextMenu" class="context-menu" hidden><button id="menuArchiveAgent">Archive</button></div>
 <dialog id="modal"><form method="dialog"><h2 id="modalTitle"></h2><div id="modalBody"></div><div class="dialog-actions"><button value="cancel">取消</button><button id="modalOk" value="default">确定</button></div></form></dialog>
 <div id="toast" hidden></div>
 <script src="/app.js"></script>

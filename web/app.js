@@ -138,24 +138,29 @@
   function agentLabel(agent) { return agent.sessionName || agent.name || agent.agentId; }
   const formatTokens = value => { const n=Number(value); if(!Number.isFinite(n)||n<=0)return '0'; if(n>=1e6)return `${(n/1e6).toFixed(1)}M`;if(n>=1e3)return `${(n/1e3).toFixed(n>=1e4?0:1)}k`;return String(Math.round(n)); };
   const usageLevel = usage => Number(usage?.percent)>90?'usage-danger':Number(usage?.percent)>70?'usage-warning':'';
-  const usageText = usage => { if(!usage)return 'Context ?';const percent=usage.percent==null?'?':`${Number(usage.percent).toFixed(1)}%`;return `${percent} · ${formatTokens(usage.tokens)}/${formatTokens(usage.contextWindow)}`; };
+  const usageText = usage => { if(!usage||!Number(usage.contextWindow))return 'Context ?';const percent=usage.percent==null?'?':`${Number(usage.percent).toFixed(1)}%`;return `${percent} · ${formatTokens(usage.tokens)}/${formatTokens(usage.contextWindow)}`; };
+  const costText = usage => { const cost=Number(usage?.cost);if(!Number.isFinite(cost))return 'Session cost ?';return `Session cost ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`; };
+  const sessionUsage = session => ({...(session.contextUsage||{}),cost:session.stats?.cost});
   function renderAgentList() {
-    const selected=state.agent?.agentId;
-    $('agents').replaceChildren(...state.agents.map(agent => {
+    const selected=state.agent?.agentId,agents=[...state.agents].sort((a,b)=>{
+      const recent=(value,fallback)=>{const time=Date.parse(value||fallback||'');return Number.isFinite(time)?time:0;};
+      return recent(b.lastActiveAt,b.createdAt)-recent(a.lastActiveAt,a.createdAt);
+    });
+    $('agents').replaceChildren(...agents.map(agent => {
       const usage=state.contexts.get(agent.agentId),el=document.createElement('div');el.dataset.agentId=agent.agentId;el.className=`agent ${agent.status}${selected===agent.agentId?' selected':''}`;
-      el.innerHTML=`<div class="agent-top"><b>${esc(agentLabel(agent))}</b><span class="state-badge state-${esc(agent.status)}">${esc(agent.status)}</span></div><small>${esc(agent.cwd)}</small><div class="agent-context ${usageLevel(usage)}"><span>Context</span><div class="mini-track"><i style="width:${Math.min(100,Math.max(0,Number(usage?.percent)||0))}%"></i></div><span>${esc(usageText(usage))}</span></div>`;
-      el.onclick=()=>selectAgent(agent);return el;
+      el.innerHTML=`<div class="agent-top"><b>${esc(agentLabel(agent))}</b><span class="state-badge state-${esc(agent.status)}">${esc(agent.status)}</span></div><small>${esc(agent.cwd)}</small><div class="agent-context ${usageLevel(usage)}"><span>Context</span><div class="mini-track"><i style="width:${Math.min(100,Math.max(0,Number(usage?.percent)||0))}%"></i></div><span>${esc(usageText(usage))} · ${esc(costText(usage))}</span></div>`;
+      el.onclick=()=>selectAgent(agent);el.oncontextmenu=event=>showAgentContextMenu(event,agent);return el;
     }));
   }
   async function loadAgentContexts(agents=state.agents) {
-    await Promise.allSettled(agents.map(async agent=>{const session=await api(`/api/v1/agents/${agent.agentId}/session`);if(session.sessionName)agent.sessionName=session.sessionName;state.contexts.set(agent.agentId,session.contextUsage||null);}));
+    await Promise.allSettled(agents.map(async agent=>{const session=await api(`/api/v1/agents/${agent.agentId}/session`);agent.sessionName=session.sessionName||undefined;let lastMessageAt=0;for(const entry of session.entries||[]){if(entry.type!=='message')continue;const time=Date.parse(entry.timestamp||'');if(Number.isFinite(time))lastMessageAt=Math.max(lastMessageAt,time);}if(lastMessageAt)agent.lastActiveAt=new Date(lastMessageAt).toISOString();state.contexts.set(agent.agentId,sessionUsage(session));}));
     renderAgentList();if(state.agent)updateAgentHeader();
   }
   async function refreshAgents(selectPrevious = false) {
     if (!state.connected) return;
     state.agents = await api('/api/v1/agents'); const previous = state.agent?.agentId || localStorage.rpAgentId;
     if(state.agent){const fresh=state.agents.find(x=>x.agentId===state.agent.agentId);if(fresh)state.agent=Object.assign(state.agent,fresh);}
-    renderAgentList();void loadAgentContexts([...state.agents]);
+    renderAgentList();
     if (selectPrevious) { const found = state.agents.find(x => x.agentId === previous); if (found) await selectAgent(found); else connectSocket(); }
     else if (!state.ws) connectSocket();
   }
@@ -166,7 +171,7 @@
     if (!agent) return;
     $('agentTitle').textContent = agentLabel(agent); $('agentStatus').textContent = `${agent.agentId} · ${agent.cwd}`;
     const badge=$('agentStateBadge');badge.textContent=agent.status;badge.className=`state-badge state-${agent.status}`;
-    const usage=state.contexts.get(agent.agentId),panel=$('contextUsage');panel.hidden=false;$('contextText').textContent=`Context ${usageText(usage)}`;const percent=Math.min(100,Math.max(0,Number(usage?.percent)||0));$('contextBar').style.width=`${percent}%`;panel.className=`context-usage ${usageLevel(usage)}`;
+    const usage=state.contexts.get(agent.agentId),panel=$('contextUsage');panel.hidden=false;$('contextText').textContent=`Context ${usageText(usage)} · ${costText(usage)}`;const percent=Math.min(100,Math.max(0,Number(usage?.percent)||0));$('contextBar').style.width=`${percent}%`;panel.className=`context-usage ${usageLevel(usage)}`;
   }
   async function selectAgent(agent) {
     state.agent = agent; localStorage.rpAgentId = agent.agentId; updateAgentHeader();
@@ -179,7 +184,7 @@
   async function loadSessionIdentity() {
     if (!state.agent) return;
     const session = await api(`/api/v1/agents/${state.agent.agentId}/session`);
-    if (session.sessionName) state.agent.sessionName = session.sessionName; state.contexts.set(state.agent.agentId,session.contextUsage||null);renderAgentList();updateAgentHeader();
+    state.agent.sessionName=session.sessionName||undefined;state.contexts.set(state.agent.agentId,sessionUsage(session));renderAgentList();updateAgentHeader();
   }
 
   function textContent(content) {
@@ -235,11 +240,13 @@
     const key = `rpSeq:${message.agentId}`, last = Number(localStorage[key] || 0); if (message.sequence <= last) return; localStorage[key] = message.sequence;
     const ev = message.event || {}, selected = state.agent?.agentId === message.agentId;
     let eventAgent=state.agents.find(x=>x.agentId===message.agentId);
+    if(eventAgent&&Number(message.timestamp)>0)eventAgent.lastActiveAt=new Date(Number(message.timestamp)*1000).toISOString();
     if (ev.type === 'agent_start' || ev.type === 'auto_retry_start') eventAgent=setAgentStatus(message.agentId,'streaming')||eventAgent;
     else if (ev.type === 'agent_end') {
       const final=!ev.willRetry;eventAgent=setAgentStatus(message.agentId,final?'idle':'streaming')||eventAgent;
       if(final){if(selected)state.streams.clear();notifyComplete(eventAgent||{agentId:message.agentId},message.timestamp);if(eventAgent)void loadAgentContexts([eventAgent]);}
     } else if (ev.type === 'agent_settled') { eventAgent=setAgentStatus(message.agentId,'idle')||eventAgent;if(eventAgent)void loadAgentContexts([eventAgent]); }
+    else if (ev.type === 'session_info_changed') { if(eventAgent)eventAgent.sessionName=ev.name||undefined;if(selected)state.agent.sessionName=ev.name||undefined;renderAgentList();if(selected)updateAgentHeader(); }
     if (!selected) return;
     if (ev.type === 'agent_start') { $('messages').querySelector('.empty')?.remove(); }
     else if (ev.type === 'message_update') {
@@ -255,7 +262,7 @@
     else if (ev.type === 'extension_ui_widget') { ev.content ? state.widgets.set(ev.key, ev.content) : state.widgets.delete(ev.key); renderWidgets(); }
     else if (ev.type === 'extension_ui_title') { state.agent.sessionName = ev.title; updateAgentHeader(); }
     else if (ev.type === 'extension_ui_working_message') { ev.message ? state.extensionStatus.set('working',ev.message) : state.extensionStatus.delete('working'); renderExtensionStatus(); }
-    else if (!['message_start','message_end','agent_end','agent_settled'].includes(ev.type)) addCard(ev.title || ev.type || 'Event', JSON.stringify(ev, null, 2), 'system', false, message.timestamp);
+    else if (!['message_start','message_end','agent_end','agent_settled','session_info_changed'].includes(ev.type)) addCard(ev.title || ev.type || 'Event', JSON.stringify(ev, null, 2), 'system', false, message.timestamp);
     $('messages').scrollTop = $('messages').scrollHeight;
   }
   function renderExtensionStatus() { let row=$('extensionStatus'); if (!state.extensionStatus.size) { row?.remove(); return; } if(!row){row=document.createElement('div');row.id='extensionStatus';row.className='status-row';$('widgets').after(row);} row.textContent=[...state.extensionStatus.values()].join(' · '); }
@@ -270,16 +277,31 @@
     ws.onclose = () => { if (!state.connected || state.manuallyClosed || ws !== state.ws) return; $('status').textContent = '正在重连…'; const delays=[1000,2000,4000,8000,15000,30000], delay=delays[Math.min(state.reconnectAttempt++,delays.length-1)]; state.reconnectTimer=setTimeout(connectSocket,delay); };
     ws.onerror = () => {};
   }
+  function notificationUnavailableReason() {
+    if (!window.isSecureContext) return '浏览器通知需要 HTTPS；仅 localhost 可使用 HTTP';
+    if (!('Notification' in window) || typeof Notification.requestPermission !== 'function') return '当前浏览器不支持系统通知';
+    return '';
+  }
   function updateNotificationButton() {
-    const button=$('notifications');
-    if (!('Notification' in window)) { button.textContent='通知不受支持'; button.disabled=true; return; }
-    button.disabled=Notification.permission==='denied';
+    const button=$('notifications'), unavailable=notificationUnavailableReason();
+    // Keep the button clickable so unsupported/denied states can explain how to
+    // fix the problem instead of silently ignoring the user's click.
+    button.disabled=false;
+    if (unavailable) { button.textContent='通知不可用'; button.title=unavailable; return; }
     button.textContent=Notification.permission==='granted'?'通知已启用':Notification.permission==='denied'?'通知已禁用':'启用通知';
+    button.title=Notification.permission==='denied'?'通知权限已被浏览器阻止，点击查看处理方式':'启用所有 Agent 的完成通知';
   }
   async function enableNotifications() {
-    if (!('Notification' in window)) return toast('当前浏览器不支持系统通知');
-    const permission=await Notification.requestPermission(); updateNotificationButton();
-    toast(permission==='granted'?'已启用所有 Agent 的完成通知':'未获得通知权限，请在浏览器设置中开启');
+    const unavailable=notificationUnavailableReason();
+    if (unavailable) return toast(unavailable);
+    if (Notification.permission==='denied') return toast('通知权限已被阻止，请在地址栏的网站权限中允许通知后刷新页面');
+    try {
+      const permission=await Notification.requestPermission(); updateNotificationButton();
+      toast(permission==='granted'?'已启用所有 Agent 的完成通知':'未获得通知权限，请在浏览器的网站权限中开启');
+    } catch (error) {
+      console.error('Unable to request notification permission',error);
+      toast(`无法请求通知权限：${error?.message||'请检查浏览器的网站权限'}`);
+    }
   }
   function notifyComplete(agent, timestamp) {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -292,21 +314,32 @@
     return new Promise(resolve => { const done=()=>{dialog.removeEventListener('close',done);resolve(dialog.returnValue==='default'?(typeof value==='function'?value():value):null);};dialog.addEventListener('close',done);dialog.showModal(); });
   }
   const field = (body, label, value='', type='text') => { const l=document.createElement('label');l.textContent=label;const input=document.createElement('input');input.type=type;input.value=value;l.append(input);body.append(l);return input; };
+  let agentContextTarget=null;
+  function showAgentContextMenu(event,agent){event.preventDefault();event.stopPropagation();agentContextTarget=agent;const menu=$('agentContextMenu');menu.hidden=false;menu.style.left=`${Math.min(event.clientX,innerWidth-210)}px`;menu.style.top=`${Math.min(event.clientY,innerHeight-60)}px`;}
   async function createAgent() {
     if (!state.workspace) return toast('请先选择 Workspace');
     const cwd=$('agentCwd').value.trim()||'.'; let sessions=[]; try { sessions=await api(`/api/v1/sessions?workspaceId=${state.workspace.id}&path=${encodeURIComponent(cwd)}`); } catch(e){return toast(e.message);}
     const result=await modal('新建 Agent',body=>{const c=field(body,'工作路径',cwd);const l=document.createElement('label');l.textContent='Session';const s=document.createElement('select');s.innerHTML='<option value="">新 Session</option>'+sessions.map(x=>`<option value="${esc(x.path)}">${esc(x.name||x.sessionName||x.id||x.path)} · ${esc(x.modified||'')}</option>`).join('');l.append(s);body.append(l);return()=>({cwd:c.value.trim()||'.',sessionFile:s.value||undefined});},'创建');
     if (!result) return; try { const agent=await post('/api/v1/agents',{workspaceId:state.workspace.id,relativeCwd:result.cwd,sessionFile:result.sessionFile});await refreshAgents();await selectAgent(agent);}catch(e){toast(e.message);}
   }
+  async function navigateAgent(entryId) {
+    const agent=state.agent;if(!agent)return;
+    const result=await post(`/api/v1/agents/${agent.agentId}/navigate`,{entryId});
+    await selectAgent(agent);
+    if(result.editorText!==undefined)$('input').value=result.editorText;
+    toast(result.editorText!==undefined?'已回退到该用户输入，可编辑后重新发送':'已回退到所选输出');
+  }
   async function showSessionTree() {
     if (!state.agent) return toast('请选择 Agent'); const session=await api(`/api/v1/agents/${state.agent.agentId}/session`); const entries=session.entries||[];
     const choice=await modal('Session Tree',body=>{const actionLabel=document.createElement('label');actionLabel.textContent='操作';const action=document.createElement('select');action.innerHTML='<option value="navigate">Navigate 到条目</option><option value="fork">从用户消息 Fork 新 Agent</option>';actionLabel.append(action);body.append(actionLabel);const list=document.createElement('div');list.className='modal-list';let selected='';for(const e of entries){const b=document.createElement('button');b.type='button';b.className='choice';const text=textContent(e.message?.content||e.content)||e.type;b.innerHTML=`${e.id===session.leafId?'● ':'○ '}${esc(text.slice(0,100))}<small>${esc(e.id)}</small>`;b.onclick=()=>{selected=e.id;list.querySelectorAll('button').forEach(x=>x.classList.remove('selected'));b.classList.add('selected');};list.append(b);}body.append(list);return()=>selected?{entryId:selected,action:action.value}:null;},'执行');
-    if(choice){if(choice.action==='fork'){const result=await post(`/api/v1/agents/${state.agent.agentId}/fork`,{entryId:choice.entryId});await refreshAgents();await selectAgent(result.agent);}else{await post(`/api/v1/agents/${state.agent.agentId}/navigate`,{entryId:choice.entryId});await selectAgent(state.agent);}}
+    if(choice){if(choice.action==='fork'){const result=await post(`/api/v1/agents/${state.agent.agentId}/fork`,{entryId:choice.entryId});await refreshAgents();await selectAgent(result.agent);}else await navigateAgent(choice.entryId);}
   }
   async function revert() {
-    if(!state.agent)return toast('请选择 Agent');const session=await api(`/api/v1/agents/${state.agent.agentId}/session`);const users=session.userMessages||[];
-    const selected=await modal('Undo / Fork',body=>{const list=document.createElement('div');list.className='modal-list';let value=null;for(const u of [...users].reverse()){const id=u.entryId||u.id;const text=u.text||u.message||textContent(u.content||'');const b=document.createElement('button');b.type='button';b.className='choice';b.textContent=text.slice(0,160);b.onclick=()=>{value=id;list.querySelectorAll('button').forEach(x=>x.classList.remove('selected'));b.classList.add('selected');};list.append(b);}body.append(list);return()=>value;},'Fork');
-    if(selected){const result=await post(`/api/v1/agents/${state.agent.agentId}/fork`,{entryId:selected});await refreshAgents();await selectAgent(result.agent);if(result.selectedText)$('input').value=result.selectedText;}
+    if(!state.agent)return toast('请选择 Agent');const session=await api(`/api/v1/agents/${state.agent.agentId}/session`);
+    const messages=(session.entries||[]).filter(e=>e.type==='message'&&['user','assistant'].includes(e.message?.role));
+    if(!messages.length)return toast('当前 Session 没有可回退的消息');
+    const selected=await modal('Undo（Session Tree）',body=>{const note=document.createElement('p');note.className='muted';note.textContent='选择用户输入会回到输入前并恢复文字；选择 Agent 输出会保留该输出、移除后续上下文。文件改动不会撤销。';body.append(note);const list=document.createElement('div');list.className='modal-list';let value=null;for(const e of [...messages].reverse()){const role=e.message.role==='user'?'You':'Agent',text=textContent(e.message.content)||'(空消息)';const b=document.createElement('button');b.type='button';b.className='choice';b.innerHTML=`<b>${role}</b> ${esc(text.slice(0,160))}<small>${esc(e.id)}${e.id===session.leafId?' · 当前':''}</small>`;b.onclick=()=>{value=e.id;list.querySelectorAll('button').forEach(x=>x.classList.remove('selected'));b.classList.add('selected');};list.append(b);}body.append(list);return()=>value;},'回退');
+    if(selected)await navigateAgent(selected);
   }
   async function modelControls() {
     if(!state.agent)return toast('请选择 Agent');const cap=await api(`/api/v1/agents/${state.agent.agentId}/capabilities`);
@@ -320,13 +353,14 @@
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){await post('/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit));$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit);
-  $('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;});
-  $('newAgent').onclick=createAgent;$('abort').onclick=()=>state.agent&&post(`/api/v1/agents/${state.agent.agentId}/abort`).catch(e=>toast(e.message));$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});state.agent=null;await refreshAgents();}};
+  $('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await post(`/api/v1/agents/${agent.agentId}/archive`);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
+  $('newAgent').onclick=createAgent;$('abort').onclick=()=>state.agent&&post(`/api/v1/agents/${state.agent.agentId}/abort`).catch(e=>toast(e.message));$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
   $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await post(`/api/v1/agents/${state.agent.agentId}/compact`,{instructions:instructions||undefined});toast('Compact 完成');}};
   $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();addCard(text.slice(0,60),text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){const messages=await api(`/api/v1/agents/${agentId}/messages`);$('messages').replaceChildren();state.streams.clear();renderMessages(messages);}}catch(e){addCard('发送失败',e.message,'error',true);}};
   $('input').onkeydown=event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();return;}if(event.key==='Escape')closeMention();};$('input').oninput=()=>{const before=$('input').value.slice(0,$('input').selectionStart);if(/(^|\s)@[^\s]*$/.test(before)&&$('mentionPicker').hidden)openMention(state.treePath);};
   $('mentionUp').onclick=()=>openMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
   window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();});
+  window.addEventListener('focus',updateNotificationButton);
   updateNotificationButton(); openPair();
 })();
