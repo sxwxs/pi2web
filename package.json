@@ -25,7 +25,7 @@
     "node": ">=20.10"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "0.80.6",
     "ws": "^8.18.0"
   },
   "devDependencies": {

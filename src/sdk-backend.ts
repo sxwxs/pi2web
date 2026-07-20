@@ -25,12 +25,12 @@ export class SdkBackend implements AgentBackend {
   async getMessages():Promise<unknown[]>{return [...this.session.state.messages]}
   async getCapabilities(){
     const current=this.session.model as any;
-    const available=await this.session.modelRuntime.getAvailable();
+    const available=this.session.modelRegistry.getAvailable();
     return {model:current?this.modelInfo(current):null,models:available.map(model=>this.modelInfo(model)),thinkingLevel:this.session.thinkingLevel,thinkingLevels:this.session.getAvailableThinkingLevels(),supportsThinking:this.session.supportsThinking()};
   }
   async getSession(){return {sessionId:this.session.sessionId,sessionFile:this.session.sessionFile,sessionName:this.session.sessionName,leafId:this.session.sessionManager.getLeafId(),entries:this.session.sessionManager.getEntries(),tree:this.session.sessionManager.getTree(),userMessages:this.session.getUserMessagesForForking(),stats:this.session.getSessionStats(),contextUsage:this.session.getContextUsage()}}
   compact(instructions?:string){return this.session.compact(instructions)}
-  async setModel(provider:string,modelId:string){const model=this.session.modelRuntime.getModel(provider,modelId);if(!model)throw Object.assign(new Error('Model not found'),{code:'MODEL_NOT_FOUND'});await this.session.setModel(model)}
+  async setModel(provider:string,modelId:string){const model=this.session.modelRegistry.find(provider,modelId);if(!model)throw Object.assign(new Error('Model not found'),{code:'MODEL_NOT_FOUND'});await this.session.setModel(model)}
   async setThinkingLevel(level:string){if(!['off','minimal','low','medium','high','xhigh'].includes(level))throw Object.assign(new Error('Invalid thinking level'),{code:'INVALID_THINKING_LEVEL'});this.session.setThinkingLevel(level as any)}
   async setSessionName(name:string){const value=name.trim();if(!value||value.length>200)throw Object.assign(new Error('Session name must be 1-200 characters'),{code:'INVALID_SESSION_NAME'});this.session.setSessionName(value)}
   navigate(entryId:string){return this.session.navigateTree(entryId)}
