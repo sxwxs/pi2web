@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>Remote Pi</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/vendor/xterm.css">
 </head>
 <body>
 <header>
@@ -29,13 +30,13 @@
       </div>
     </section>
     <section id="agentsSection">
-      <div class="section-title"><h2>Agents</h2><button id="newAgent">新建</button></div>
+      <div class="section-title"><h2>Agents &amp; Terminals</h2><button id="newAgent">新建 Agent</button></div>
       <label class="cwd-field">工作路径<input id="agentCwd" value="." title="相对于 Workspace"></label>
       <div id="agents"></div>
     </section>
   </aside>
   <article>
-    <div class="toolbar">
+    <div id="agentToolbar" class="toolbar">
       <button id="agentBack" class="mobile-only" title="返回主页" aria-label="返回主页">←</button>
       <div class="title-wrap"><div class="agent-heading"><strong id="agentTitle">请选择 Agent</strong><span id="agentStateBadge" class="state-badge state-none">未选择</span></div><small id="agentStatus" class="muted"></small><div id="contextUsage" class="context-usage" hidden><div class="context-track"><i id="contextBar"></i></div><small id="contextText"></small></div></div>
       <button id="mobileAgentActions" class="mobile-only" title="更多操作" aria-label="更多操作">⋮</button>
@@ -47,6 +48,12 @@
       <button id="stop" class="agent-action">停止</button>
       <button id="abort" class="agent-action danger-action">Abort</button>
     </div>
+    <div id="terminalToolbar" class="toolbar" hidden>
+      <button id="terminalBack" class="mobile-only" title="返回主页" aria-label="返回主页">←</button>
+      <div class="title-wrap"><div class="agent-heading"><strong id="terminalTitle">Terminal</strong><span id="terminalStateBadge" class="state-badge state-idle">running</span></div><small id="terminalStatus" class="muted"></small></div>
+      <button id="terminalClear">清屏</button><button id="terminalClose" class="danger-action">关闭 Terminal</button>
+    </div>
+    <div id="terminalView" hidden><div id="terminal"></div></div>
     <div id="widgets"></div>
     <div id="messages" aria-live="polite"><div class="empty">选择或创建 Agent 开始对话</div></div>
     <form id="prompt">
@@ -59,11 +66,13 @@
     </form>
   </article>
 </main>
-<div id="contextMenu" class="context-menu" hidden><button id="menuSetCwd">设为 Agent 工作路径</button><button id="menuMention">在输入框中引用</button></div>
+<div id="contextMenu" class="context-menu" hidden><button id="menuOpenTerminal">在 Terminal 中打开</button><button id="menuSetCwd">设为 Agent 工作路径</button><button id="menuMention">在输入框中引用</button></div>
 <dialog id="pairDialog"><form method="dialog" id="pairForm"><h2>连接 Remote Pi</h2><p class="muted">连接成功后可选择是否将配对码保存到浏览器本地存储。请仅在可信设备上保存。</p><label>服务地址<input id="pairBase" required></label><label>配对码<input id="pairToken" type="password" autocomplete="off" required autofocus></label><div class="dialog-actions"><button id="pairCancel" type="button">取消</button><button id="pairSubmit" value="default">连接</button></div></form></dialog>
-<div id="agentContextMenu" class="context-menu" hidden><button id="menuArchiveAgent">Archive</button></div>
+<div id="agentContextMenu" class="context-menu" hidden><button id="menuArchiveAgent">Archive</button><button id="menuCloseTerminal" hidden>关闭 Terminal</button></div>
 <dialog id="modal"><form method="dialog"><h2 id="modalTitle"></h2><div id="modalBody"></div><div class="dialog-actions"><button value="cancel">取消</button><button id="modalOk" value="default">确定</button></div></form></dialog>
 <div id="toast" hidden></div>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
