@@ -26,6 +26,9 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -38,5 +41,10 @@
   "overrides": {
     "vite": "7.3.5"
   },
-  "keywords": ["pi", "coding-agent", "remote", "web-ui"]
+  "keywords": [
+    "pi",
+    "coding-agent",
+    "remote",
+    "web-ui"
+  ]
 }

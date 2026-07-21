@@ -3,8 +3,8 @@
   const $ = id => document.getElementById(id);
   const state = {
     base: localStorage.rpBase || location.origin, token: '', workspace: null, workspaces: [], treePath: '.',
-    filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], ws: null,
-    reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
+    filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], terminals: [], terminal: null, selectedKind: 'agent', ws: null, terminalWs: null,
+    terminalEmulator: null, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
     mentionPath: '.', extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
   };
   $('api').value = state.base;
@@ -73,7 +73,7 @@
   }
   function disconnect(reason = '未配对') {
     state.connected = false; state.token = ''; state.manuallyClosed = true;
-    clearTimeout(state.reconnectTimer); state.ws?.close(); state.ws = null;
+    clearTimeout(state.reconnectTimer); state.ws?.close(); state.ws = null; state.terminalWs?.close(); state.terminalWs = null;
     $('status').className = 'bad'; $('status').textContent = reason; $('serverInfo').textContent = '';
   }
 
@@ -134,7 +134,7 @@
     } catch (error) { toast(error.message); }
   }
   function showContextMenu(event, target) {
-    event.preventDefault(); state.contextTarget = target; $('menuSetCwd').hidden = target.type !== 'directory';
+    event.preventDefault(); state.contextTarget = target; $('menuSetCwd').hidden = target.type !== 'directory'; $('menuOpenTerminal').hidden = target.type !== 'directory';
     const menu = $('contextMenu'); menu.hidden = false; menu.style.left = `${Math.min(event.clientX, innerWidth - 210)}px`; menu.style.top = `${Math.min(event.clientY, innerHeight - 90)}px`;
   }
   function insertMention(relativePath) {
@@ -168,14 +168,14 @@
   const costText = usage => { const cost=Number(usage?.cost);if(!Number.isFinite(cost))return 'Session cost ?';return `Session cost ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`; };
   const sessionUsage = session => ({...(session.contextUsage||{}),cost:session.stats?.cost});
   function renderAgentList() {
-    const selected=state.agent?.agentId,agents=[...state.agents].sort((a,b)=>{
-      const recent=(value,fallback)=>{const time=Date.parse(value||fallback||'');return Number.isFinite(time)?time:0;};
-      return recent(b.lastActiveAt,b.createdAt)-recent(a.lastActiveAt,a.createdAt);
-    });
-    $('agents').replaceChildren(...agents.map(agent => {
-      const usage=state.contexts.get(agent.agentId),el=document.createElement('div');el.dataset.agentId=agent.agentId;el.className=`agent ${agent.status}${selected===agent.agentId?' selected':''}`;
-      el.innerHTML=`<div class="agent-top"><b>${esc(agentLabel(agent))}</b><span class="state-badge state-${esc(agent.status)}">${esc(agent.status)}</span></div><small>${esc(agent.cwd)}</small><div class="agent-context ${usageLevel(usage)}"><span>Context</span><div class="mini-track"><i style="width:${Math.min(100,Math.max(0,Number(usage?.percent)||0))}%"></i></div><span>${esc(usageText(usage))} · ${esc(costText(usage))}</span></div>`;
-      el.onclick=()=>selectAgent(agent);el.oncontextmenu=event=>showAgentContextMenu(event,agent);return el;
+    const recent=(value,fallback)=>{const time=Date.parse(value||fallback||'');return Number.isFinite(time)?time:0;};
+    const items=[...state.agents.map(item=>({kind:'agent',item})),...state.terminals.map(item=>({kind:'terminal',item}))].sort((a,b)=>recent(b.item.lastActiveAt,b.item.createdAt)-recent(a.item.lastActiveAt,a.item.createdAt));
+    $('agents').replaceChildren(...items.map(({kind,item}) => {
+      const isAgent=kind==='agent',id=isAgent?item.agentId:item.terminalId,selected=state.selectedKind===kind&&(isAgent?state.agent?.agentId:state.terminal?.terminalId)===id;
+      const el=document.createElement('div');el.dataset.itemId=id;el.className=`agent ${item.status}${selected?' selected':''}`;
+      if(isAgent){const usage=state.contexts.get(item.agentId);el.innerHTML=`<div class="agent-top"><b>${esc(agentLabel(item))}</b><span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span></div><small>${esc(item.cwd)}</small><div class="agent-context ${usageLevel(usage)}"><span>Context</span><div class="mini-track"><i style="width:${Math.min(100,Math.max(0,Number(usage?.percent)||0))}%"></i></div><span>${esc(usageText(usage))} · ${esc(costText(usage))}</span></div>`;}
+      else el.innerHTML=`<div class="agent-top"><span class="terminal-kind">&gt;_</span><b>${esc(item.title||'Terminal')}</b><span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span></div><small>${esc(item.cwd)}</small>`;
+      el.onclick=()=>isAgent?selectAgent(item):selectTerminal(item);el.oncontextmenu=event=>showItemContextMenu(event,kind,item);return el;
     }));
   }
   async function loadAgentContexts(agents=state.agents) {
@@ -184,10 +184,10 @@
   }
   async function refreshAgents(selectPrevious = false) {
     if (!state.connected) return;
-    state.agents = await api('/api/v1/agents'); const previous = state.agent?.agentId || localStorage.rpAgentId;
+    [state.agents,state.terminals] = await Promise.all([api('/api/v1/agents'),api('/api/v1/terminals')]); const previous = state.agent?.agentId || localStorage.rpAgentId,previousTerminal=state.terminal?.terminalId||localStorage.rpTerminalId;
     if(state.agent){const fresh=state.agents.find(x=>x.agentId===state.agent.agentId);if(fresh)state.agent=Object.assign(state.agent,fresh);}
     renderAgentList();
-    if (selectPrevious) { const found = state.agents.find(x => x.agentId === previous); if (found) await selectAgent(found, false); else connectSocket(); }
+    if (selectPrevious) { const foundTerminal=state.terminals.find(x=>x.terminalId===previousTerminal),found = state.agents.find(x => x.agentId === previous); if(localStorage.rpSelectedKind==='terminal'&&foundTerminal)await selectTerminal(foundTerminal,false);else if (found) await selectAgent(found, false); else connectSocket(); }
     else if (!state.ws) connectSocket();
   }
   function setAgentStatus(agentId,status) {
@@ -199,8 +199,31 @@
     const badge=$('agentStateBadge');badge.textContent=agent.status;badge.className=`state-badge state-${agent.status}`;
     const usage=state.contexts.get(agent.agentId),panel=$('contextUsage');panel.hidden=false;$('contextText').textContent=`Context ${usageText(usage)} · ${costText(usage)}`;const percent=Math.min(100,Math.max(0,Number(usage?.percent)||0));$('contextBar').style.width=`${percent}%`;panel.className=`context-usage ${usageLevel(usage)}`;
   }
+  function showAgentView(){
+    $('agentToolbar').hidden=false;$('terminalToolbar').hidden=true;$('terminalView').hidden=true;$('widgets').hidden=false;$('messages').hidden=false;$('prompt').hidden=false;
+  }
+  function ensureTerminalEmulator(){
+    if(state.terminalEmulator)return;
+    const term=new Terminal({cursorBlink:true,convertEol:false,fontFamily:'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',fontSize:14,scrollback:5000,theme:{background:'#111111',foreground:'#d8dee9',cursor:'#88c0d0'}}),fit=new FitAddon.FitAddon();
+    term.loadAddon(fit);term.open($('terminal'));term.onData(data=>{if(state.terminalWs?.readyState===WebSocket.OPEN)state.terminalWs.send(JSON.stringify({type:'input',data}));});
+    term.onResize(size=>{if(state.terminalWs?.readyState===WebSocket.OPEN)state.terminalWs.send(JSON.stringify({type:'resize',cols:size.cols,rows:size.rows}));});
+    state.resizeObserver=new ResizeObserver(()=>{if(!$('terminalView').hidden)try{fit.fit();}catch{}});state.resizeObserver.observe($('terminalView'));state.terminalEmulator=term;state.fitAddon=fit;
+  }
+  function connectTerminalSocket(terminal){
+    state.terminalWs?.close();ensureTerminalEmulator();const term=state.terminalEmulator;term.reset();term.clear();
+    const ws=new WebSocket(state.base.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(terminal.terminalId)}/ws`,['access-token.'+state.token]);state.terminalWs=ws;
+    ws.onopen=()=>{if(ws!==state.terminalWs)return;requestAnimationFrame(()=>{try{state.fitAddon.fit();ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));term.focus();}catch{}});};
+    ws.onmessage=event=>{if(ws!==state.terminalWs)return;try{const message=JSON.parse(event.data);if(message.type==='snapshot'){term.reset();if(message.data)term.write(message.data);terminal.status=message.record.status;updateTerminalHeader();renderAgentList();}else if(message.type==='output')term.write(message.data);else if(message.type==='exit'){terminal.status='exited';terminal.exitCode=message.exitCode;updateTerminalHeader();renderAgentList();void refreshAgents();}else if(message.type==='error')toast(message.message);}catch(error){console.error(error);}};
+    ws.onerror=()=>{};ws.onclose=()=>{if(ws===state.terminalWs&&terminal.status==='running')$('terminalStatus').textContent=`${terminal.cwd} · 连接已断开`;};
+  }
+  function updateTerminalHeader(){const terminal=state.terminal;if(!terminal)return;$('terminalTitle').textContent=terminal.title||'Terminal';$('terminalStatus').textContent=`${terminal.cwd}${terminal.exitCode===undefined?'':` · exit ${terminal.exitCode}`}`;const badge=$('terminalStateBadge');badge.textContent=terminal.status;badge.className=`state-badge state-${terminal.status}`;}
+  async function selectTerminal(terminal,openView=true){
+    state.selectedKind='terminal';state.terminal=terminal;localStorage.rpTerminalId=terminal.terminalId;localStorage.rpSelectedKind='terminal';$('agentToolbar').hidden=true;$('terminalToolbar').hidden=false;$('terminalView').hidden=false;$('widgets').hidden=true;$('messages').hidden=true;$('prompt').hidden=true;updateTerminalHeader();renderAgentList();if(openView)navigateMobile('agent');connectTerminalSocket(terminal);
+  }
+  async function openTerminal(relativePath){if(!state.workspace)return toast('请先选择 Workspace');try{const terminal=await post('/api/v1/terminals',{workspaceId:state.workspace.id,relativeCwd:relativePath});state.terminals.unshift(terminal);$('contextMenu').hidden=true;renderAgentList();await selectTerminal(terminal);}catch(error){toast(error.message);}}
+  async function closeTerminal(terminal=state.terminal){if(!terminal)return;try{await api(`/api/v1/terminals/${terminal.terminalId}`,{method:'DELETE'});state.terminalWs?.close();state.terminalWs=null;state.terminals=state.terminals.filter(x=>x.terminalId!==terminal.terminalId);if(state.terminal?.terminalId===terminal.terminalId){state.terminal=null;localStorage.removeItem('rpTerminalId');localStorage.rpSelectedKind='agent';showAgentView();}renderAgentList();toast('Terminal 已关闭');}catch(error){toast(error.message);}}
   async function selectAgent(agent, openView = true) {
-    state.agent = agent; localStorage.rpAgentId = agent.agentId; updateAgentHeader();
+    state.selectedKind='agent';state.terminalWs?.close();state.terminalWs=null;state.agent = agent; localStorage.rpAgentId = agent.agentId;localStorage.rpSelectedKind='agent';showAgentView();updateAgentHeader();
     if (openView) navigateMobile('agent');
     if (state.workspace && isInside(clean(agent.cwd), clean(state.workspace.rootPath))) $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
     $('messages').replaceChildren(); state.streams.clear();
@@ -265,7 +288,7 @@
     }
     if (message.type !== 'agent_event') return;
     const key = `rpSeq:${message.agentId}`, last = Number(localStorage[key] || 0); if (message.sequence <= last) return; localStorage[key] = message.sequence;
-    const ev = message.event || {}, selected = state.agent?.agentId === message.agentId;
+    const ev = message.event || {}, selected = state.selectedKind==='agent'&&state.agent?.agentId === message.agentId;
     let eventAgent=state.agents.find(x=>x.agentId===message.agentId);
     if(eventAgent&&Number(message.timestamp)>0)eventAgent.lastActiveAt=new Date(Number(message.timestamp)*1000).toISOString();
     if (ev.type === 'agent_start' || ev.type === 'auto_retry_start') eventAgent=setAgentStatus(message.agentId,'streaming')||eventAgent;
@@ -342,7 +365,7 @@
   }
   const field = (body, label, value='', type='text') => { const l=document.createElement('label');l.textContent=label;const input=document.createElement('input');input.type=type;input.value=value;l.append(input);body.append(l);return input; };
   let agentContextTarget=null;
-  function showAgentContextMenu(event,agent){event.preventDefault();event.stopPropagation();agentContextTarget=agent;const menu=$('agentContextMenu');menu.hidden=false;menu.style.left=`${Math.min(event.clientX,innerWidth-210)}px`;menu.style.top=`${Math.min(event.clientY,innerHeight-60)}px`;}
+  function showItemContextMenu(event,kind,item){event.preventDefault();event.stopPropagation();agentContextTarget={kind,item};$('menuArchiveAgent').hidden=kind!=='agent';$('menuCloseTerminal').hidden=kind!=='terminal';const menu=$('agentContextMenu');menu.hidden=false;menu.style.left=`${Math.min(event.clientX,innerWidth-210)}px`;menu.style.top=`${Math.min(event.clientY,innerHeight-80)}px`;}
   async function createAgent() {
     if (!state.workspace) return toast('请先选择 Workspace');
     const cwd=$('agentCwd').value.trim()||'.'; let sessions=[]; try { sessions=await api(`/api/v1/sessions?workspaceId=${state.workspace.id}&path=${encodeURIComponent(cwd)}`); } catch(e){return toast(e.message);}
@@ -380,19 +403,19 @@
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){await post('/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
-  $('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await post(`/api/v1/agents/${agent.agentId}/archive`);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
+  $('menuOpenTerminal').onclick=()=>openTerminal(state.contextTarget.relativePath);$('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuCloseTerminal').onclick=()=>{const terminal=agentContextTarget?.kind==='terminal'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal(terminal);};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await post(`/api/v1/agents/${agent.agentId}/archive`);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
   $('newAgent').onclick=createAgent;$('abort').onclick=()=>state.agent&&post(`/api/v1/agents/${state.agent.agentId}/abort`).catch(e=>toast(e.message));$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
   $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await post(`/api/v1/agents/${state.agent.agentId}/compact`,{instructions:instructions||undefined});toast('Compact 完成');}};
   $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();addCard(text.slice(0,60),text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){const messages=await api(`/api/v1/agents/${agentId}/messages`);$('messages').replaceChildren();state.streams.clear();renderMessages(messages);}}catch(e){addCard('发送失败',e.message,'error',true);}};
   $('input').onkeydown=event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();return;}if(event.key==='Escape')closeMention();};$('input').oninput=()=>{const before=$('input').value.slice(0,$('input').selectionStart);if(/(^|\s)@[^\s]*$/.test(before)&&$('mentionPicker').hidden)openMention(state.treePath);};
   $('mentionUp').onclick=()=>openMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
-  $('workspaceBack').onclick=()=>mobileBack('home');$('fileBack').onclick=()=>mobileBack('workspace');$('agentBack').onclick=()=>mobileBack('home');
+  $('workspaceBack').onclick=()=>mobileBack('home');$('fileBack').onclick=()=>mobileBack('workspace');$('agentBack').onclick=()=>mobileBack('home');$('terminalBack').onclick=()=>mobileBack('home');$('terminalClear').onclick=()=>state.terminalEmulator?.clear();$('terminalClose').onclick=()=>{if(state.terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal();};
   $('mobileAgentActions').onclick=()=>$('mobileAgentActions').closest('.toolbar').classList.toggle('actions-open');
   document.querySelectorAll('.agent-action').forEach(button=>button.addEventListener('click',()=>button.closest('.toolbar').classList.remove('actions-open')));
   window.addEventListener('popstate',event=>setMobileView(event.state?.rpView||'home'));
   mobileMedia.addEventListener?.('change',event=>{if(event.matches)setMobileView('home',{replace:true});});
-  window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();});
+  window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();state.terminalWs?.close();});
   window.addEventListener('focus',updateNotificationButton);
   setMobileView('home', {replace:true}); updateNotificationButton(); openPair();
 })();

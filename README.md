@@ -42,6 +42,8 @@ npm run dev -- --port 11318
 - `agents.json`：当前 Remote Pi Agent 的 ID、关联 Workspace、cwd、Pi Session ID/文件路径、Session 名称、状态和创建/最后活动时间；不包含完整消息。
 - `agents_archive.json`：从当前列表 Archive 的 Agent 元数据，格式与 `agents.json` 相同。
 
+Terminal 只保存在服务进程内存中，不写入 JSON。刷新浏览器可以重新连接仍在运行的 Terminal；Remote Pi 服务退出或重启时会终止全部 Terminal。
+
 完整对话由 Pi 的 `SessionManager` 以 JSONL 管理，默认位于 `~/.pi/agent/sessions/<编码后的-cwd>/`，其中包含会话消息、分支、模型及 thinking level 等 Session 条目。模型配置、Provider 认证和 Pi 设置也继续复用 `~/.pi/agent`。浏览器选择的服务地址、Workspace/Agent 和事件游标另存在浏览器 `localStorage`；配对码仅在用户明确同意后才会存入其中。
 
 Remote Pi 启动时只静态读取 `agents.json`，恢复后的 Agent 状态为 `unloaded`，不会创建 Pi `AgentSession` 或初始化扩展。读取该 Agent 的消息、Session、能力，或者向其发送命令时才按需启动；并发请求共享同一次启动。“停止 Agent”只释放运行中的 Session 并保留 Agent 元数据，再次使用时会按需启动。
@@ -60,6 +62,7 @@ npm install -g ./remote-pi-0.1.0.tgz
 Web 端覆盖 Android 客户端的主要浏览器可实现能力：
 
 - Workspace 添加、目录浏览、文本文件分页及二进制提示。
+- Workspace 目录右键在交互式 Terminal 中打开；Terminal 与 Agent 显示在同一列表，支持刷新重连、清屏和关闭。
 - 创建/恢复 Session、Agent 列表、停止与 abort；Agent 右键 Archive。
 - Prompt、steer、follow-up 和流式对话。
 - 折叠消息、Thinking、Tool、Retry 和 Extension UI 事件。
@@ -68,6 +71,8 @@ Web 端覆盖 Android 客户端的主要浏览器可实现能力：
 - 输入 `@` 浏览并引用 Workspace 文件或目录。
 - WebSocket sequence 去重、断线指数退避、增量 replay/snapshot 恢复。
 - 浏览器允许通知时，对所有已知 Agent 提供完成通知。
+
+Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Workspace 路径只决定初始 cwd，并不是安全沙箱；Shell 可以访问 Workspace 之外的文件及继承到的环境变量。获得配对码的人实际上也获得了该用户的 Shell 权限，请勿将服务直接暴露到不可信网络。每个服务进程最多同时运行 8 个 Terminal，每个 Terminal 只保留最近 512 KiB 输出用于浏览器重连。
 
 浏览器安全模型与 Android 不同：配对码默认仅保存在当前页面的 JS 内存中；连接成功后会询问是否保存，只有用户确认才写入 localStorage。服务地址、当前 Workspace/Agent 和事件 sequence cursor 会保存在 localStorage。浏览器通知要求 HTTPS 安全上下文（`localhost` 可使用 HTTP）；通过局域网 IP 的 HTTP 地址访问时无法启用。自定义 Pi TUI Component 无法在浏览器通用渲染。
 
@@ -83,6 +88,9 @@ Web 端覆盖 Android 客户端的主要浏览器可实现能力：
 - `GET /api/v1/sessions`
 - `GET/POST /api/v1/agents`
 - `GET/DELETE /api/v1/agents/:id`
+- `GET/POST /api/v1/terminals`
+- `GET/DELETE /api/v1/terminals/:id`
+- Terminal WebSocket `/api/v1/terminals/:id/ws` 支持输入、窗口 resize、输出快照和退出事件。
 - Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork`、`archive` 和 `extension-response` 接口。
 - WebSocket `/api/v1/ws` 支持 sequence、replay、snapshot、`fromNow` 和 Agent command。
 
