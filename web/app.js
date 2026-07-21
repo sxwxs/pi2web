@@ -5,7 +5,7 @@
     base: localStorage.rpBase || location.origin, token: '', workspace: null, workspaces: [], treePath: '.',
     filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], ws: null,
     reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
-    mentionPath: '.', extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false,
+    mentionPath: '.', extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
   };
   $('api').value = state.base;
   $('pairBase').value = state.base;
@@ -19,6 +19,21 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const toast = text => { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => $('toast').hidden = true, 3000); };
   const requireConnection = () => { if (!state.connected) { openPair(); return false; } return true; };
+  const mobileMedia = matchMedia('(max-width: 700px)');
+  const isMobile = () => mobileMedia.matches;
+  function setMobileView(view, {push = false, replace = false} = {}) {
+    if (!['home','workspace','file','agent'].includes(view)) view = 'home';
+    const changed = state.mobileView !== view;
+    state.mobileView = view; document.body.dataset.mobileView = view;
+    $('workspaceHeading').textContent = view === 'home' ? 'Workspace' : state.workspace?.label || 'Workspace';
+    $('mobileAgentActions').closest('.toolbar')?.classList.remove('actions-open');
+    if (!isMobile()) return;
+    const historyState = {...(history.state || {}), rpView:view};
+    if (replace) history.replaceState(historyState, '');
+    else if (push && (changed || history.state?.rpView !== view)) history.pushState(historyState, '');
+  }
+  const navigateMobile = view => { if (isMobile()) setMobileView(view, {push:true}); };
+  const mobileBack = fallback => { if (isMobile() && history.state?.rpView === state.mobileView && state.mobileView !== 'home') history.back(); else setMobileView(fallback, {replace:true}); };
 
   async function api(url, options = {}) {
     if (!state.token) throw Error('请先输入配对码');
@@ -49,6 +64,7 @@
     $('status').className = 'ok'; $('status').textContent = '已配对';
     $('serverInfo').textContent = `v${status.version} · Pi ${status.piVersion}`;
     await refreshWs(); await refreshAgents(true);
+    setMobileView('home', {replace:true});
     if (localStorage.rpToken !== state.token) {
       if (confirm('是否将配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。')) localStorage.rpToken = state.token;
       else localStorage.removeItem('rpToken');
@@ -68,6 +84,7 @@
       const option = document.createElement('option'); option.value = workspace.id;
       option.textContent = `${workspace.label} (${workspace.rootPath})`; return option;
     }));
+    renderMobileWorkspaces();
     const wanted = state.workspace?.id || localStorage.rpWorkspaceId;
     if (state.workspaces.length) {
       $('workspaces').value = state.workspaces.some(x => x.id === wanted) ? wanted : state.workspaces[0].id;
@@ -76,10 +93,18 @@
       state.workspace = null; $('tree').innerHTML = '<div class="muted">请添加 Workspace</div>';
     }
   }
+  function renderMobileWorkspaces() {
+    $('mobileWorkspaces').replaceChildren(...state.workspaces.map(workspace => {
+      const button=document.createElement('button');button.type='button';button.className='workspace-card';
+      const name=document.createElement('b'),path=document.createElement('small');name.textContent=workspace.label;path.textContent=workspace.rootPath;button.append(name,path);
+      button.onclick=async()=>{try{$('workspaces').value=workspace.id;await selectWorkspace();navigateMobile('workspace');}catch(error){toast(error.message);}};return button;
+    }));
+  }
   async function selectWorkspace() {
     state.workspace = state.workspaces.find(x => x.id === $('workspaces').value);
     if (!state.workspace) return;
     localStorage.rpWorkspaceId = state.workspace.id; state.treePath = '.'; $('agentCwd').value = '.'; $('filePanel').hidden = true;
+    $('workspaceHeading').textContent = isMobile() && state.mobileView !== 'home' ? state.workspace.label : 'Workspace';
     await loadTree();
   }
   async function loadTree() {
@@ -97,7 +122,7 @@
     } catch (error) { $('tree').textContent = error.message; }
   }
   async function openDirectory(relativePath) { state.treePath = relativePath; $('filePanel').hidden = true; await loadTree(); }
-  async function openFile(relativePath, offset) {
+  async function openFile(relativePath, offset, showView = true) {
     try {
       const file = await api(`/api/v1/workspaces/${state.workspace.id}/file?path=${encodeURIComponent(relativePath)}&offset=${offset}&limit=${state.fileLimit}`);
       state.filePath = relativePath; state.fileOffset = file.offset; state.fileSize = file.size;
@@ -105,6 +130,7 @@
       $('file').textContent = file.binary ? `[二进制文件，${file.size} bytes，无法预览]` : file.content;
       $('filePage').textContent = `${file.offset.toLocaleString()}–${Math.min(file.offset + file.limit, file.size).toLocaleString()} / ${file.size.toLocaleString()} bytes`;
       $('filePrev').disabled = file.offset <= 0; $('fileNext').disabled = file.binary || file.offset + file.limit >= file.size;
+      if (showView) navigateMobile('file');
     } catch (error) { toast(error.message); }
   }
   function showContextMenu(event, target) {
@@ -161,7 +187,7 @@
     state.agents = await api('/api/v1/agents'); const previous = state.agent?.agentId || localStorage.rpAgentId;
     if(state.agent){const fresh=state.agents.find(x=>x.agentId===state.agent.agentId);if(fresh)state.agent=Object.assign(state.agent,fresh);}
     renderAgentList();
-    if (selectPrevious) { const found = state.agents.find(x => x.agentId === previous); if (found) await selectAgent(found); else connectSocket(); }
+    if (selectPrevious) { const found = state.agents.find(x => x.agentId === previous); if (found) await selectAgent(found, false); else connectSocket(); }
     else if (!state.ws) connectSocket();
   }
   function setAgentStatus(agentId,status) {
@@ -173,8 +199,9 @@
     const badge=$('agentStateBadge');badge.textContent=agent.status;badge.className=`state-badge state-${agent.status}`;
     const usage=state.contexts.get(agent.agentId),panel=$('contextUsage');panel.hidden=false;$('contextText').textContent=`Context ${usageText(usage)} · ${costText(usage)}`;const percent=Math.min(100,Math.max(0,Number(usage?.percent)||0));$('contextBar').style.width=`${percent}%`;panel.className=`context-usage ${usageLevel(usage)}`;
   }
-  async function selectAgent(agent) {
+  async function selectAgent(agent, openView = true) {
     state.agent = agent; localStorage.rpAgentId = agent.agentId; updateAgentHeader();
+    if (openView) navigateMobile('agent');
     if (state.workspace && isInside(clean(agent.cwd), clean(state.workspace.rootPath))) $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
     $('messages').replaceChildren(); state.streams.clear();
     try { renderMessages(await api(`/api/v1/agents/${agent.agentId}/messages`)); await loadSessionIdentity(); } catch (error) { addCard('加载消息失败', error.message, 'error', true); }
@@ -283,13 +310,13 @@
     return '';
   }
   function updateNotificationButton() {
-    const button=$('notifications'), unavailable=notificationUnavailableReason();
+    const button=$('notifications'), mobileButton=$('mobileNotifications'), unavailable=notificationUnavailableReason();
     // Keep the button clickable so unsupported/denied states can explain how to
     // fix the problem instead of silently ignoring the user's click.
-    button.disabled=false;
-    if (unavailable) { button.textContent='通知不可用'; button.title=unavailable; return; }
+    button.disabled=false; mobileButton.disabled=false;
+    if (unavailable) { button.textContent='通知不可用'; button.title=unavailable; mobileButton.title=unavailable; return; }
     button.textContent=Notification.permission==='granted'?'通知已启用':Notification.permission==='denied'?'通知已禁用':'启用通知';
-    button.title=Notification.permission==='denied'?'通知权限已被浏览器阻止，点击查看处理方式':'启用所有 Agent 的完成通知';
+    button.title=Notification.permission==='denied'?'通知权限已被浏览器阻止，点击查看处理方式':'启用所有 Agent 的完成通知'; mobileButton.title=button.title;
   }
   async function enableNotifications() {
     const unavailable=notificationUnavailableReason();
@@ -349,10 +376,10 @@
 
   $('pairCancel').onclick=()=>$('pairDialog').close();
   $('pairForm').onsubmit=async event=>{event.preventDefault();$('pairSubmit').disabled=true;try{await connect($('pairBase').value,$('pairToken').value);}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
-  $('connect').onclick=openPair; $('notifications').onclick=enableNotifications; $('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
+  $('connect').onclick=openPair; $('notifications').onclick=enableNotifications; $('mobileNotifications').onclick=enableNotifications; $('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){await post('/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);
-  $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit));$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit);
+  $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
   $('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await post(`/api/v1/agents/${agent.agentId}/archive`);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
   $('newAgent').onclick=createAgent;$('abort').onclick=()=>state.agent&&post(`/api/v1/agents/${state.agent.agentId}/abort`).catch(e=>toast(e.message));$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
@@ -360,7 +387,12 @@
   $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();addCard(text.slice(0,60),text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){const messages=await api(`/api/v1/agents/${agentId}/messages`);$('messages').replaceChildren();state.streams.clear();renderMessages(messages);}}catch(e){addCard('发送失败',e.message,'error',true);}};
   $('input').onkeydown=event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();return;}if(event.key==='Escape')closeMention();};$('input').oninput=()=>{const before=$('input').value.slice(0,$('input').selectionStart);if(/(^|\s)@[^\s]*$/.test(before)&&$('mentionPicker').hidden)openMention(state.treePath);};
   $('mentionUp').onclick=()=>openMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
+  $('workspaceBack').onclick=()=>mobileBack('home');$('fileBack').onclick=()=>mobileBack('workspace');$('agentBack').onclick=()=>mobileBack('home');
+  $('mobileAgentActions').onclick=()=>$('mobileAgentActions').closest('.toolbar').classList.toggle('actions-open');
+  document.querySelectorAll('.agent-action').forEach(button=>button.addEventListener('click',()=>button.closest('.toolbar').classList.remove('actions-open')));
+  window.addEventListener('popstate',event=>setMobileView(event.state?.rpView||'home'));
+  mobileMedia.addEventListener?.('change',event=>{if(event.matches)setMobileView('home',{replace:true});});
   window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();});
   window.addEventListener('focus',updateNotificationButton);
-  updateNotificationButton(); openPair();
+  setMobileView('home', {replace:true}); updateNotificationButton(); openPair();
 })();
