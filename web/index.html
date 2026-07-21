@@ -18,14 +18,17 @@
 </header>
 <main>
   <aside>
-    <section>
-      <div class="section-title"><h2>Workspace</h2><span><button id="refreshWs" title="刷新">↻</button><button id="addWs">添加</button></span></div>
+    <section id="workspaceSection">
+      <div class="section-title"><div class="section-heading"><button id="workspaceBack" class="mobile-only" title="返回主页" aria-label="返回主页">←</button><h2 id="workspaceHeading">Workspace</h2></div><span class="workspace-home-actions"><button id="mobileNotifications" class="mobile-only" title="启用通知" aria-label="通知">🔔</button><button id="refreshWs" title="刷新">↻</button><button id="addWs">添加</button></span></div>
       <select id="workspaces" size="3" aria-label="Workspace"></select>
-      <div class="pathbar"><button id="treeUp" title="上级目录">↑</button><button id="treeRoot" title="根目录">⌂</button><button id="mentionCurrent" title="引用当前目录">@</button><span id="treePath">.</span></div>
-      <div id="tree"></div>
-      <div id="filePanel" hidden><div class="filebar"><b id="fileName"></b><span><button id="filePrev">上一页</button><button id="fileNext">下一页</button></span></div><pre id="file"></pre><small id="filePage" class="muted"></small></div>
+      <div id="mobileWorkspaces" class="mobile-only" aria-label="Workspaces"></div>
+      <div id="workspaceBrowser">
+        <div class="pathbar"><button id="treeUp" title="上级目录">↑</button><button id="treeRoot" title="根目录">⌂</button><button id="mentionCurrent" title="引用当前目录">@</button><span id="treePath">.</span></div>
+        <div id="tree"></div>
+        <div id="filePanel" hidden><div class="filebar"><div class="file-title"><button id="fileBack" class="mobile-only" title="返回目录" aria-label="返回目录">←</button><b id="fileName"></b></div><span><button id="filePrev">上一页</button><button id="fileNext">下一页</button></span></div><pre id="file"></pre><small id="filePage" class="muted"></small></div>
+      </div>
     </section>
-    <section>
+    <section id="agentsSection">
       <div class="section-title"><h2>Agents</h2><button id="newAgent">新建</button></div>
       <label class="cwd-field">工作路径<input id="agentCwd" value="." title="相对于 Workspace"></label>
       <div id="agents"></div>
@@ -33,14 +36,16 @@
   </aside>
   <article>
     <div class="toolbar">
+      <button id="agentBack" class="mobile-only" title="返回主页" aria-label="返回主页">←</button>
       <div class="title-wrap"><div class="agent-heading"><strong id="agentTitle">请选择 Agent</strong><span id="agentStateBadge" class="state-badge state-none">未选择</span></div><small id="agentStatus" class="muted"></small><div id="contextUsage" class="context-usage" hidden><div class="context-track"><i id="contextBar"></i></div><small id="contextText"></small></div></div>
-      <button id="sessionName" title="修改 Session 名称">命名</button>
-      <button id="undo" title="在 Session Tree 中回退输入或 Agent 输出">Undo</button>
-      <button id="sessionTree">Session</button>
-      <button id="controls">模型</button>
-      <button id="compact">Compact</button>
-      <button id="stop">停止</button>
-      <button id="abort">Abort</button>
+      <button id="mobileAgentActions" class="mobile-only" title="更多操作" aria-label="更多操作">⋮</button>
+      <button id="sessionName" class="agent-action" title="修改 Session 名称">命名</button>
+      <button id="undo" class="agent-action" title="在 Session Tree 中回退输入或 Agent 输出">Undo</button>
+      <button id="sessionTree" class="agent-action">Session</button>
+      <button id="controls" class="agent-action">模型</button>
+      <button id="compact" class="agent-action">Compact</button>
+      <button id="stop" class="agent-action">停止</button>
+      <button id="abort" class="agent-action danger-action">Abort</button>
     </div>
     <div id="widgets"></div>
     <div id="messages" aria-live="polite"><div class="empty">选择或创建 Agent 开始对话</div></div>
