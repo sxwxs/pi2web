@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Remote Pi">
+  <defs>
+    <linearGradient id="bg" x1="10" y1="7" x2="54" y2="59" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8fbcff"/>
+      <stop offset="1" stop-color="#5e81ac"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="18" y1="17" x2="47" y2="47" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#b8f3ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="url(#bg)"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="#d8f7ff" stroke-opacity=".72" stroke-width="2"/>
+  <path d="M23 17.5a13.4 13.4 0 0 1 18 0M27.5 22a7 7 0 0 1 9 0" fill="none" stroke="#c8ff9b" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="32" cy="26" r="2.3" fill="#c8ff9b"/>
+  <path d="M17 31c8-3.6 22-3.6 30 0M25 29v17M40 29v10.5c0 4.4 2.1 6.5 6 6.5" fill="none" stroke="url(#mark)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="17" cy="31" r="3" fill="#b8f3ff"/>
+  <circle cx="47" cy="31" r="3" fill="#b8f3ff"/>
+</svg>
