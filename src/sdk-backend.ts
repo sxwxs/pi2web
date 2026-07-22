@@ -28,7 +28,8 @@ export class SdkBackend implements AgentBackend {
     const available=this.session.modelRegistry.getAvailable();
     return {model:current?this.modelInfo(current):null,models:available.map(model=>this.modelInfo(model)),thinkingLevel:this.session.thinkingLevel,thinkingLevels:this.session.getAvailableThinkingLevels(),supportsThinking:this.session.supportsThinking()};
   }
-  async getSession(){return {sessionId:this.session.sessionId,sessionFile:this.session.sessionFile,sessionName:this.session.sessionName,leafId:this.session.sessionManager.getLeafId(),entries:this.session.sessionManager.getEntries(),tree:this.session.sessionManager.getTree(),userMessages:this.session.getUserMessagesForForking(),stats:this.session.getSessionStats(),contextUsage:this.session.getContextUsage()}}
+  async getSession(){return {...await this.getSessionInfo(),leafId:this.session.sessionManager.getLeafId(),entries:this.session.sessionManager.getEntries(),tree:this.session.sessionManager.getTree(),userMessages:this.session.getUserMessagesForForking()}}
+  async getSessionInfo(){return {sessionId:this.session.sessionId,sessionFile:this.session.sessionFile,sessionName:this.session.sessionName,stats:this.session.getSessionStats(),contextUsage:this.session.getContextUsage()}}
   compact(instructions?:string){return this.session.compact(instructions)}
   async setModel(provider:string,modelId:string){const model=this.session.modelRegistry.find(provider,modelId);if(!model)throw Object.assign(new Error('Model not found'),{code:'MODEL_NOT_FOUND'});await this.session.setModel(model)}
   async setThinkingLevel(level:string){if(!['off','minimal','low','medium','high','xhigh'].includes(level))throw Object.assign(new Error('Invalid thinking level'),{code:'INVALID_THINKING_LEVEL'});this.session.setThinkingLevel(level as any)}

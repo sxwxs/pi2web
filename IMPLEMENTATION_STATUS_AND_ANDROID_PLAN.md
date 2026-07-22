@@ -250,27 +250,24 @@ Remote Pi 元数据默认存放在：
 ```text
 ~/.pi/remote-pi/
 ├── auth.json
-├── workspaces.json
-└── agents.json
+└── remote-pi.db
 ```
 
 其中：
 
-- `workspaces.json` 保存 Workspace allowlist。
-- `agents.json` 保存 Remote Pi Agent ID、Workspace、cwd、sessionId、sessionFile、创建时间和最后活动时间。
-- 完整消息不复制到 Remote Pi 元数据中。
-- 完整会话历史继续由 Pi session 文件保存。
+- SQLite `workspaces` 表保存 Workspace allowlist。
+- SQLite `agents` 表保存 Remote Pi Agent ID、Workspace、cwd、sessionId、sessionFile、状态、Archive 标记和活动时间。
+- SQLite `sessions` 表保存可重建的 Session 列表索引。
+- 完整消息不复制到 Remote Pi 数据库中，完整会话历史继续由 Pi JSONL Session 文件保存。
+- 旧版 `workspaces.json`、`agents.json` 和 `agents_archive.json` 被直接忽略，不执行迁移。
 
 Server 重启时：
 
-1. 读取 Workspace 元数据。
-2. 读取 Agent 元数据。
-3. 校验保存的 cwd 仍位于 Workspace 中。
-4. 使用 `SessionManager.open(sessionFile)` 恢复 Pi session。
-5. 恢复 Agent ID 和历史 messages。
-6. 不重新执行上一次 prompt。
-
-当前实现会在 Server 启动时恢复保存的 Agent，而不是计划中更理想的按需懒加载。Agent 数量较少时可接受，后续应改成历史元数据立即可见、用户打开时再创建 SDK runtime。
+1. 从 SQLite 读取 Workspace 和未归档 Agent 元数据。
+2. 校验保存的 cwd 仍位于 Workspace 中。
+3. 将 Agent 恢复为 `unloaded`，不立即创建 Pi runtime。
+4. 用户读取消息、Session、能力或发送命令时，才使用 `SessionManager.open(sessionFile)` 按需恢复。
+5. 不重新执行上一次 prompt。
 
 ### 2.8 Native HTML5 Web UI
 
