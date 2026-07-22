@@ -5,7 +5,7 @@
     base: localStorage.rpBase || location.origin, token: '', workspace: null, workspaces: [], treePath: '.',
     filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], terminals: [], terminal: null, selectedKind: 'agent', ws: null, terminalWs: null,
     terminalEmulator: null, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
-    mentionPath: '.', extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
+    mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
   };
   $('api').value = state.base;
@@ -138,29 +138,43 @@
     event.preventDefault(); state.contextTarget = target; const isDirectory = target.type === 'directory'; $('menuStartAgent').hidden = !isDirectory; $('menuSetCwd').hidden = !isDirectory; $('menuOpenTerminal').hidden = !isDirectory;
     const menu = $('contextMenu'); menu.hidden = false; menu.style.left = `${Math.min(event.clientX, innerWidth - 210)}px`; menu.style.top = `${Math.min(event.clientY, innerHeight - 130)}px`;
   }
-  function insertMention(relativePath) {
-    if (!state.workspace) return;
-    const target = absolutePath(relativePath), cwd = clean(state.agent?.cwd || absolutePath($('agentCwd').value.trim() || '.'));
-    const path = isInside(target, cwd) ? relativeTo(target, cwd) : target;
-    const mention = `@${path.includes(' ') ? `"${path}"` : path}`; const input = $('input');
-    const start = input.selectionStart, before = input.value.slice(0, start), match = before.match(/(^|\s)@[^\s]*$/);
-    const from = match ? start - match[0].length + (match[1] ? 1 : 0) : start;
-    input.setRangeText(`${mention} `, from, start, 'end'); input.focus(); closeMention();
+  function mentionContext() {
+    const input=$('input'),end=input.selectionStart,before=input.value.slice(0,end),match=before.match(/(^|\s)@(?:"([^"]*)"?|([^\s]*))$/);
+    if(!match)return null;const token=match[0].slice(match[1]?.length||0),start=end-token.length,replacementEnd=end+(token.startsWith('@"')&&input.value[end]==='"'?1:0);return {start,end,replacementEnd,query:match[2]??match[3]??''};
   }
-  async function openMention(path = state.treePath) {
-    if (!state.workspace) return;
-    state.mentionPath = path; $('mentionPicker').hidden = false; $('mentionPath').textContent = absolutePath(path);
+  function mentionValue(relativePath, directory=false) {
+    const target=absolutePath(relativePath),cwd=clean(state.agent?.cwd||absolutePath($('agentCwd').value.trim()||'.'));
+    let value=isInside(target,cwd)?relativeTo(target,cwd):target;if(directory&&value!=='.')value+='/';return value;
+  }
+  function writeMention(relativePath,{directory=false,close=true}={}) {
+    if(!state.workspace)return;const input=$('input'),context=mentionContext(),from=state.mentionStart??context?.start??input.selectionStart,to=state.mentionEnd??context?.replacementEnd??input.selectionStart;
+    const value=mentionValue(relativePath,directory),quoted=value.includes(' '),mention=`@${quoted?`"${value}"`:value}`;input.setRangeText(`${mention}${close?' ':''}`,from,to,'end');state.mentionStart=from;state.mentionEnd=from+mention.length;if(directory&&!close&&quoted)input.setSelectionRange(state.mentionEnd-1,state.mentionEnd-1);input.focus();if(close)closeMention();
+  }
+  function insertMention(relativePath) { state.mentionStart=null;state.mentionEnd=null;writeMention(relativePath); }
+  function setMentionSelection(index) {
+    const count=state.mentionFiltered.length;if(!count){state.mentionIndex=0;return;}state.mentionIndex=(index+count)%count;
+    $('mentionItems').querySelectorAll('.picker-item').forEach((element,i)=>element.classList.toggle('selected',i===state.mentionIndex));
+    $('mentionItems').querySelector('.picker-item.selected')?.scrollIntoView({block:'nearest'});
+  }
+  function browseMention(path) { writeMention(path,{directory:true,close:false});state.mentionPrefix=mentionValue(path,true);void openMention(path,''); }
+  function chooseMention(option,close) {
+    if(!option)return;if(option.type==='directory'&&!close&&!option.current){browseMention(option.path);return;}
+    writeMention(option.path,{close});if(!close)state.mentionPrefix='';
+  }
+  function renderMentionItems(filter='') {
+    const query=filter.toLocaleLowerCase(),options=state.mentionOptions.filter(option=>!query||(!option.current&&(option.name.toLocaleLowerCase().includes(query)||option.path.toLocaleLowerCase().includes(query))));
+    state.mentionFiltered=options;state.mentionIndex=0;
+    if(!options.length){const empty=document.createElement('div');empty.className='picker-empty muted';empty.textContent='没有匹配的文件或目录';$('mentionItems').replaceChildren(empty);return;}
+    $('mentionItems').replaceChildren(...options.map((option,index)=>{const el=document.createElement('div');el.className=`picker-item ${option.type==='directory'?'dir':'file-entry'}${index===0?' selected':''}`;el.textContent=option.label;el.onmouseenter=()=>setMentionSelection(index);el.onclick=()=>chooseMention(option,option.type!=='directory'||option.current);return el;}));
+  }
+  async function openMention(path=state.treePath,filter='') {
+    if(!state.workspace)return;const request=++state.mentionRequest;state.mentionPath=path;$('mentionPicker').hidden=false;$('mentionPath').textContent=absolutePath(path);
     try {
-      const items = await api(`/api/v1/workspaces/${state.workspace.id}/tree?path=${encodeURIComponent(path)}`);
-      const current = document.createElement('div'); current.className = 'picker-item dir'; current.textContent = '📁 引用当前目录'; current.onclick = () => insertMention(path);
-      $('mentionItems').replaceChildren(current, ...items.map(item => {
-        const el = document.createElement('div'); el.className = `picker-item ${item.type === 'directory' ? 'dir' : 'file-entry'}`;
-        el.textContent = `${item.type === 'directory' ? '📁' : '📄'} ${item.name}`; const p = joinPath(path, item.name);
-        el.onclick = () => item.type === 'directory' ? openMention(p) : insertMention(p); return el;
-      }));
-    } catch (error) { $('mentionItems').textContent = error.message; }
+      const items=await api(`/api/v1/workspaces/${state.workspace.id}/tree?path=${encodeURIComponent(path)}`);if(request!==state.mentionRequest)return;
+      state.mentionOptions=[{name:'引用当前目录',path,type:'directory',current:true,label:'📁 引用当前目录'},...items.map(item=>({name:item.name,path:joinPath(path,item.name),type:item.type,current:false,label:`${item.type==='directory'?'📁':'📄'} ${item.name}`}))];renderMentionItems(filter);
+    } catch(error){if(request===state.mentionRequest)$('mentionItems').textContent=error.message;}
   }
-  const closeMention = () => $('mentionPicker').hidden = true;
+  function closeMention(){state.mentionRequest++;state.mentionStart=null;state.mentionEnd=null;state.mentionPrefix='';$('mentionPicker').hidden=true;}
 
   function agentLabel(agent) { return agent.sessionName || agent.name || agent.agentId; }
   const formatTokens = value => { const n=Number(value); if(!Number.isFinite(n)||n<=0)return '0'; if(n>=1e6)return `${(n/1e6).toFixed(1)}M`;if(n>=1e3)return `${(n/1e3).toFixed(n>=1e4?0:1)}k`;return String(Math.round(n)); };
@@ -439,8 +453,8 @@
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
   $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await post(`/api/v1/agents/${state.agent.agentId}/compact`,{instructions:instructions||undefined});toast('Compact 完成');}};
   $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();addCard(null,text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
-  $('input').onkeydown=event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();return;}if(event.key==='Escape')closeMention();};$('input').oninput=()=>{const before=$('input').value.slice(0,$('input').selectionStart);if(/(^|\s)@[^\s]*$/.test(before)&&$('mentionPicker').hidden)openMention(state.treePath);};
-  $('mentionUp').onclick=()=>openMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
+  $('input').onkeydown=event=>{if(!$('mentionPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setMentionSelection(state.mentionIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||event.key==='Enter'){event.preventDefault();chooseMention(state.mentionFiltered[state.mentionIndex],event.key==='Enter');return;}if(event.key==='Escape'){event.preventDefault();closeMention();return;}}if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();}};$('input').oninput=()=>{const context=mentionContext();if(!context){if(!$('mentionPicker').hidden)closeMention();return;}const fresh=$('mentionPicker').hidden||state.mentionStart!==context.start;state.mentionStart=context.start;state.mentionEnd=context.replacementEnd;if(fresh){state.mentionPrefix='';void openMention(state.treePath,context.query);return;}const filter=state.mentionPrefix&&context.query.startsWith(state.mentionPrefix)?context.query.slice(state.mentionPrefix.length):context.query;renderMentionItems(filter);};
+  $('mentionUp').onclick=()=>browseMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
   $('workspaceBack').onclick=()=>mobileBack('home');$('fileBack').onclick=()=>mobileBack('workspace');$('agentBack').onclick=()=>mobileBack('home');$('terminalBack').onclick=()=>mobileBack('home');$('terminalClear').onclick=()=>state.terminalEmulator?.clear();$('terminalClose').onclick=()=>{if(state.terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal();};
   $('mobileAgentActions').onclick=()=>$('mobileAgentActions').closest('.toolbar').classList.toggle('actions-open');
   document.querySelectorAll('.agent-action').forEach(button=>button.addEventListener('click',()=>button.closest('.toolbar').classList.remove('actions-open')));
