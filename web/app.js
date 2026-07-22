@@ -245,12 +245,17 @@
     if (!Array.isArray(content)) return '';
     return content.map(part => part?.type === 'text' ? part.text : part?.type === 'thinking' ? part.thinking || part.text : part?.type === 'toolCall' ? `${part.name || 'Tool'}\n${JSON.stringify(part.arguments || {}, null, 2)}` : '').filter(Boolean).join('\n');
   }
+  function renderCardBody(body, content, markdown = false) {
+    const value=String(content??'');body.classList.toggle('markdown',markdown);
+    if(markdown&&window.marked&&window.DOMPurify){body.innerHTML=DOMPurify.sanitize(marked.parse(value,{gfm:true,breaks:true}));for(const link of body.querySelectorAll('a')){link.target='_blank';link.rel='noopener noreferrer';}}
+    else body.textContent=value;
+  }
   function addCard(title, content, kind = 'system', open = false, timestamp, target = $('messages'), autoScroll = true) {
-    const details = document.createElement('details'); details.className = `msg ${kind}`; details.open = open;
-    const summary = document.createElement('summary'); summary.textContent = (title || String(content).split('\n')[0] || kind).slice(0, 80);
+    const derivedTitle=!title,details=document.createElement('details'); details.className = `msg ${kind}${derivedTitle?' derived-title':''}`; details.open = open;
+    const summary=document.createElement('summary'),summaryText=document.createElement('span'),summaryLabel=document.createElement('span');summaryText.className='summary-text';summaryText.textContent=title||String(content).trim()||kind;summaryLabel.className='summary-label';summaryLabel.textContent=kind==='user'?'You':kind==='assistant'?'Assistant':kind;summary.append(summaryText,summaryLabel);
     if (timestamp) { const time = document.createElement('span'); time.className = 'event-time'; time.textContent = new Date(timestamp * 1000).toLocaleTimeString(); summary.append(time); }
-    const body = document.createElement('div'); body.className = 'msg-content'; body.textContent = content ?? '';
-    details.append(summary, body); target.append(details); if(autoScroll&&target===$('messages'))$('messages').scrollTop = $('messages').scrollHeight; return {details, summary, body};
+    const body = document.createElement('div'); body.className = 'msg-content';renderCardBody(body,content,kind==='assistant');
+    details.append(summary, body); target.append(details); if(autoScroll&&target===$('messages'))$('messages').scrollTop = $('messages').scrollHeight; return {details, summary, summaryText, body, content:String(content??'')};
   }
   function renderMessages(messages, target = $('messages'), showEmpty = true) {
     if (!messages?.length) { if(showEmpty&&target===$('messages'))$('messages').innerHTML = '<div class="empty">尚无消息</div>'; return; }
@@ -258,11 +263,11 @@
       const role = message.role || 'event';
       if (Array.isArray(message.content) && role === 'assistant') {
         for (const part of message.content) {
-          if (part.type === 'text' && part.text) addCard(part.text.slice(0,60),part.text,'assistant',false,undefined,target,false);
+          if (part.type === 'text' && part.text) addCard(null,part.text,'assistant',false,undefined,target,false);
           else if (part.type === 'thinking' && (part.thinking||part.text)) addCard('Thinking',part.thinking||part.text,'thinking',false,undefined,target,false);
           else if (part.type === 'toolCall') addCard(`🔧 ${part.name||'Tool'}`,JSON.stringify(part.arguments||{},null,2),'tool',false,undefined,target,false);
         }
-      } else { const content = textContent(message.content); if (content) addCard(role === 'user' ? content.slice(0, 60) : role === 'assistant' ? content.slice(0, 60) : role, content, role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : role === 'toolResult' ? 'tool' : 'system',false,undefined,target,false); }
+      } else { const content = textContent(message.content); if (content) addCard(['user','assistant'].includes(role)?null:role, content, role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : role === 'toolResult' ? 'tool' : 'system',false,undefined,target,false); }
     }
     if(target===$('messages'))$('messages').scrollTop=$('messages').scrollHeight;
   }
@@ -325,8 +330,8 @@
     if (ev.type === 'agent_start') { $('messages').querySelector('.empty')?.remove(); }
     else if (ev.type === 'message_update') {
       const update = ev.assistantMessageEvent || {};
-      if (update.type === 'text_delta') { const c=ensureStream('assistant','Assistant','assistant'); c.body.textContent += update.delta || ''; c.summary.firstChild.textContent = (c.body.textContent || 'Assistant').slice(0,60); }
-      else if (update.type === 'thinking_delta') ensureStream('thinking','Thinking','thinking').body.textContent += update.delta || '';
+      if (update.type === 'text_delta') { const c=ensureStream('assistant',null,'assistant');c.content+=update.delta||'';renderCardBody(c.body,c.content,true);c.summaryText.textContent=c.content||'Assistant'; }
+      else if (update.type === 'thinking_delta') {const c=ensureStream('thinking','Thinking','thinking');c.content+=update.delta||'';c.body.textContent=c.content;}
     } else if (ev.type === 'tool_execution_start') addCard(`🔧 ${ev.toolName || 'Tool'}`, JSON.stringify(ev.args || {}, null, 2), 'tool', false, message.timestamp);
     else if (ev.type === 'tool_execution_end') addCard(`${ev.isError ? '✗' : '✓'} ${ev.toolName || 'Tool'}`, textContent(ev.result) || (ev.isError ? '执行失败' : '执行完成'), ev.isError ? 'error' : 'tool', false, message.timestamp);
     else if (ev.type === 'auto_retry_start' || ev.type === 'auto_retry_end') addCard('Retry', ev.errorMessage || ev.type, 'system', false, message.timestamp);
@@ -432,7 +437,7 @@
   $('newAgent').onclick=createAgent;$('abort').onclick=()=>state.agent&&post(`/api/v1/agents/${state.agent.agentId}/abort`).catch(e=>toast(e.message));$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
   $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await post(`/api/v1/agents/${state.agent.agentId}/compact`,{instructions:instructions||undefined});toast('Compact 完成');}};
-  $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();addCard(text.slice(0,60),text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
+  $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();addCard(null,text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
   $('input').onkeydown=event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();return;}if(event.key==='Escape')closeMention();};$('input').oninput=()=>{const before=$('input').value.slice(0,$('input').selectionStart);if(/(^|\s)@[^\s]*$/.test(before)&&$('mentionPicker').hidden)openMention(state.treePath);};
   $('mentionUp').onclick=()=>openMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
   $('workspaceBack').onclick=()=>mobileBack('home');$('fileBack').onclick=()=>mobileBack('workspace');$('agentBack').onclick=()=>mobileBack('home');$('terminalBack').onclick=()=>mobileBack('home');$('terminalClear').onclick=()=>state.terminalEmulator?.clear();$('terminalClose').onclick=()=>{if(state.terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal();};
