@@ -671,33 +671,17 @@ Pi 默认拥有启动用户权限，包括文件系统、shell、网络和本地
 
 ## 8. 第一阶段持久化
 
-建议使用：
+当前实现使用：
 
 ```text
 ~/.pi/remote-pi/
   auth.json
-  config.json
-  workspaces.json
-  agents.json
-  audit.log
+  remote-pi.db
 ```
 
-`agents.json` 保存 Web Server 元数据：
+SQLite 保存 Workspace、Agent、Archive 状态和可重建的 Session 列表索引。数据库使用 WAL、短事务、部分索引以及合并后的活动时间更新；旧版 Remote Pi 元数据 JSON 不读取也不迁移。
 
-```json
-{
-  "id": "agent-123",
-  "workspaceId": "project-a",
-  "cwd": "/home/user/project-a",
-  "sessionId": "session-123",
-  "sessionFile": "/home/user/.pi/agent/sessions/...",
-  "createdAt": "2026-01-01T00:00:00.000Z",
-  "lastActiveAt": "2026-01-01T00:10:00.000Z",
-  "status": "idle"
-}
-```
-
-第一版不要复制完整消息历史。优先使用 Pi 的 session 文件和 SDK/RPC 查询能力。后续需要搜索、多用户和复杂权限时再引入 SQLite。
+第一版仍不复制完整消息历史。完整对话、分支和 Compact 数据继续由 Pi JSONL Session 文件保存，SQLite 仅保存列表、排序、分页和恢复映射所需的轻量元数据。
 
 ## 9. 第二阶段：Android App
 
@@ -1221,8 +1205,8 @@ WebSocket 连接断开不能自动停止 agent。agent 默认继续运行，重�
 
 服务启动时不要自动恢复所有历史 agent。采用懒加载策略：
 
-1. 从 `agents.json` 读取 agent 元数据。
-2. 标记上次未正常关闭的 agent 为 `stale`。
+1. 从 SQLite `agents` 表读取未归档的 Agent 元数据。
+2. 将恢复的 Agent 标记为 `unloaded`。
 3. 客户端请求打开 agent 时重新创建 runtime。
 4. 通过 sessionId/sessionFile 恢复 Pi session。
 5. 如果恢复失败，保留错误状态和原始 session 信息。

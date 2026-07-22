@@ -35,26 +35,28 @@ npm run dev -- --port 11318
 
 ## 数据持久化
 
-项目不使用 SQLite，服务端元数据默认以 JSON 文件保存在 `~/.pi/remote-pi`：
+Remote Pi 的服务端元数据保存在 `~/.pi/remote-pi/remote-pi.db` SQLite 数据库中：
 
-- `auth.json`：配对码的 SHA-256 hash、创建和轮换时间，不保存配对码明文，文件权限为 `0600`。
-- `workspaces.json`：Workspace ID、名称、根目录和创建时间。
-- `agents.json`：当前 Remote Pi Agent 的 ID、关联 Workspace、cwd、Pi Session ID/文件路径、Session 名称、状态和创建/最后活动时间；不包含完整消息。
-- `agents_archive.json`：从当前列表 Archive 的 Agent 元数据，格式与 `agents.json` 相同。
+- `workspaces`：Workspace ID、名称、根目录和创建时间。
+- `agents`：Agent 与 Workspace/Session 的映射、cwd、状态、创建/最后活动时间以及 Archive 状态。
+- `sessions`：用于 Session 列表、排序和分页的轻量索引，包括名称、文件路径、消息数量、文件 mtime/size 和最后活动时间。
+- `auth.json`：配对码的 SHA-256 hash、创建和轮换时间；认证数据仍单独保存，不保存配对码明文，文件权限为 `0600`。
 
-Terminal 只保存在服务进程内存中，不写入 JSON。刷新浏览器可以重新连接仍在运行的 Terminal；Remote Pi 服务退出或重启时会终止全部 Terminal。
+数据库使用 WAL、短事务、部分索引和批量延迟更新。Session 活动时间不会随每个 streaming token 写入，而是在完整消息、Agent 完成和 Session 信息变化时合并持久化。旧版 `workspaces.json`、`agents.json` 和 `agents_archive.json` 不会被读取、迁移或继续写入。
 
-完整对话由 Pi 的 `SessionManager` 以 JSONL 管理，默认位于 `~/.pi/agent/sessions/<编码后的-cwd>/`，其中包含会话消息、分支、模型及 thinking level 等 Session 条目。模型配置、Provider 认证和 Pi 设置也继续复用 `~/.pi/agent`。浏览器选择的服务地址、Workspace/Agent 和事件游标另存在浏览器 `localStorage`；配对码仅在用户明确同意后才会存入其中。
+Terminal 只保存在服务进程内存中，不写入数据库。刷新浏览器可以重新连接仍在运行的 Terminal；Remote Pi 服务退出或重启时会终止全部 Terminal。
 
-Remote Pi 启动时只静态读取 `agents.json`，恢复后的 Agent 状态为 `unloaded`，不会创建 Pi `AgentSession` 或初始化扩展。读取该 Agent 的消息、Session、能力，或者向其发送命令时才按需启动；并发请求共享同一次启动。“停止 Agent”只释放运行中的 Session 并保留 Agent 元数据，再次使用时会按需启动。
+完整对话由 Pi 的 `SessionManager` 以 JSONL 管理，默认位于 `~/.pi/agent/sessions/<编码后的-cwd>/`，其中包含会话消息、分支、模型及 thinking level 等 Session 条目。SQLite 只保存可重建的 Session 索引，不复制完整消息。模型配置、Provider 认证和 Pi 设置也继续复用 `~/.pi/agent`。浏览器选择的服务地址、Workspace/Agent 和事件游标另存在浏览器 `localStorage`；配对码仅在用户明确同意后才会存入其中。
 
-Web UI 的 Agent 列表支持右键 `Archive`。Archive 只把对应记录从 `agents.json` 移到 `agents_archive.json`，不会移动、重命名或删除 Pi 的任何 Session 文件；归档记录不会在 UI 中显示。手动恢复时应先停止 Remote Pi，再将记录从 `agents_archive.json` 移回 `agents.json`。
+Remote Pi 启动时从 SQLite 恢复 Agent 元数据，恢复后的 Agent 状态为 `unloaded`，不会创建 Pi `AgentSession` 或初始化扩展。读取该 Agent 的消息、Session、能力，或者向其发送命令时才按需启动；并发请求共享同一次启动。“停止 Agent”只释放运行中的 Session 并保留 Agent 元数据，再次使用时会按需启动。
+
+Web UI 的 Agent 列表支持右键 `Archive`。Archive 只设置数据库记录的 `archived_at`，不会移动、重命名或删除 Pi 的任何 Session 文件；归档记录不会在当前 UI 中显示。
 
 发布包可本地检查：
 
 ```bash
 npm pack --dry-run
-npm install -g ./remote-pi-0.1.0.tgz
+npm install -g ./remote-pi-0.2.0.tgz
 ```
 
 ## Web UI
