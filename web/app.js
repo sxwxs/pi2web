@@ -118,7 +118,7 @@
         el.textContent = `${item.type === 'directory' ? '📁' : '📄'} ${item.name}`;
         const relativePath = joinPath(state.treePath, item.name);
         el.onclick = () => item.type === 'directory' ? openDirectory(relativePath) : openFile(relativePath, 0);
-        el.oncontextmenu = event => showContextMenu(event, {relativePath, type:item.type}); return el;
+        const contextTarget={relativePath,type:item.type};el.oncontextmenu=event=>showContextMenu(event,contextTarget);enableLongPressMenu(el,event=>showContextMenu(event,contextTarget));return el;
       }));
     } catch (error) { $('tree').textContent = error.message; }
   }
@@ -136,7 +136,21 @@
   }
   function showContextMenu(event, target) {
     event.preventDefault(); state.contextTarget = target; const isDirectory = target.type === 'directory'; $('menuStartAgent').hidden = !isDirectory; $('menuSetCwd').hidden = !isDirectory; $('menuOpenTerminal').hidden = !isDirectory;
-    const menu = $('contextMenu'); menu.hidden = false; menu.style.left = `${Math.min(event.clientX, innerWidth - 210)}px`; menu.style.top = `${Math.min(event.clientY, innerHeight - 130)}px`;
+    const menu = $('contextMenu'); menu.hidden = false; const margin=8;menu.style.left=`${Math.max(margin,Math.min(event.clientX,innerWidth-menu.offsetWidth-margin))}px`;menu.style.top=`${Math.max(margin,Math.min(event.clientY,innerHeight-menu.offsetHeight-margin))}px`;
+  }
+  function enableLongPressMenu(element, openMenu) {
+    let timer=null,pointerId=null,startX=0,startY=0,suppressClickUntil=0;
+    const cancel=()=>{if(timer!==null)clearTimeout(timer);timer=null;pointerId=null;element.classList.remove('long-press-pending');};
+    element.classList.add('long-press-menu');
+    element.addEventListener('pointerdown',event=>{
+      if(!isMobile()||event.pointerType==='mouse'||event.button!==0||!event.isPrimary)return;
+      cancel();pointerId=event.pointerId;startX=event.clientX;startY=event.clientY;element.classList.add('long-press-pending');
+      timer=setTimeout(()=>{timer=null;suppressClickUntil=Date.now()+700;element.classList.remove('long-press-pending');navigator.vibrate?.(15);openMenu({preventDefault(){},clientX:startX,clientY:startY});},550);
+    });
+    element.addEventListener('pointermove',event=>{if(event.pointerId===pointerId&&Math.hypot(event.clientX-startX,event.clientY-startY)>10)cancel();});
+    element.addEventListener('pointerup',event=>{if(event.pointerId===pointerId)cancel();});
+    element.addEventListener('pointercancel',cancel);element.addEventListener('pointerleave',event=>{if(event.pointerId===pointerId)cancel();});
+    element.addEventListener('click',event=>{if(Date.now()<suppressClickUntil){event.preventDefault();event.stopImmediatePropagation();}},true);
   }
   function mentionContext() {
     const input=$('input'),end=input.selectionStart,before=input.value.slice(0,end),match=before.match(/(^|\s)@(?:"([^"]*)"?|([^\s]*))$/);
@@ -447,7 +461,7 @@
   $('connect').onclick=openPair; $('notifications').onclick=enableNotifications; $('mobileNotifications').onclick=enableNotifications; $('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){await post('/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);
-  $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
+  $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
   $('menuStartAgent').onclick=()=>startAgent(state.contextTarget.relativePath);$('menuOpenTerminal').onclick=()=>openTerminal(state.contextTarget.relativePath);$('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuCloseTerminal').onclick=()=>{const terminal=agentContextTarget?.kind==='terminal'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal(terminal);};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await post(`/api/v1/agents/${agent.agentId}/archive`);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
   $('newAgent').onclick=createAgent;$('abort').onclick=()=>state.agent&&post(`/api/v1/agents/${state.agent.agentId}/abort`).catch(e=>toast(e.message));$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
