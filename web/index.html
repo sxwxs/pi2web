@@ -69,7 +69,7 @@
     </form>
   </article>
 </main>
-<div id="contextMenu" class="context-menu" hidden><button id="menuOpenTerminal">在 Terminal 中打开</button><button id="menuSetCwd">设为 Agent 工作路径</button><button id="menuMention">在输入框中引用</button></div>
+<div id="contextMenu" class="context-menu" hidden><button id="menuStartAgent">启动 Agent</button><button id="menuOpenTerminal">在 Terminal 中打开</button><button id="menuSetCwd">设为 Agent 工作路径</button><button id="menuMention">在输入框中引用</button></div>
 <dialog id="pairDialog"><form method="dialog" id="pairForm"><h2>连接 Remote Pi</h2><p class="muted">连接成功后可选择是否将配对码保存到浏览器本地存储。请仅在可信设备上保存。</p><label>服务地址<input id="pairBase" required></label><label>配对码<input id="pairToken" type="password" autocomplete="off" required autofocus></label><div class="dialog-actions"><button id="pairCancel" type="button">取消</button><button id="pairSubmit" type="submit" value="default">连接</button></div></form></dialog>
 <div id="agentContextMenu" class="context-menu" hidden><button id="menuArchiveAgent">Archive</button><button id="menuCloseTerminal" hidden>关闭 Terminal</button></div>
 <dialog id="modal"><form method="dialog"><h2 id="modalTitle"></h2><div id="modalBody"></div><div class="dialog-actions"><button id="modalCancel" type="button">取消</button><button id="modalOk" type="submit" value="default">确定</button></div></form></dialog>
