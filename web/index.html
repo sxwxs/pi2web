@@ -26,13 +26,13 @@
       <select id="workspaces" size="3" aria-label="Workspace"></select>
       <div id="mobileWorkspaces" class="mobile-only" aria-label="Workspaces"></div>
       <div id="workspaceBrowser">
-        <div class="pathbar"><button id="treeUp" title="上级目录">↑</button><button id="treeRoot" title="根目录">⌂</button><button id="mentionCurrent" title="引用当前目录">@</button><span id="treePath">.</span></div>
+        <div class="pathbar"><button id="treeUp" title="上级目录">↑</button><button id="treeRoot" title="根目录">⌂</button><button id="mentionCurrent" title="引用当前目录">@</button><button id="terminalCurrent" title="在当前目录启动 Terminal" aria-label="在当前目录启动 Terminal">&gt;_</button><span id="treePath">.</span></div>
         <div id="tree"></div>
         <div id="filePanel" hidden><div class="filebar"><div class="file-title"><button id="fileBack" class="mobile-only" title="返回目录" aria-label="返回目录">←</button><b id="fileName"></b></div><span><button id="filePrev">上一页</button><button id="fileNext">下一页</button></span></div><pre id="file"></pre><small id="filePage" class="muted"></small></div>
       </div>
     </section>
     <section id="agentsSection">
-      <div class="section-title"><h2>Agents &amp; Terminals</h2><button id="newAgent">新建 Agent</button></div>
+      <div class="section-title"><h2>Agents &amp; Terminals</h2><span class="agent-create-actions"><button id="newAgent" title="新建 Agent" aria-label="新建 Agent">＋A</button><button id="newTerminal" title="新建 Terminal" aria-label="新建 Terminal">&gt;_</button></span></div>
       <label class="cwd-field">工作路径<input id="agentCwd" value="." title="相对于 Workspace"></label>
       <div id="agents"></div>
       <div id="agentListControls" class="list-controls"><label>每次加载 <select id="agentPageSize" aria-label="每次加载的 Session 数量"><option value="10" selected>10</option><option value="25">25</option><option value="50">50</option></select> 条</label><span id="agentListCount" class="muted"></span><button id="loadMoreAgents" type="button">加载更多</button></div>
