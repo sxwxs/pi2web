@@ -145,7 +145,13 @@ export class VoiceManager{
   private async speak(agentId:string,playbackId:string,text:string,signal:AbortSignal){
     const response=await this.fetcher(endpoint(this.config.speechBaseUrl,'/audio/speech'),{method:'POST',signal,headers:{'content-type':'application/json',...authHeaders(this.config.speechApiKey)},body:JSON.stringify({model:this.config.ttsModel,voice:this.config.ttsVoice,input:text,response_format:'pcm',sample_rate:this.config.sampleRate,stream_format:'audio'})});
     if(!response.ok)throw new Error(`Speech synthesis failed (${response.status}): ${(await response.text()).slice(0,500)}`);
-    if(!response.body)throw new Error('Speech synthesis returned no audio');const reader=response.body.getReader();
-    while(true){const {done,value}=await reader.read();if(done)break;if(value?.length)this.emit(agentId,{type:'voice_audio_chunk',playbackId,sampleRate:this.config.sampleRate,audio:Buffer.from(value).toString('base64')})}
+    if(!response.body)throw new Error('Speech synthesis returned no audio');const reader=response.body.getReader();let pending:Buffer|undefined;
+    while(true){
+      const {done,value}=await reader.read();if(done)break;if(!value?.length)continue;
+      const bytes=pending?Buffer.concat([pending,Buffer.from(value)]):Buffer.from(value);const evenLength=bytes.length&~1;
+      if(evenLength)this.emit(agentId,{type:'voice_audio_chunk',playbackId,sampleRate:this.config.sampleRate,audio:bytes.subarray(0,evenLength).toString('base64')});
+      pending=evenLength<bytes.length?Buffer.from(bytes.subarray(evenLength)):undefined;
+    }
+    if(pending)throw new Error('Speech synthesis returned an incomplete PCM16 sample');
   }
 }
