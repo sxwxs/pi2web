@@ -24,6 +24,34 @@ remote-pi --help
 
 服务器会同时提供 API、WebSocket 和 Web UI，无需另起静态文件服务器。请勿直接暴露到公网；远程访问建议使用 SSH tunnel、Tailscale 或配置 HTTPS 的可信反向代理。
 
+## 本地语音摘要与语音输入（实验性）
+
+Remote Pi 可以连接两个 OpenAI-compatible 服务：一个 LLM endpoint 把 Agent 最终输出压缩成适合朗读的短摘要，一个 STT/TTS endpoint（推荐 [Speaches](https://github.com/speaches-ai/speaches)）负责本地语音识别和语音合成。语音默认关闭，只有配置 `--voice-base-url` 才会启用。
+
+```bash
+# 示例模型 ID 需要替换为 Speaches 中实际下载的模型
+export SUMMARY_API_KEY=...
+remote-pi \
+  --voice-base-url http://127.0.0.1:8000/v1 \
+  --voice-stt-model <stt-model-id> \
+  --voice-tts-model <tts-model-id> \
+  --voice-tts-voice <voice-id> \
+  --voice-summary-base-url https://llm.example.com/v1 \
+  --voice-summary-model <summary-model-id> \
+  --voice-summary-api-key-env SUMMARY_API_KEY \
+  --voice-language zh-CN
+```
+
+工作方式：
+
+- Pi 发出 `agent_settled` 后，Remote Pi 取得最后一条 Assistant 文本，移除代码块、长链接和 Markdown，再限制摘要输入长度。
+- 摘要 LLM 使用流式 Chat Completions；Remote Pi 在完整句子出现后立即调用流式 TTS，因此无需等待整段摘要完成。
+- Web UI 中点击“启用语音”后，会播放服务端推送的 24 kHz 单声道 PCM16；新的 Agent 运行会取消旧播报。
+- Web UI 麦克风按钮会录音并调用配置的 STT 模型，识别文字只插入输入框，不会自动发送。
+- API key 通过 `--voice-api-key-env` 和 `--voice-summary-api-key-env` 指定环境变量名，避免把密钥放入命令行参数。
+
+语音流目前通过已认证的 Agent WebSocket 发送，只会实时投递，不写入 Session 或事件 replay。浏览器麦克风通常要求 HTTPS 安全上下文（`localhost` 例外）。Android 客户端的流式 PCM 播放和录音 UI 尚未接入。
+
 ## 本地开发
 
 项目 Review 中发现的问题、修复状态和暂缓的 Android 项目见 [`PROJECT_REVIEW_ISSUES.md`](PROJECT_REVIEW_ISSUES.md)。

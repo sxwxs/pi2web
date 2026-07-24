@@ -7,6 +7,7 @@
     terminalEmulator: null, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
+    voiceEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set()}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
   };
   $('api').value = state.base;
   $('pairBase').value = state.base;
@@ -61,13 +62,14 @@
     if(status.protocolVersion!==1)throw Error(`不支持的协议版本 ${status.protocolVersion}（需要 1）`);
     disconnect();state.base=candidateBase;state.token=candidateToken;state.connected=true;localStorage.rpBase=state.base;$('api').value=state.base;
     $('status').className='ok';$('status').textContent='已配对';$('serverInfo').textContent=`v${status.version} · Pi ${status.piVersion}`;
+    state.voiceEnabled=!!status.voiceEnabled;$('voicePlayback').hidden=!state.voiceEnabled;$('voiceInput').hidden=!state.voiceEnabled;updateVoiceButton();
     await refreshWs();await refreshAgents(true);setMobileView('home',{replace:true});
     if(localStorage.rpToken!==state.token){if(confirm('是否将配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。'))localStorage.rpToken=state.token;else localStorage.removeItem('rpToken');}
     $('pairDialog').close();
   }
   function disconnect(reason = '未配对') {
-    state.connected = false; state.token = ''; state.manuallyClosed = true;
-    clearTimeout(state.reconnectTimer); state.ws?.close(); state.ws = null; state.terminalWs?.close(); state.terminalWs = null;
+    state.connected = false; state.token = ''; state.manuallyClosed = true;state.voiceEnabled=false;$('voicePlayback').hidden=true;$('voiceInput').hidden=true;
+    clearTimeout(state.reconnectTimer); state.ws?.close(); state.ws = null; state.terminalWs?.close(); state.terminalWs = null; if(state.mediaRecorder?.state==='recording')state.mediaRecorder.stop();stopVoiceAudio();
     $('status').className = 'bad'; $('status').textContent = reason; $('serverInfo').textContent = '';
   }
 
@@ -328,7 +330,47 @@
     else { const input = ev.kind === 'editor' ? document.createElement('textarea') : document.createElement('input'); input.value = ev.prefill || ''; input.placeholder = ev.placeholder || ''; const b = document.createElement('button'); b.textContent = '提交'; b.onclick = () => send(input.value); controls.append(input,b); }
     card.body.append(controls);
   }
+  function stopVoiceAudio() {
+    for(const source of state.voiceAudio.sources){try{source.stop();}catch{}}state.voiceAudio.sources.clear();state.voiceAudio.nextTime=0;state.voiceAudio.playbackId=null;
+  }
+  async function ensureAudioContext() {
+    const AudioContext=window.AudioContext||window.webkitAudioContext;if(!AudioContext)throw Error('当前浏览器不支持音频播放');
+    state.voiceAudio.context??=new AudioContext();if(state.voiceAudio.context.state==='suspended')await state.voiceAudio.context.resume();return state.voiceAudio.context;
+  }
+  function playPcmChunk(event) {
+    if(!state.voicePlaybackEnabled||!event.audio)return;void ensureAudioContext().then(context=>{
+      if(state.voiceAudio.playbackId&&state.voiceAudio.playbackId!==event.playbackId)stopVoiceAudio();state.voiceAudio.playbackId=event.playbackId;
+      const raw=atob(event.audio),samples=new Float32Array(Math.floor(raw.length/2));for(let i=0;i<samples.length;i++){let value=raw.charCodeAt(i*2)|(raw.charCodeAt(i*2+1)<<8);if(value&0x8000)value-=0x10000;samples[i]=value/32768;}
+      const rate=Number(event.sampleRate||24000),buffer=context.createBuffer(1,samples.length,rate);buffer.copyToChannel(samples,0);const source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);const start=Math.max(context.currentTime+0.03,state.voiceAudio.nextTime||0);source.start(start);state.voiceAudio.nextTime=start+buffer.duration;state.voiceAudio.sources.add(source);source.onended=()=>state.voiceAudio.sources.delete(source);
+    }).catch(error=>toast(`语音播放失败：${error.message}`));
+  }
+  function handleVoiceEvent(message) {
+    const ev=message.event||{},selected=state.selectedKind==='agent'&&state.agent?.agentId===message.agentId,key=`voice-${ev.playbackId||message.agentId}`;
+    if(ev.type==='voice_start'){if(state.voicePlaybackEnabled){stopVoiceAudio();void ensureAudioContext().catch(()=>{});}if(selected){const c=ensureStream(key,'语音摘要','system');c.content='';renderCardBody(c.body,'正在生成语音摘要…',false);}}
+    else if(ev.type==='voice_summary_delta'){if(selected){const c=ensureStream(key,'语音摘要','system');c.content+=ev.text||'';renderCardBody(c.body,c.content,false);c.summaryText.textContent='语音摘要';}}
+    else if(ev.type==='voice_audio_chunk')playPcmChunk(ev);
+    else if(ev.type==='voice_cancelled'){stopVoiceAudio();}
+    else if(ev.type==='voice_error'){if(selected)addCard('语音服务',ev.message||'语音生成失败','error',true);}
+    else if(ev.type==='voice_end'){if(selected)state.streams.delete(key);}
+  }
+  function updateVoiceButton(){const button=$('voicePlayback');button.textContent=state.voicePlaybackEnabled?'语音已启用':'启用语音';button.title=state.voicePlaybackEnabled?'点击关闭 Agent 语音摘要':'点击启用 Agent 语音摘要播放';}
+  async function toggleVoicePlayback(){state.voicePlaybackEnabled=!state.voicePlaybackEnabled;localStorage.rpVoicePlayback=String(state.voicePlaybackEnabled);updateVoiceButton();if(state.voicePlaybackEnabled){try{await ensureAudioContext();toast('Agent 完成后将播放语音摘要');}catch(error){state.voicePlaybackEnabled=false;localStorage.rpVoicePlayback='false';updateVoiceButton();toast(error.message);}}else stopVoiceAudio();}
+  async function toggleVoiceInput(){
+    if(!state.voiceEnabled)return toast('服务端未启用语音能力');if(!state.agent)return toast('请先选择 Agent');
+    if(state.mediaRecorder&&state.mediaRecorder.state==='recording'){state.mediaRecorder.stop();return;}
+    if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder)return toast('当前浏览器不支持麦克风录音');
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true}),preferred=['audio/webm;codecs=opus','audio/webm','audio/mp4'].find(type=>MediaRecorder.isTypeSupported(type));state.mediaStream=stream;state.mediaChunks=[];state.mediaRecorder=new MediaRecorder(stream,preferred?{mimeType:preferred}:undefined);
+      state.mediaRecorder.ondataavailable=event=>{if(event.data.size)state.mediaChunks.push(event.data)};
+      state.mediaAgentId=state.agent.agentId;state.mediaRecorder.onstop=()=>void transcribeVoice();state.mediaRecorder.start(250);$('voiceInput').textContent='■';$('voiceInput').title='停止并识别';$('voiceInput').classList.add('recording');state.mediaTimer=setTimeout(()=>state.mediaRecorder?.state==='recording'&&state.mediaRecorder.stop(),60000);
+    }catch(error){toast(`无法录音：${error.message}`);}
+  }
+  async function transcribeVoice(){
+    clearTimeout(state.mediaTimer);const recorder=state.mediaRecorder,mime=recorder?.mimeType||'audio/webm',blob=new Blob(state.mediaChunks,{type:mime}),agentId=state.mediaAgentId;state.mediaStream?.getTracks().forEach(track=>track.stop());state.mediaRecorder=null;state.mediaStream=null;state.mediaChunks=[];state.mediaAgentId=null;$('voiceInput').textContent='…';$('voiceInput').classList.remove('recording');
+    if(!agentId){$('voiceInput').textContent='🎙';return;}try{const response=await fetch(state.base+`/api/v1/agents/${agentId}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
+  }
   function handleAgentEvent(message) {
+    if(message.type==='voice_event'){handleVoiceEvent(message);return;}
     if (message.type === 'subscribed') {
       const key = `rpSeq:${message.agentId}`, saved = Number(localStorage[key] || 0), current = Number(message.currentSequence || 0);
       // Agent event sequences restart when the server restores an Agent. A cursor
@@ -453,7 +495,7 @@
   $('pairCancel').onclick=()=>$('pairDialog').close();
   $('modalCancel').onclick=()=>$('modal').close('cancel');
   $('pairForm').onsubmit=async event=>{event.preventDefault();$('pairSubmit').disabled=true;try{await connect($('pairBase').value,$('pairToken').value);}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
-  $('connect').onclick=openPair; $('notifications').onclick=enableNotifications; $('mobileNotifications').onclick=enableNotifications; $('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
+  $('connect').onclick=openPair; $('notifications').onclick=enableNotifications; $('mobileNotifications').onclick=enableNotifications; $('voicePlayback').onclick=toggleVoicePlayback; $('voiceInput').onclick=toggleVoiceInput; $('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){await post('/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
@@ -469,7 +511,7 @@
   document.querySelectorAll('.agent-action').forEach(button=>button.addEventListener('click',()=>button.closest('.toolbar').classList.remove('actions-open')));
   window.addEventListener('popstate',event=>setMobileView(event.state?.rpView||'home'));
   mobileMedia.addEventListener?.('change',event=>{if(event.matches)setMobileView('home',{replace:true});});
-  window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();state.terminalWs?.close();});
+  window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();state.terminalWs?.close();state.mediaRecorder?.state==='recording'&&state.mediaRecorder.stop();stopVoiceAudio();});
   window.addEventListener('focus',updateNotificationButton);
-  setMobileView('home', {replace:true}); updateNotificationButton(); openPair();
+  setMobileView('home', {replace:true}); updateNotificationButton(); updateVoiceButton(); openPair();
 })();

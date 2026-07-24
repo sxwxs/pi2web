@@ -16,6 +16,7 @@
   <label class="api-field">服务地址 <input id="api" placeholder="http://127.0.0.1:11318"></label>
   <button id="connect">输入配对码</button>
   <button id="notifications" title="启用所有 Agent 的完成通知">启用通知</button>
+  <button id="voicePlayback" title="启用 Agent 语音摘要播放" hidden>启用语音</button>
   <span id="status" class="muted">未配对</span>
   <span id="serverInfo" class="muted"></span>
 </header>
@@ -64,6 +65,7 @@
       <div class="composer-row">
         <select id="sendMode" title="发送方式"><option value="prompt">Prompt</option><option value="steer">Steer</option><option value="follow-up">Follow-up</option></select>
         <textarea id="input" placeholder="输入 @ 引用文件；Ctrl/⌘+Enter 发送"></textarea>
+        <button id="voiceInput" type="button" title="开始语音输入" hidden>🎙</button>
         <button type="submit">发送</button>
       </div>
     </form>
