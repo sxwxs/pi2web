@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remote-pi-edge-tts-server"
+version = "0.1.0"
+description = "Small OpenAI-compatible Edge TTS server for Remote Pi"
+requires-python = ">=3.10"
+dependencies = [
+  "aiohttp>=3.9,<4",
+  "edge-tts>=7.2,<8",
+]
+
+[project.scripts]
+remote-pi-edge-tts = "remote_pi_edge_tts.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

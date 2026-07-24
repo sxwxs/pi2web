@@ -1,6 +1,10 @@
 node_modules/
 dist/
 *.log
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
 .gradle/
 .idea/
 **/build/

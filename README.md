@@ -26,9 +26,9 @@ remote-pi --help
 
 ## 本地语音摘要与语音输入（实验性）
 
-Windows 下的 Speaches 中文语音服务器启动、模型下载和故障排查见 [`VOICE_SERVER_SETUP.md`](VOICE_SERVER_SETUP.md)。
+Windows 下的 Speaches 中文语音服务器启动、模型下载和故障排查见 [`VOICE_SERVER_SETUP.md`](VOICE_SERVER_SETUP.md)。只需要在线 TTS 时，也可以使用 [`packages/edge-tts-server`](packages/edge-tts-server/README.md) 中的原生 Python 服务，不需要 Docker。
 
-Remote Pi 可以连接两个 OpenAI-compatible 服务：一个 LLM endpoint 把 Agent 最终输出压缩成适合朗读的短摘要，一个 STT/TTS endpoint（推荐 [Speaches](https://github.com/speaches-ai/speaches)）负责本地语音识别和语音合成。语音默认关闭，只有配置 `--voice-base-url` 才会启用。
+Remote Pi 可以连接两个 OpenAI-compatible 服务：一个 LLM endpoint 把 Agent 最终输出压缩成适合朗读的短摘要，一个语音 endpoint 负责 TTS，并可选提供 STT。语音默认关闭，只有配置 `--voice-base-url` 才会启用；`--voice-stt-model` 是可选项。
 
 ```bash
 # 示例模型 ID 需要替换为 Speaches 中实际下载的模型
@@ -49,10 +49,34 @@ remote-pi \
 - Pi 发出 `agent_settled` 后，Remote Pi 取得最后一条 Assistant 文本，移除代码块、长链接和 Markdown，再限制摘要输入长度。
 - 摘要 LLM 使用流式 Chat Completions；Remote Pi 在完整句子出现后立即调用流式 TTS，因此无需等待整段摘要完成。
 - Web UI 中点击“启用语音”后，会播放服务端推送的 24 kHz 单声道 PCM16；新的 Agent 运行会取消旧播报。
-- Web UI 麦克风按钮会录音并调用配置的 STT 模型，识别文字只插入输入框，不会自动发送。
+- 只有配置 `--voice-stt-model` 时，Web UI 才显示麦克风按钮；识别文字只插入输入框，不会自动发送。
 - API key 通过 `--voice-api-key-env` 和 `--voice-summary-api-key-env` 指定环境变量名，避免把密钥放入命令行参数。
 
 语音流目前通过已认证的 Agent WebSocket 发送，只会实时投递，不写入 Session 或事件 replay。浏览器麦克风通常要求 HTTPS 安全上下文（`localhost` 例外）。Android 客户端的流式 PCM 播放和录音 UI 尚未接入。
+
+### Edge TTS（仅语音合成）
+
+项目提供了一个基于 Python `edge-tts` 和 `aiohttp` 的轻量本地服务。它直接返回 MP3，不需要 Docker 或 FFmpeg：
+
+```bash
+cd packages/edge-tts-server
+python -m venv .venv
+# Windows: .venv\\Scripts\\Activate.ps1
+# Linux/macOS: source .venv/bin/activate
+python -m pip install -e .
+remote-pi-edge-tts
+
+remote-pi \
+  --voice-base-url http://127.0.0.1:5050/v1 \
+  --voice-tts-model edge-tts \
+  --voice-tts-voice zh-CN-XiaoxiaoNeural \
+  --voice-tts-format mp3 \
+  --voice-summary-base-url https://llm.example.com/v1 \
+  --voice-summary-model <summary-model-id> \
+  --voice-summary-api-key-env SUMMARY_API_KEY
+```
+
+该模式不配置 `--voice-stt-model`，因此只启用 Agent 摘要播报，不启用语音识别。Edge TTS 使用非官方消费者服务，适合本地和实验性使用。
 
 ## 本地开发
 

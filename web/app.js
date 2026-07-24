@@ -7,7 +7,7 @@
     terminalEmulator: null, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
-    voiceEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set()}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
+    voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve()}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
   };
   $('api').value = state.base;
   $('pairBase').value = state.base;
@@ -62,13 +62,13 @@
     if(status.protocolVersion!==1)throw Error(`不支持的协议版本 ${status.protocolVersion}（需要 1）`);
     disconnect();state.base=candidateBase;state.token=candidateToken;state.connected=true;localStorage.rpBase=state.base;$('api').value=state.base;
     $('status').className='ok';$('status').textContent='已配对';$('serverInfo').textContent=`v${status.version} · Pi ${status.piVersion}`;
-    state.voiceEnabled=!!status.voiceEnabled;$('voicePlayback').hidden=!state.voiceEnabled;$('voiceInput').hidden=!state.voiceEnabled;updateVoiceButton();
+    state.voiceEnabled=!!(status.voiceCapabilities?.tts??status.voiceEnabled);state.voiceSttEnabled=!!(status.voiceCapabilities?.stt??status.voiceEnabled);$('voicePlayback').hidden=!state.voiceEnabled;$('voiceInput').hidden=!state.voiceSttEnabled;updateVoiceButton();
     await refreshWs();await refreshAgents(true);setMobileView('home',{replace:true});
     if(localStorage.rpToken!==state.token){if(confirm('是否将配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。'))localStorage.rpToken=state.token;else localStorage.removeItem('rpToken');}
     $('pairDialog').close();
   }
   function disconnect(reason = '未配对') {
-    state.connected = false; state.token = ''; state.manuallyClosed = true;state.voiceEnabled=false;$('voicePlayback').hidden=true;$('voiceInput').hidden=true;
+    state.connected = false; state.token = ''; state.manuallyClosed = true;state.voiceEnabled=false;state.voiceSttEnabled=false;$('voicePlayback').hidden=true;$('voiceInput').hidden=true;
     clearTimeout(state.reconnectTimer); state.ws?.close(); state.ws = null; state.terminalWs?.close(); state.terminalWs = null; if(state.mediaRecorder?.state==='recording')state.mediaRecorder.stop();stopVoiceAudio();
     $('status').className = 'bad'; $('status').textContent = reason; $('serverInfo').textContent = '';
   }
@@ -337,18 +337,21 @@
     const AudioContext=window.AudioContext||window.webkitAudioContext;if(!AudioContext)throw Error('当前浏览器不支持音频播放');
     state.voiceAudio.context??=new AudioContext();if(state.voiceAudio.context.state==='suspended')await state.voiceAudio.context.resume();return state.voiceAudio.context;
   }
-  function playPcmChunk(event) {
-    if(!state.voicePlaybackEnabled||!event.audio)return;void ensureAudioContext().then(context=>{
-      if(state.voiceAudio.playbackId&&state.voiceAudio.playbackId!==event.playbackId)stopVoiceAudio();state.voiceAudio.playbackId=event.playbackId;
-      const raw=atob(event.audio),samples=new Float32Array(Math.floor(raw.length/2));for(let i=0;i<samples.length;i++){let value=raw.charCodeAt(i*2)|(raw.charCodeAt(i*2+1)<<8);if(value&0x8000)value-=0x10000;samples[i]=value/32768;}
-      const rate=Number(event.sampleRate||24000),buffer=context.createBuffer(1,samples.length,rate);buffer.copyToChannel(samples,0);const source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);const start=Math.max(context.currentTime+0.03,state.voiceAudio.nextTime||0);source.start(start);state.voiceAudio.nextTime=start+buffer.duration;state.voiceAudio.sources.add(source);source.onended=()=>state.voiceAudio.sources.delete(source);
+  function playVoiceChunk(event) {
+    if(!state.voicePlaybackEnabled||!event.audio)return;
+    state.voiceAudio.decodeChain=state.voiceAudio.decodeChain.then(async()=>{
+      const context=await ensureAudioContext();if(state.voiceAudio.playbackId&&state.voiceAudio.playbackId!==event.playbackId)stopVoiceAudio();state.voiceAudio.playbackId=event.playbackId;
+      const raw=atob(event.audio),bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));let buffer;
+      if(event.encoding==='mp3')buffer=await context.decodeAudioData(bytes.buffer.slice(0));
+      else{const samples=new Float32Array(Math.floor(bytes.length/2));for(let i=0;i<samples.length;i++){let value=bytes[i*2]|(bytes[i*2+1]<<8);if(value&0x8000)value-=0x10000;samples[i]=value/32768;}const rate=Number(event.sampleRate||24000);buffer=context.createBuffer(1,samples.length,rate);buffer.copyToChannel(samples,0);}
+      if(state.voiceAudio.playbackId!==event.playbackId)return;const source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);const start=Math.max(context.currentTime+0.03,state.voiceAudio.nextTime||0);source.start(start);state.voiceAudio.nextTime=start+buffer.duration;state.voiceAudio.sources.add(source);source.onended=()=>state.voiceAudio.sources.delete(source);
     }).catch(error=>toast(`语音播放失败：${error.message}`));
   }
   function handleVoiceEvent(message) {
     const ev=message.event||{},selected=state.selectedKind==='agent'&&state.agent?.agentId===message.agentId,key=`voice-${ev.playbackId||message.agentId}`;
     if(ev.type==='voice_start'){if(state.voicePlaybackEnabled){stopVoiceAudio();void ensureAudioContext().catch(()=>{});}if(selected){const c=ensureStream(key,'语音摘要','system');c.content='';renderCardBody(c.body,'正在生成语音摘要…',false);}}
     else if(ev.type==='voice_summary_delta'){if(selected){const c=ensureStream(key,'语音摘要','system');c.content+=ev.text||'';renderCardBody(c.body,c.content,false);c.summaryText.textContent='语音摘要';}}
-    else if(ev.type==='voice_audio_chunk')playPcmChunk(ev);
+    else if(ev.type==='voice_audio_chunk')playVoiceChunk(ev);
     else if(ev.type==='voice_cancelled'){stopVoiceAudio();}
     else if(ev.type==='voice_error'){if(selected)addCard('语音服务',ev.message||'语音生成失败','error',true);}
     else if(ev.type==='voice_end'){if(selected)state.streams.delete(key);}
@@ -356,7 +359,7 @@
   function updateVoiceButton(){const button=$('voicePlayback');button.textContent=state.voicePlaybackEnabled?'语音已启用':'启用语音';button.title=state.voicePlaybackEnabled?'点击关闭 Agent 语音摘要':'点击启用 Agent 语音摘要播放';}
   async function toggleVoicePlayback(){state.voicePlaybackEnabled=!state.voicePlaybackEnabled;localStorage.rpVoicePlayback=String(state.voicePlaybackEnabled);updateVoiceButton();if(state.voicePlaybackEnabled){try{await ensureAudioContext();toast('Agent 完成后将播放语音摘要');}catch(error){state.voicePlaybackEnabled=false;localStorage.rpVoicePlayback='false';updateVoiceButton();toast(error.message);}}else stopVoiceAudio();}
   async function toggleVoiceInput(){
-    if(!state.voiceEnabled)return toast('服务端未启用语音能力');if(!state.agent)return toast('请先选择 Agent');
+    if(!state.voiceSttEnabled)return toast('服务端未启用语音识别');if(!state.agent)return toast('请先选择 Agent');
     if(state.mediaRecorder&&state.mediaRecorder.state==='recording'){state.mediaRecorder.stop();return;}
     if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder)return toast('当前浏览器不支持麦克风录音');
     try{
