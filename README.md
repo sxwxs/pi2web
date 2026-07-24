@@ -26,6 +26,8 @@ remote-pi --help
 
 ## 本地语音摘要与语音输入（实验性）
 
+Windows 下的 Speaches 中文语音服务器启动、模型下载和故障排查见 [`VOICE_SERVER_SETUP.md`](VOICE_SERVER_SETUP.md)。
+
 Remote Pi 可以连接两个 OpenAI-compatible 服务：一个 LLM endpoint 把 Agent 最终输出压缩成适合朗读的短摘要，一个 STT/TTS endpoint（推荐 [Speaches](https://github.com/speaches-ai/speaches)）负责本地语音识别和语音合成。语音默认关闭，只有配置 `--voice-base-url` 才会启用。
 
 ```bash

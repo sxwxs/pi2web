@@ -26,7 +26,7 @@ describe('voice manager',()=>{
         'data: {"choices":[{"delta":{"content":"任务已完成。"}}]}\n\n',
         'data: {"choices":[{"delta":{"content":"测试全部通过。"}}]}\n\ndata: [DONE]\n\n'
       ]),{status:200,headers:{'content-type':'text/event-stream'}});
-      if(url.endsWith('/audio/speech')){const body=JSON.parse(String(init?.body));spoken.push(body.input);return new Response(stream([new Uint8Array([1,2,3,4])]),{status:200,headers:{'content-type':'audio/pcm'}})}
+      if(url.endsWith('/audio/speech')){const body=JSON.parse(String(init?.body));spoken.push(body.input);return new Response(stream([new Uint8Array([1,2,3]),new Uint8Array([4])]),{status:200,headers:{'content-type':'audio/pcm'}})}
       throw new Error(`unexpected URL ${url}`);
     };
     const manager=new VoiceManager({speechBaseUrl:'http://speech/v1',sttModel:'stt',ttsModel:'tts',ttsVoice:'voice',summaryBaseUrl:'http://llm/v1',summaryModel:'summary'},fetcher);
@@ -34,8 +34,10 @@ describe('voice manager',()=>{
     await manager.announce('agent-1','Changed files and tests passed.');
     expect(spoken).toEqual(['任务已完成。','测试全部通过。']);
     expect(events[0].type).toBe('voice_start');expect(events.at(-1).type).toBe('voice_end');
-    expect(events.filter(event=>event.type==='voice_summary_delta')).toHaveLength(2);expect(events.filter(event=>event.type==='voice_audio_chunk')).toHaveLength(2);
-    expect(events.filter(event=>event.type==='voice_audio_chunk').every(event=>event.sampleRate===24000)).toBe(true);
+    expect(events.filter(event=>event.type==='voice_summary_delta')).toHaveLength(2);
+    const audioEvents=events.filter(event=>event.type==='voice_audio_chunk');expect(audioEvents).toHaveLength(4);
+    expect(audioEvents.every(event=>event.sampleRate===24000&&Buffer.from(event.audio,'base64').length%2===0)).toBe(true);
+    expect([...Buffer.concat(audioEvents.map(event=>Buffer.from(event.audio,'base64')))]).toEqual([1,2,3,4,1,2,3,4]);
   });
   it('forwards recordings to an OpenAI-compatible transcription endpoint',async()=>{
     let requestBody:FormData|undefined;
