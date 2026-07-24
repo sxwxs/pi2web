@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {SentenceChunker,VoiceManager,assistantText,parseSummaryResult,prepareSummaryContext,prepareSummaryInput} from '../src/voice.js';
+import {SentenceChunker,VoiceManager,assistantText,formatSpokenSummary,parseSummaryResult,prepareSummaryContext,prepareSummaryInput} from '../src/voice.js';
 
 const stream=(chunks:(string|Uint8Array)[])=>new ReadableStream<Uint8Array>({start(controller){for(const chunk of chunks)controller.enqueue(typeof chunk==='string'?new TextEncoder().encode(chunk):chunk);controller.close()}});
 
@@ -13,6 +13,7 @@ describe('voice helpers',()=>{
     const context=JSON.parse(prepareSummaryContext({userPrompt:'修复登录问题',finalOutput:'已修复并通过测试'},100));
     expect(context).toEqual({userPrompt:'修复登录问题',piFinalOutput:'已修复并通过测试',sessionNeedsName:true});
     expect(parseSummaryResult('{"summary":"登录问题已修复。","sessionName":"修复登录问题"}')).toEqual({summary:'登录问题已修复。',sessionName:'修复登录问题'});
+    expect(formatSpokenSummary('登录问题已修复。','修复登录问题')).toBe('会话修复登录问题已完成：登录问题已修复。');
   });
   it('chunks complete sentences and flushes the tail',()=>{
     const chunker=new SentenceChunker(20);
@@ -44,12 +45,27 @@ describe('voice manager',()=>{
     const llmInput=JSON.parse(summaryRequest.messages[1].content);
     expect(llmInput).toMatchObject({userPrompt:'Fix the login tests.',piFinalOutput:'Changed files and tests passed.',sessionNeedsName:true});
     expect(summaryRequest.messages[0].content).toContain('只输出一个合法 JSON 对象');
-    expect(names).toEqual(['修复登录测试']);expect(spoken).toEqual(['任务已完成。','测试全部通过。']);
+    expect(names).toEqual(['修复登录测试']);expect(spoken).toEqual(['会话修复登录测试已完成：任务已完成。','测试全部通过。']);
     expect(events[0].type).toBe('voice_start');expect(events.at(-1).type).toBe('voice_end');
     expect(events.filter(event=>event.type==='voice_summary_delta')).toHaveLength(1);
     const audioEvents=events.filter(event=>event.type==='voice_audio_chunk');expect(audioEvents).toHaveLength(4);
     expect(audioEvents.every(event=>event.sampleRate===24000&&Buffer.from(event.audio,'base64').length%2===0)).toBe(true);
     expect([...Buffer.concat(audioEvents.map(event=>Buffer.from(event.audio,'base64')))]).toEqual([1,2,3,4,1,2,3,4]);
+  });
+  it('serializes announcements from multiple sessions',async()=>{
+    const spoken:string[]=[];let activeSpeech=0,maxActiveSpeech=0;
+    const fetcher:typeof fetch=async(input,init)=>{
+      const url=String(input);
+      if(url.endsWith('/chat/completions')){const request=JSON.parse(String(init?.body)),context=JSON.parse(request.messages[1].content),payload={choices:[{delta:{content:JSON.stringify({summary:context.piFinalOutput,sessionName:null})}}]};return new Response(stream([`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`]),{status:200})}
+      if(url.endsWith('/audio/speech')){const body=JSON.parse(String(init?.body));spoken.push(body.input);activeSpeech++;maxActiveSpeech=Math.max(maxActiveSpeech,activeSpeech);await new Promise(resolve=>setTimeout(resolve,10));activeSpeech--;return new Response(new Uint8Array([1,2]))}
+      throw new Error(`unexpected URL ${url}`);
+    };
+    const manager=new VoiceManager({speechBaseUrl:'http://speech',ttsModel:'tts',ttsVoice:'voice',summaryBaseUrl:'http://llm',summaryModel:'summary'},fetcher);
+    await Promise.all([
+      manager.announce('agent-1',{userPrompt:'one',finalOutput:'第一项完成。',sessionName:'项目一'}),
+      manager.announce('agent-2',{userPrompt:'two',finalOutput:'第二项完成。',sessionName:'项目二'})
+    ]);
+    expect(maxActiveSpeech).toBe(1);expect(spoken).toEqual(['会话项目一已完成：第一项完成。','会话项目二已完成：第二项完成。']);
   });
   it('accepts complete MP3 responses from an Edge TTS backend',async()=>{
     let speechRequest:any;

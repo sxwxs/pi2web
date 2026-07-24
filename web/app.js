@@ -7,7 +7,7 @@
     terminalEmulator: null, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
-    voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve()}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
+    voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve(),generation:0}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
   };
   $('api').value = state.base;
   $('pairBase').value = state.base;
@@ -331,25 +331,25 @@
     card.body.append(controls);
   }
   function stopVoiceAudio() {
-    for(const source of state.voiceAudio.sources){try{source.stop();}catch{}}state.voiceAudio.sources.clear();state.voiceAudio.nextTime=0;state.voiceAudio.playbackId=null;
+    state.voiceAudio.generation++;for(const source of state.voiceAudio.sources){try{source.stop();}catch{}}state.voiceAudio.sources.clear();state.voiceAudio.nextTime=0;state.voiceAudio.playbackId=null;
   }
   async function ensureAudioContext() {
     const AudioContext=window.AudioContext||window.webkitAudioContext;if(!AudioContext)throw Error('当前浏览器不支持音频播放');
     state.voiceAudio.context??=new AudioContext();if(state.voiceAudio.context.state==='suspended')await state.voiceAudio.context.resume();return state.voiceAudio.context;
   }
   function playVoiceChunk(event) {
-    if(!state.voicePlaybackEnabled||!event.audio)return;
+    if(!state.voicePlaybackEnabled||!event.audio)return;const generation=state.voiceAudio.generation;
     state.voiceAudio.decodeChain=state.voiceAudio.decodeChain.then(async()=>{
-      const context=await ensureAudioContext();if(state.voiceAudio.playbackId&&state.voiceAudio.playbackId!==event.playbackId)stopVoiceAudio();state.voiceAudio.playbackId=event.playbackId;
+      const context=await ensureAudioContext();if(generation!==state.voiceAudio.generation)return;state.voiceAudio.playbackId=event.playbackId;
       const raw=atob(event.audio),bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));let buffer;
       if(event.encoding==='mp3')buffer=await context.decodeAudioData(bytes.buffer.slice(0));
       else{const samples=new Float32Array(Math.floor(bytes.length/2));for(let i=0;i<samples.length;i++){let value=bytes[i*2]|(bytes[i*2+1]<<8);if(value&0x8000)value-=0x10000;samples[i]=value/32768;}const rate=Number(event.sampleRate||24000);buffer=context.createBuffer(1,samples.length,rate);buffer.copyToChannel(samples,0);}
-      if(state.voiceAudio.playbackId!==event.playbackId)return;const source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);const start=Math.max(context.currentTime+0.03,state.voiceAudio.nextTime||0);source.start(start);state.voiceAudio.nextTime=start+buffer.duration;state.voiceAudio.sources.add(source);source.onended=()=>state.voiceAudio.sources.delete(source);
+      if(generation!==state.voiceAudio.generation||state.voiceAudio.playbackId!==event.playbackId)return;const source=context.createBufferSource();source.buffer=buffer;source.connect(context.destination);const start=Math.max(context.currentTime+0.03,state.voiceAudio.nextTime||0);source.start(start);state.voiceAudio.nextTime=start+buffer.duration;state.voiceAudio.sources.add(source);source.onended=()=>state.voiceAudio.sources.delete(source);
     }).catch(error=>toast(`语音播放失败：${error.message}`));
   }
   function handleVoiceEvent(message) {
     const ev=message.event||{},selected=state.selectedKind==='agent'&&state.agent?.agentId===message.agentId,key=`voice-${ev.playbackId||message.agentId}`;
-    if(ev.type==='voice_start'){if(state.voicePlaybackEnabled){stopVoiceAudio();void ensureAudioContext().catch(()=>{});}if(selected){const c=ensureStream(key,'语音摘要','system');c.content='';renderCardBody(c.body,'正在生成语音摘要…',false);}}
+    if(ev.type==='voice_start'){if(state.voicePlaybackEnabled)void ensureAudioContext().catch(()=>{});if(selected){const c=ensureStream(key,'语音摘要','system');c.content='';renderCardBody(c.body,'正在生成语音摘要…',false);}}
     else if(ev.type==='voice_summary_delta'){if(selected){const c=ensureStream(key,'语音摘要','system');c.content+=ev.text||'';renderCardBody(c.body,c.content,false);c.summaryText.textContent='语音摘要';}}
     else if(ev.type==='voice_audio_chunk')playVoiceChunk(ev);
     else if(ev.type==='voice_cancelled'){stopVoiceAudio();}

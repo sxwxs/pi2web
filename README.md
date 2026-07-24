@@ -48,7 +48,8 @@ remote-pi \
 
 - Pi 发出 `agent_settled` 后，Remote Pi 取得最后一条 Assistant 文本，移除代码块、长链接和 Markdown，再限制摘要输入长度。
 - 摘要 LLM 使用流式 Chat Completions；Remote Pi 在完整句子出现后立即调用流式 TTS，因此无需等待整段摘要完成。
-- Web UI 中点击“启用语音”后，会播放服务端推送的 24 kHz 单声道 PCM16；新的 Agent 运行会取消旧播报。
+- Web UI 中点击“启用语音”后，会播放服务端推送的 PCM16 或 MP3 音频；新的 Agent 运行会取消该 Agent 尚未完成的播报。
+- 多个 Session 接近同时完成时，语音摘要会进入全局队列依次播放，不会重叠；有 Session 名称时以“会话{name}已完成：”开头。
 - 只有配置 `--voice-stt-model` 时，Web UI 才显示麦克风按钮；识别文字只插入输入框，不会自动发送。
 - API key 通过 `--voice-api-key-env` 和 `--voice-summary-api-key-env` 指定环境变量名，避免把密钥放入命令行参数。
 
