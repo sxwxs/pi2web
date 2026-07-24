@@ -9,6 +9,7 @@
   "files": [
     "dist/",
     "web/",
+    "packages/edge-tts-server/",
     "README.md",
     "ANDROID_APP_FEATURES.md",
     "PROJECT_REVIEW_ISSUES.md"
