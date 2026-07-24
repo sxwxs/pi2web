@@ -10,7 +10,8 @@
     "dist/",
     "web/",
     "README.md",
-    "ANDROID_APP_FEATURES.md"
+    "ANDROID_APP_FEATURES.md",
+    "PROJECT_REVIEW_ISSUES.md"
   ],
   "scripts": {
     "clean": "rm -rf dist",
