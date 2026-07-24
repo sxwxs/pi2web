@@ -82,6 +82,12 @@ export function parseSummaryResult(text:string):{summary:string;sessionName?:str
   return {summary,...(sessionName?{sessionName}:{})};
 }
 
+export function formatSpokenSummary(summary:string,sessionName:string|undefined,language='zh-CN'){
+  const name=sessionName?.replace(/[\r\n\t]+/g,' ').replace(/\s{2,}/g,' ').slice(0,60).trim();
+  if(!name)return summary;
+  return language.toLowerCase().startsWith('zh')?`会话${name}已完成：${summary}`:`Session ${name} completed: ${summary}`;
+}
+
 export class SentenceChunker{
   private buffer='';
   constructor(private maxChars=100){}
@@ -125,6 +131,9 @@ export class VoiceManager{
   private lastAssistant=new Map<string,string>();
   private lastPrompt=new Map<string,string>();
   private active=new Map<string,AbortController>();
+  private generations=new Map<string,number>();
+  private announcementQueue=Promise.resolve();
+  private closed=false;
   private readonly config:Required<Pick<VoiceConfig,'language'|'maxInputChars'|'maxOutputTokens'|'sampleRate'|'ttsFormat'>>&VoiceConfig;
   constructor(config:VoiceConfig,private fetcher:Fetcher=fetch){this.config={language:'zh-CN',maxInputChars:32000,maxOutputTokens:160,sampleRate:24000,ttsFormat:'pcm',...config}}
   subscribe(listener:(agentId:string,event:VoiceEvent)=>void){this.emitter.on('event',listener);return()=>this.emitter.off('event',listener)}
@@ -140,8 +149,8 @@ export class VoiceManager{
       if(finalOutput)void this.announce(agentId,{userPrompt,finalOutput,...context});
     }
   }
-  cancel(agentId:string){const controller=this.active.get(agentId);if(controller){controller.abort();this.active.delete(agentId);this.emit(agentId,{type:'voice_cancelled'})}}
-  close(){for(const id of [...this.active.keys()])this.cancel(id);this.emitter.removeAllListeners()}
+  cancel(agentId:string){this.generations.set(agentId,(this.generations.get(agentId)??0)+1);const controller=this.active.get(agentId);if(controller){controller.abort();this.active.delete(agentId);this.emit(agentId,{type:'voice_cancelled'})}}
+  close(){this.closed=true;for(const id of [...new Set([...this.active.keys(),...this.generations.keys()])])this.cancel(id);this.emitter.removeAllListeners()}
   async transcribe(audio:Uint8Array,mimeType='audio/webm',filename='recording.webm'){
     if(!this.config.sttModel)throw Object.assign(new Error('Voice STT model is not configured'),{code:'VOICE_STT_DISABLED'});
     const copy=new Uint8Array(audio.byteLength);copy.set(audio);const form=new FormData();form.append('file',new Blob([copy.buffer],{type:mimeType}),filename);form.append('model',this.config.sttModel);form.append('response_format','json');
@@ -153,7 +162,12 @@ export class VoiceManager{
   }
   async announce(agentId:string,value:VoiceSummaryInput|string){
     const input:VoiceSummaryInput=typeof value==='string'?{userPrompt:'',finalOutput:value}:value;
-    this.cancel(agentId);const controller=new AbortController(),playbackId=randomUUID();this.active.set(agentId,controller);
+    this.cancel(agentId);const generation=this.generations.get(agentId)!;
+    const job=this.announcementQueue.then(()=>this.closed||this.generations.get(agentId)!==generation?undefined:this.runAnnouncement(agentId,input,generation));
+    this.announcementQueue=job.then(()=>undefined,()=>undefined);return job;
+  }
+  private async runAnnouncement(agentId:string,input:VoiceSummaryInput,generation:number){
+    const controller=new AbortController(),playbackId=randomUUID();this.active.set(agentId,controller);
     this.emit(agentId,{type:'voice_start',playbackId,encoding:this.config.ttsFormat==='mp3'?'mp3':'pcm_s16le',sampleRate:this.config.sampleRate,channels:1});
     let rawResult='',spokenSummary='';
     try{
@@ -161,9 +175,9 @@ export class VoiceManager{
       const response=await this.fetcher(endpoint(this.config.summaryBaseUrl,'/chat/completions'),{method:'POST',signal:controller.signal,headers:{'content-type':'application/json',...authHeaders(this.config.summaryApiKey)},body:JSON.stringify({model:this.config.summaryModel,stream:true,temperature:0.2,max_tokens:this.config.maxOutputTokens,messages:[{role:'system',content:this.summaryPrompt()},{role:'user',content:summaryInput}]})});
       if(!response.ok)throw new Error(`Summary request failed (${response.status}): ${(await response.text()).slice(0,500)}`);
       for await(const delta of sseText(response))rawResult+=delta;
-      const result=parseSummaryResult(rawResult);spokenSummary=result.summary;
-      this.emit(agentId,{type:'voice_summary_delta',playbackId,text:spokenSummary});
+      const result=parseSummaryResult(rawResult),sessionName=input.sessionName?.trim()||result.sessionName;spokenSummary=formatSpokenSummary(result.summary,sessionName,this.config.language);
       if(!input.sessionName?.trim()&&result.sessionName&&input.setSessionName){try{await input.setSessionName(result.sessionName)}catch(error){this.emit(agentId,{type:'voice_session_name_error',playbackId,message:(error as Error).message})}}
+      this.emit(agentId,{type:'voice_summary_delta',playbackId,text:spokenSummary});
       const chunker=new SentenceChunker();for(const sentence of [...chunker.add(spokenSummary),...chunker.close()])await this.speak(agentId,playbackId,sentence,controller.signal);
       if(this.active.get(agentId)===controller)this.emit(agentId,{type:'voice_end',playbackId,summary:spokenSummary,sessionName:result.sessionName});
     }catch(error){
@@ -173,7 +187,7 @@ export class VoiceManager{
         if(!spokenSummary)try{this.emit(agentId,{type:'voice_summary_delta',playbackId,text:fallback});await this.speak(agentId,playbackId,fallback,controller.signal);this.emit(agentId,{type:'voice_end',playbackId,summary:fallback})}catch{/* The text notification remains available when TTS also fails. */}
         else this.emit(agentId,{type:'voice_end',playbackId,summary:spokenSummary,partial:true});
       }
-    }finally{if(this.active.get(agentId)===controller)this.active.delete(agentId)}
+    }finally{if(this.active.get(agentId)===controller)this.active.delete(agentId);if(this.generations.get(agentId)!==generation)controller.abort()}
   }
   private summaryPrompt(){const language=this.config.language.toLowerCase().startsWith('zh')?'简体中文':'与用户输入相同的主要语言';return `你负责把一次 Pi 编程任务压缩成准确、自然、可直接朗读的完成通知，并在需要时为 Session 命名。\n\n输入是一个 JSON 对象：\n- userPrompt：用户本轮真正想完成的任务。\n- piFinalOutput：Pi 最后一次回复，包含完成情况、改动、验证结果和后续事项。\n- sessionNeedsName：只有为 true 时才需要生成 Session 名称。\n\n先结合 userPrompt 判断目标，再以 piFinalOutput 为事实依据总结。不要把用户的要求误说成已经完成；没有明确证据时不要声称测试通过或任务成功。摘要使用${language}，写 2 到 4 个短句，最多 120 个中文字符或 70 个英文单词。优先交代：是否完成、最重要的结果或修改、测试/验证结果、失败原因，以及用户必须采取的下一步。省略代码、命令、URL、完整路径、哈希、冗长文件清单、日志和 Markdown；不要使用标题、列表、“总结如下”等套话。\n\n如果 sessionNeedsName 为 true，请根据 userPrompt 生成一个具体、简短、便于检索的名称：中文建议 6 到 18 个字，英文建议 3 到 8 个词；使用任务主题或目标，不写“新会话”“任务总结”等空泛名称，不带句号、引号、Emoji 或路径。如果 sessionNeedsName 为 false，sessionName 必须为 null。\n\n只输出一个合法 JSON 对象，不要输出 Markdown 代码块、解释或任何额外文字。有名称时使用 {"summary":"适合直接朗读的摘要","sessionName":"简短名称"}；无需命名时使用 {"summary":"适合直接朗读的摘要","sessionName":null}。summary 必须是 JSON 字符串，sessionName 必须是 JSON 字符串或 null。`}
   private async speak(agentId:string,playbackId:string,text:string,signal:AbortSignal){
