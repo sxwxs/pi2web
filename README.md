@@ -26,6 +26,8 @@ remote-pi --help
 
 ## 本地开发
 
+项目 Review 中发现的问题、修复状态和暂缓的 Android 项目见 [`PROJECT_REVIEW_ISSUES.md`](PROJECT_REVIEW_ISSUES.md)。
+
 ```bash
 npm install
 npm run check

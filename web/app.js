@@ -36,17 +36,18 @@
   const navigateMobile = view => { if (isMobile()) setMobileView(view, {push:true}); };
   const mobileBack = fallback => { if (isMobile() && history.state?.rpView === state.mobileView && state.mobileView !== 'home') history.back(); else setMobileView(fallback, {replace:true}); };
 
-  async function api(url, options = {}) {
-    if (!state.token) throw Error('请先输入配对码');
-    const headers = {Authorization: `Bearer ${state.token}`, ...(options.body ? {'Content-Type':'application/json'} : {}), ...options.headers};
-    const response = await fetch(state.base + url, {...options, headers});
+  async function request(base, token, url, options = {}, disconnectOnUnauthorized = false) {
+    if (!token) throw Error('请先输入配对码');
+    const headers = {Authorization: `Bearer ${token}`, ...(options.body ? {'Content-Type':'application/json'} : {}), ...options.headers};
+    const response = await fetch(base + url, {...options, headers});
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (response.status === 401) disconnect('配对码无效或已失效');
+      if (disconnectOnUnauthorized && response.status === 401) disconnect('配对码无效或已失效');
       throw Error(body.error?.message || `HTTP ${response.status}`);
     }
     return body.data;
   }
+  async function api(url, options = {}) { return request(state.base, state.token, url, options, true); }
   const post = (url, body = {}) => api(url, {method:'POST', body:JSON.stringify(body)});
 
   function openPair() {
@@ -55,21 +56,13 @@
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
   async function connect(base, token) {
-    state.base = base.trim().replace(/\/$/, '') || location.origin;
-    state.token = token.trim();
-    localStorage.rpBase = state.base;
-    $('api').value = state.base;
-    const status = await api('/api/v1/system/status');
-    if (status.protocolVersion !== 1) throw Error(`不支持的协议版本 ${status.protocolVersion}（需要 1）`);
-    state.connected = true;
-    $('status').className = 'ok'; $('status').textContent = '已配对';
-    $('serverInfo').textContent = `v${status.version} · Pi ${status.piVersion}`;
-    await refreshWs(); await refreshAgents(true);
-    setMobileView('home', {replace:true});
-    if (localStorage.rpToken !== state.token) {
-      if (confirm('是否将配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。')) localStorage.rpToken = state.token;
-      else localStorage.removeItem('rpToken');
-    }
+    const candidateBase=base.trim().replace(/\/$/, '')||location.origin,candidateToken=token.trim();
+    const status=await request(candidateBase,candidateToken,'/api/v1/system/status');
+    if(status.protocolVersion!==1)throw Error(`不支持的协议版本 ${status.protocolVersion}（需要 1）`);
+    disconnect();state.base=candidateBase;state.token=candidateToken;state.connected=true;localStorage.rpBase=state.base;$('api').value=state.base;
+    $('status').className='ok';$('status').textContent='已配对';$('serverInfo').textContent=`v${status.version} · Pi ${status.piVersion}`;
+    await refreshWs();await refreshAgents(true);setMobileView('home',{replace:true});
+    if(localStorage.rpToken!==state.token){if(confirm('是否将配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。'))localStorage.rpToken=state.token;else localStorage.removeItem('rpToken');}
     $('pairDialog').close();
   }
   function disconnect(reason = '未配对') {
