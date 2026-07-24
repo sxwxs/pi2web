@@ -41,6 +41,11 @@ export class MetadataStore {
         archived_at INTEGER,
         FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS sessions (
         session_id TEXT PRIMARY KEY,
         session_file TEXT NOT NULL UNIQUE,
@@ -67,6 +72,8 @@ export class MetadataStore {
     this.archivedAgents=new Set((db.prepare('SELECT id FROM agents WHERE archived_at IS NOT NULL').all() as {id:string}[]).map(row=>row.id));
   }
   private get database(){if(!this.db)throw new Error('Metadata store is not initialized');return this.db}
+  getSetting<T>(key:string):T|undefined{const row=this.database.prepare('SELECT value FROM settings WHERE key=?').get(key) as {value:string}|undefined;if(!row)return;try{return JSON.parse(row.value) as T}catch{return}}
+  setSetting(key:string,value:unknown){this.database.prepare('INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').run(key,JSON.stringify(value),Date.now())}
   listWorkspaces():Workspace[]{return (this.database.prepare('SELECT id,label,root_path,created_at FROM workspaces ORDER BY created_at,id').all() as any[]).map(row=>({id:row.id,label:row.label,rootPath:row.root_path,createdAt:new Date(row.created_at).toISOString()}))}
   saveWorkspace(workspace:Workspace){this.database.prepare(`INSERT INTO workspaces(id,label,root_path,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label,root_path=excluded.root_path`).run(workspace.id,workspace.label,workspace.rootPath,asTime(workspace.createdAt))}
   listAgents():AgentRecord[]{return (this.database.prepare('SELECT * FROM agents WHERE archived_at IS NULL ORDER BY last_active_at DESC,id DESC').all() as any[]).map(row=>({agentId:row.id,workspaceId:row.workspace_id,sessionId:row.session_id,sessionFile:row.session_file??undefined,sessionName:row.session_name??undefined,cwd:row.cwd,status:row.status,createdAt:new Date(row.created_at).toISOString(),lastActiveAt:new Date(row.last_active_at).toISOString()}))}

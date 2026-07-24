@@ -8,6 +8,7 @@
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
     voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve(),generation:0}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
+    mailNotificationsAvailable:false,mailSettings:{enabled:false,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true},
   };
   $('api').value = state.base;
   $('pairBase').value = state.base;
@@ -52,6 +53,7 @@
   const post = (url, body = {}) => api(url, {method:'POST', body:JSON.stringify(body)});
 
   function openPair() {
+    if($('configDialog').open)$('configDialog').close();
     $('pairBase').value = state.base;
     $('pairToken').value = localStorage.rpToken || '';
     if (!$('pairDialog').open) $('pairDialog').showModal();
@@ -63,14 +65,14 @@
     disconnect();state.base=candidateBase;state.token=candidateToken;state.connected=true;localStorage.rpBase=state.base;$('api').value=state.base;
     $('status').className='ok';$('status').textContent='已配对';$('serverInfo').textContent=`v${status.version} · Pi ${status.piVersion}`;
     state.voiceEnabled=!!(status.voiceCapabilities?.tts??status.voiceEnabled);state.voiceSttEnabled=!!(status.voiceCapabilities?.stt??status.voiceEnabled);$('voicePlayback').hidden=!state.voiceEnabled;$('voiceInput').hidden=!state.voiceSttEnabled;updateVoiceButton();
-    await refreshWs();await refreshAgents(true);setMobileView('home',{replace:true});
+    await loadMailNotificationSettings(status);updateConfigUi();await refreshWs();await refreshAgents(true);setMobileView('home',{replace:true});
     if(localStorage.rpToken!==state.token){if(confirm('是否将配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。'))localStorage.rpToken=state.token;else localStorage.removeItem('rpToken');}
     $('pairDialog').close();
   }
   function disconnect(reason = '未配对') {
-    state.connected = false; state.token = ''; state.manuallyClosed = true;state.voiceEnabled=false;state.voiceSttEnabled=false;$('voicePlayback').hidden=true;$('voiceInput').hidden=true;
+    state.connected = false; state.token = ''; state.manuallyClosed = true;state.voiceEnabled=false;state.voiceSttEnabled=false;state.mailNotificationsAvailable=false;$('voicePlayback').hidden=true;$('voiceInput').hidden=true;
     clearTimeout(state.reconnectTimer); state.ws?.close(); state.ws = null; state.terminalWs?.close(); state.terminalWs = null; if(state.mediaRecorder?.state==='recording')state.mediaRecorder.stop();stopVoiceAudio();
-    $('status').className = 'bad'; $('status').textContent = reason; $('serverInfo').textContent = '';
+    $('status').className = 'bad'; $('status').textContent = reason; $('serverInfo').textContent = '';updateConfigUi();
   }
 
   async function refreshWs() {
@@ -431,13 +433,13 @@
     return '';
   }
   function updateNotificationButton() {
-    const button=$('notifications'), mobileButton=$('mobileNotifications'), unavailable=notificationUnavailableReason();
+    const button=$('notifications'),status=$('browserNotificationStatus'),unavailable=notificationUnavailableReason();
     // Keep the button clickable so unsupported/denied states can explain how to
     // fix the problem instead of silently ignoring the user's click.
-    button.disabled=false; mobileButton.disabled=false;
-    if (unavailable) { button.textContent='通知不可用'; button.title=unavailable; mobileButton.title=unavailable; return; }
+    button.disabled=false;
+    if (unavailable) { button.textContent='通知不可用'; button.title=unavailable;status.textContent=unavailable; return; }
     button.textContent=Notification.permission==='granted'?'通知已启用':Notification.permission==='denied'?'通知已禁用':'启用通知';
-    button.title=Notification.permission==='denied'?'通知权限已被浏览器阻止，点击查看处理方式':'启用所有 Agent 的完成通知'; mobileButton.title=button.title;
+    button.title=Notification.permission==='denied'?'通知权限已被浏览器阻止，点击查看处理方式':'启用所有 Agent 的完成通知';status.textContent=Notification.permission==='granted'?'Agent 完成后会显示浏览器系统通知。':Notification.permission==='denied'?'通知权限已被浏览器阻止。':'尚未授予浏览器通知权限。';
   }
   async function enableNotifications() {
     const unavailable=notificationUnavailableReason();
@@ -455,6 +457,28 @@
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     const occurredAt=Number(timestamp)||Math.floor(Date.now()/1000);
     try { new Notification('Agent 完成', {body:`${agentLabel(agent)} 已转为空闲\n本地时间：${new Date(occurredAt*1000).toLocaleString()}\nUnix 时间戳：${occurredAt}`, timestamp:occurredAt*1000, tag:`remote-pi-${agent.agentId}-${occurredAt}`}); } catch (error) { console.error('Unable to show notification',error); }
+  }
+  async function loadMailNotificationSettings(status) {
+    if(status?.mailNotificationsConfigured===false){state.mailNotificationsAvailable=false;return}
+    try{const result=await api('/api/v1/mail-notifications');state.mailNotificationsAvailable=!!result.available;if(result.settings)state.mailSettings={...state.mailSettings,...result.settings};}
+    catch(error){state.mailNotificationsAvailable=false;console.error('Unable to load mail notification settings',error);}
+  }
+  function updateMailControls(){
+    const available=state.connected&&state.mailNotificationsAvailable,settings=state.mailSettings;
+    $('mailNotificationEnabled').checked=!!settings.enabled;$('mailAggregationDelay').value=String(settings.aggregationDelaySeconds??0);$('mailIncludeResponse').checked=!!settings.includeResponse;$('mailIncludeSessionDetails').checked=!!settings.includeSessionDetails;
+    for(const id of ['mailNotificationEnabled','mailAggregationDelay','mailIncludeResponse','mailIncludeSessionDetails','configSave'])$(id).disabled=!available;
+    $('mailNotificationAvailability').textContent=!state.connected?'连接服务后可以配置邮件通知。':available?'MailDispatch 已在服务端配置。设置对所有 Agent 和客户端生效。':'服务端启动时未配置 MailDispatch endpoint、API key 和通知邮箱。';
+  }
+  function updateConfigUi(){
+    $('configConnectionStatus').textContent=state.connected?`已连接 ${state.base}`:'当前未配对';updateNotificationButton();updateVoiceButton();updateMailControls();
+  }
+  function openConfig(){updateConfigUi();if(!$('configDialog').open)$('configDialog').showModal();}
+  async function saveMailSettings(){
+    if(!requireConnection())return;if(!state.mailNotificationsAvailable)return toast('服务端未配置 MailDispatch');
+    const delay=Number($('mailAggregationDelay').value);if(!Number.isInteger(delay)||delay<0||delay>86400)return toast('聚合时间必须是 0 到 86400 之间的整数秒');
+    $('configSave').disabled=true;
+    try{const result=await post('/api/v1/mail-notifications',{enabled:$('mailNotificationEnabled').checked,aggregationDelaySeconds:delay,includeResponse:$('mailIncludeResponse').checked,includeSessionDetails:$('mailIncludeSessionDetails').checked});state.mailSettings=result.settings;updateMailControls();toast('邮件通知设置已保存');}
+    catch(error){toast(error.message)}finally{$('configSave').disabled=!state.mailNotificationsAvailable;}
   }
 
   function modal(title, build, okText = '确定') {
@@ -498,7 +522,7 @@
   $('pairCancel').onclick=()=>$('pairDialog').close();
   $('modalCancel').onclick=()=>$('modal').close('cancel');
   $('pairForm').onsubmit=async event=>{event.preventDefault();$('pairSubmit').disabled=true;try{await connect($('pairBase').value,$('pairToken').value);}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
-  $('connect').onclick=openPair; $('notifications').onclick=enableNotifications; $('mobileNotifications').onclick=enableNotifications; $('voicePlayback').onclick=toggleVoicePlayback; $('voiceInput').onclick=toggleVoiceInput; $('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
+  $('openConfig').onclick=openConfig;$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){await post('/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
@@ -516,5 +540,5 @@
   mobileMedia.addEventListener?.('change',event=>{if(event.matches)setMobileView('home',{replace:true});});
   window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();state.terminalWs?.close();state.mediaRecorder?.state==='recording'&&state.mediaRecorder.stop();stopVoiceAudio();});
   window.addEventListener('focus',updateNotificationButton);
-  setMobileView('home', {replace:true}); updateNotificationButton(); updateVoiceButton(); openPair();
+  setMobileView('home', {replace:true}); updateConfigUi(); openPair();
 })();

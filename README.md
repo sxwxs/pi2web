@@ -24,6 +24,29 @@ remote-pi --help
 
 服务器会同时提供 API、WebSocket 和 Web UI，无需另起静态文件服务器。请勿直接暴露到公网；远程访问建议使用 SSH tunnel、Tailscale 或配置 HTTPS 的可信反向代理。
 
+## Agent 完成邮件通知（MailDispatch）
+
+如果启动时同时配置 MailDispatch 消息 API endpoint、API key 环境变量和通知邮箱，Pi 发出 `agent_settled`（不会再自动重试、自动 compact 或执行排队的 follow-up）后，Remote Pi 可以提交事务邮件。MailDispatch 返回 `202` 后邮件进入其持久队列；实际投递由 MailDispatch worker 完成。
+
+```bash
+export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
+remote-pi \
+  --maildispatch-endpoint https://mail.example.com/api/v1/messages \
+  --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
+  --maildispatch-notify-to owner@example.com \
+  --maildispatch-sender-id system
+```
+
+前三个选项必须同时提供，否则 Remote Pi 会拒绝启动。`--maildispatch-sender-id` 可选；省略时由 MailDispatch 按 API key 和服务配置选择 sender。API key 只从指定环境变量读取，避免出现在命令行参数和进程列表中，并且至少需要 MailDispatch 的 `mail:send` scope。邮件通知失败只写入 Remote Pi 标准错误，不会改变 Agent 任务状态。
+
+导航栏的“配置”窗口可以启用或关闭邮件通知，并设置：
+
+- 聚合等待时间：首个任务完成后等待指定秒数，期间完成的其他任务合并到同一封邮件；`0` 表示立即发送。
+- 是否包含 Agent 最终回复。
+- 是否包含 Session 名称和工作路径。
+
+如果后两项都关闭，邮件正文只说明一个或多个 Agent 任务已经完成。邮件设置保存在 Remote Pi 的 SQLite 元数据数据库中，对所有浏览器客户端和 Agent 生效，服务重启后继续保留。
+
 ## 本地语音摘要与语音输入（实验性）
 
 Windows 下的 Speaches 中文语音服务器启动、模型下载和故障排查见 [`VOICE_SERVER_SETUP.md`](VOICE_SERVER_SETUP.md)。只需要在线 TTS 时，也可以使用 [`packages/edge-tts-server`](packages/edge-tts-server/README.md) 中的原生 Python 服务，不需要 Docker。
@@ -142,6 +165,7 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 - `GET /health`
 - `POST /api/v1/auth/login`
 - `GET /api/v1/system/status`
+- `GET/POST /api/v1/mail-notifications`
 - `GET/POST /api/v1/workspaces`
 - `GET /api/v1/workspaces/:id/tree|file|stat`
 - `GET /api/v1/sessions`
