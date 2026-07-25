@@ -1,19 +1,37 @@
 {
-  "name": "remote-pi",
+  "name": "piweb",
   "version": "0.2.0",
   "description": "Secure remote web and Android client server for Pi coding agent",
   "type": "module",
+  "author": "sxwxs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sxwxs/piweb.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sxwxs/piweb/issues"
+  },
+  "homepage": "https://github.com/sxwxs/piweb#readme",
   "bin": {
-    "remote-pi": "dist/main.js"
+    "piweb": "dist/main.js"
   },
   "files": [
     "dist/",
     "web/",
-    "packages/edge-tts-server/",
+    "packages/protocol/",
+    "packages/edge-tts-server/src/remote_pi_edge_tts/",
+    "packages/edge-tts-server/pyproject.toml",
+    "packages/edge-tts-server/README.md",
     "README.md",
+    "VOICE_SERVER_SETUP.md",
     "ANDROID_APP_FEATURES.md",
-    "PROJECT_REVIEW_ISSUES.md"
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc -p tsconfig.json",
@@ -21,10 +39,11 @@
     "test": "vitest run",
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && npm test"
   },
   "engines": {
-    "node": "20.x || 22.x || 23.x || 24.x || 25.x || 26.x"
+    "node": ">=20.10"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",
@@ -49,8 +68,12 @@
   },
   "keywords": [
     "pi",
+    "pi-coding-agent",
     "coding-agent",
     "remote",
-    "web-ui"
+    "remote-control",
+    "web-ui",
+    "terminal",
+    "websocket"
   ]
 }
