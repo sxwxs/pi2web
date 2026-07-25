@@ -7,21 +7,21 @@ Remote Pi 在开发机上运行 Pi Agent，并通过受 Bearer 配对码保护�
 要求 Node.js 20.10 或更高版本：
 
 ```bash
-npm install -g piweb
-piweb
+npm install -g pi2web
+pi2web
 ```
 
-npm 包名为 `piweb`，全局命令同名（`piweb`）。安装时会准备 `better-sqlite3` 和 `node-pty` 两个原生模块：多数平台直接使用预编译产物，没有预编译产物的平台需要本机具备 Python 3 与 C/C++ 工具链（Linux `build-essential`、macOS Xcode Command Line Tools、Windows Visual Studio Build Tools）。
+npm 包名为 `pi2web`，全局命令同名（`pi2web`）。安装时会准备 `better-sqlite3` 和 `node-pty` 两个原生模块：多数平台直接使用预编译产物，没有预编译产物的平台需要本机具备 Python 3 与 C/C++ 工具链（Linux `build-essential`、macOS Xcode Command Line Tools、Windows Visual Studio Build Tools）。
 
 启动后访问终端显示的地址（默认 <http://127.0.0.1:11318>）。服务首次启动只在终端显示一次配对码；Web UI **必须由用户手动输入配对码**，不会从 URL 或服务端自动注入。连接成功后页面会询问是否保存到 localStorage；只有用户明确确认后才会保存，请仅在可信设备上使用。
 
 常用选项：
 
 ```bash
-piweb --host 127.0.0.1 --port 11318
-piweb --data-dir ~/.pi/remote-pi
-piweb --rotate-access-token   # 旧配对码立即失效，输出新配对码
-piweb --help
+pi2web --host 127.0.0.1 --port 11318
+pi2web --data-dir ~/.pi/remote-pi
+pi2web --rotate-access-token   # 旧配对码立即失效，输出新配对码
+pi2web --help
 ```
 
 服务器会同时提供 API、WebSocket 和 Web UI，无需另起静态文件服务器。请勿直接暴露到公网；远程访问建议使用 SSH tunnel、Tailscale、devtunnel 或配置 HTTPS 的可信反向代理。
@@ -34,7 +34,7 @@ piweb --help
 
 ```bash
 export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
-piweb \
+pi2web \
   --maildispatch-endpoint https://mail.example.com/api/v1/messages \
   --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
   --maildispatch-notify-to owner@example.com \
@@ -60,7 +60,7 @@ Remote Pi 可以连接两个 OpenAI-compatible 服务：一个 LLM endpoint 把 
 ```bash
 # 示例模型 ID 需要替换为 Speaches 中实际下载的模型
 export SUMMARY_API_KEY=...
-piweb \
+pi2web \
   --voice-base-url http://127.0.0.1:8000/v1 \
   --voice-stt-model <stt-model-id> \
   --voice-tts-model <tts-model-id> \
@@ -94,7 +94,7 @@ python -m venv .venv
 python -m pip install -e .
 remote-pi-edge-tts
 
-piweb \
+pi2web \
   --voice-base-url http://127.0.0.1:5050/v1 \
   --voice-tts-model edge-tts \
   --voice-tts-voice zh-CN-XiaoxiaoNeural \
@@ -110,7 +110,7 @@ piweb \
 
 ## 本地开发
 
-项目 Review 中发现的问题、修复状态和暂缓的 Android 项目见 [`PROJECT_REVIEW_ISSUES.md`](https://github.com/sxwxs/piweb/blob/main/PROJECT_REVIEW_ISSUES.md)。
+项目 Review 中发现的问题、修复状态和暂缓的 Android 项目见 [`PROJECT_REVIEW_ISSUES.md`](https://github.com/sxwxs/pi2web/blob/main/PROJECT_REVIEW_ISSUES.md)。
 
 ```bash
 npm install
@@ -142,7 +142,7 @@ Web UI 的 Agent 列表支持右键 `Archive`。Archive 只设置数据库记录
 
 ```bash
 npm pack --dry-run
-npm install -g ./piweb-0.2.0.tgz
+npm install -g ./pi2web-0.2.0.tgz
 ```
 
 ## Web UI
@@ -185,7 +185,7 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 ## Android App
 
-`android/` 是 Kotlin + Jetpack Compose 原生客户端。构建和连接说明见 [`android/README.md`](https://github.com/sxwxs/piweb/blob/main/android/README.md)，完整功能见 [`ANDROID_APP_FEATURES.md`](ANDROID_APP_FEATURES.md)。
+`android/` 是 Kotlin + Jetpack Compose 原生客户端。构建和连接说明见 [`android/README.md`](https://github.com/sxwxs/pi2web/blob/main/android/README.md)，完整功能见 [`ANDROID_APP_FEATURES.md`](ANDROID_APP_FEATURES.md)。
 
 运行时使用真实 `@earendil-works/pi-coding-agent` SDK，并复用 Pi CLI 的 `~/.pi/agent` 模型、认证和设置。`MockBackend` 只用于自动化测试。
 

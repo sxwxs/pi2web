@@ -1,5 +1,5 @@
 {
-  "name": "piweb",
+  "name": "pi2web",
   "version": "0.2.0",
   "description": "Secure remote web and Android client server for Pi coding agent",
   "type": "module",
@@ -7,14 +7,14 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sxwxs/piweb.git"
+    "url": "git+https://github.com/sxwxs/pi2web.git"
   },
   "bugs": {
-    "url": "https://github.com/sxwxs/piweb/issues"
+    "url": "https://github.com/sxwxs/pi2web/issues"
   },
-  "homepage": "https://github.com/sxwxs/piweb#readme",
+  "homepage": "https://github.com/sxwxs/pi2web#readme",
   "bin": {
-    "piweb": "dist/main.js"
+    "pi2web": "dist/main.js"
   },
   "files": [
     "dist/",
