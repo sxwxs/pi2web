@@ -15,6 +15,8 @@ export type VoiceConfig={
   maxInputChars?:number;
   maxOutputTokens?:number;
   sampleRate?:number;
+  /** Whole-request timeout for transcription, summary, and speech calls. */
+  requestTimeoutMs?:number;
 };
 export type VoiceEvent={type:string,[key:string]:unknown};
 export type VoiceSummaryInput={userPrompt:string;finalOutput:string;sessionName?:string;setSessionName?:(name:string)=>Promise<void>|void};
@@ -26,6 +28,9 @@ const closing=new Set(['”','’','"','\'','）',')','】',']']);
 const endpoint=(base:string,path:string)=>`${base.replace(/\/$/,'')}${base.replace(/\/$/,'').endsWith('/v1')?'':'/v1'}${path}`;
 const authHeaders=(key?:string):Record<string,string>=>key?{authorization:`Bearer ${key}`}:{ };
 const abortError=(error:unknown)=>error instanceof Error&&error.name==='AbortError';
+const timeoutError=(error:unknown)=>error instanceof Error&&error.name==='TimeoutError';
+/** Combines caller cancellation with a hard timeout so a stalled speech server cannot block the announcement queue forever. */
+const deadline=(ms:number,signal?:AbortSignal)=>signal?AbortSignal.any([signal,AbortSignal.timeout(ms)]):AbortSignal.timeout(ms);
 
 export function assistantText(message:unknown):string|undefined{
   if(typeof message==='string')return message.trim()||undefined;
@@ -134,8 +139,8 @@ export class VoiceManager{
   private generations=new Map<string,number>();
   private announcementQueue=Promise.resolve();
   private closed=false;
-  private readonly config:Required<Pick<VoiceConfig,'language'|'maxInputChars'|'maxOutputTokens'|'sampleRate'|'ttsFormat'>>&VoiceConfig;
-  constructor(config:VoiceConfig,private fetcher:Fetcher=fetch){this.config={language:'zh-CN',maxInputChars:32000,maxOutputTokens:160,sampleRate:24000,ttsFormat:'pcm',...config}}
+  private readonly config:Required<Pick<VoiceConfig,'language'|'maxInputChars'|'maxOutputTokens'|'sampleRate'|'ttsFormat'|'requestTimeoutMs'>>&VoiceConfig;
+  constructor(config:VoiceConfig,private fetcher:Fetcher=fetch){this.config={language:'zh-CN',maxInputChars:32000,maxOutputTokens:160,sampleRate:24000,ttsFormat:'pcm',requestTimeoutMs:120000,...config}}
   subscribe(listener:(agentId:string,event:VoiceEvent)=>void){this.emitter.on('event',listener);return()=>this.emitter.off('event',listener)}
   capabilities(){return {tts:true,stt:!!this.config.sttModel}}
   recordUserPrompt(agentId:string,prompt:string){const value=prompt.trim();if(value)this.lastPrompt.set(agentId,value)}
@@ -154,7 +159,7 @@ export class VoiceManager{
   async transcribe(audio:Uint8Array,mimeType='audio/webm',filename='recording.webm'){
     if(!this.config.sttModel)throw Object.assign(new Error('Voice STT model is not configured'),{code:'VOICE_STT_DISABLED'});
     const copy=new Uint8Array(audio.byteLength);copy.set(audio);const form=new FormData();form.append('file',new Blob([copy.buffer],{type:mimeType}),filename);form.append('model',this.config.sttModel);form.append('response_format','json');
-    const response=await this.fetcher(endpoint(this.config.speechBaseUrl,'/audio/transcriptions'),{method:'POST',headers:authHeaders(this.config.speechApiKey),body:form});
+    const response=await this.fetcher(endpoint(this.config.speechBaseUrl,'/audio/transcriptions'),{method:'POST',signal:deadline(this.config.requestTimeoutMs),headers:authHeaders(this.config.speechApiKey),body:form}).catch(error=>{throw timeoutError(error)?Object.assign(new Error(`Speech transcription timed out after ${this.config.requestTimeoutMs} ms`),{code:'VOICE_STT_FAILED'}):error});
     if(!response.ok)throw Object.assign(new Error(`Speech transcription failed (${response.status}): ${(await response.text()).slice(0,500)}`),{code:'VOICE_STT_FAILED'});
     const value:any=await response.json();const text=typeof value==='string'?value:value?.text;
     if(typeof text!=='string')throw Object.assign(new Error('Speech transcription returned no text'),{code:'VOICE_STT_FAILED'});
@@ -172,7 +177,7 @@ export class VoiceManager{
     let rawResult='',spokenSummary='';
     try{
       const summaryInput=prepareSummaryContext(input,this.config.maxInputChars);
-      const response=await this.fetcher(endpoint(this.config.summaryBaseUrl,'/chat/completions'),{method:'POST',signal:controller.signal,headers:{'content-type':'application/json',...authHeaders(this.config.summaryApiKey)},body:JSON.stringify({model:this.config.summaryModel,stream:true,temperature:0.2,max_tokens:this.config.maxOutputTokens,messages:[{role:'system',content:this.summaryPrompt()},{role:'user',content:summaryInput}]})});
+      const response=await this.fetcher(endpoint(this.config.summaryBaseUrl,'/chat/completions'),{method:'POST',signal:deadline(this.config.requestTimeoutMs,controller.signal),headers:{'content-type':'application/json',...authHeaders(this.config.summaryApiKey)},body:JSON.stringify({model:this.config.summaryModel,stream:true,temperature:0.2,max_tokens:this.config.maxOutputTokens,messages:[{role:'system',content:this.summaryPrompt()},{role:'user',content:summaryInput}]})});
       if(!response.ok)throw new Error(`Summary request failed (${response.status}): ${(await response.text()).slice(0,500)}`);
       for await(const delta of sseText(response))rawResult+=delta;
       const result=parseSummaryResult(rawResult),sessionName=input.sessionName?.trim()||result.sessionName;spokenSummary=formatSpokenSummary(result.summary,sessionName,this.config.language);
@@ -191,7 +196,7 @@ export class VoiceManager{
   }
   private summaryPrompt(){const language=this.config.language.toLowerCase().startsWith('zh')?'简体中文':'与用户输入相同的主要语言';return `你负责把一次 Pi 编程任务压缩成准确、自然、可直接朗读的完成通知，并在需要时为 Session 命名。\n\n输入是一个 JSON 对象：\n- userPrompt：用户本轮真正想完成的任务。\n- piFinalOutput：Pi 最后一次回复，包含完成情况、改动、验证结果和后续事项。\n- sessionNeedsName：只有为 true 时才需要生成 Session 名称。\n\n先结合 userPrompt 判断目标，再以 piFinalOutput 为事实依据总结。不要把用户的要求误说成已经完成；没有明确证据时不要声称测试通过或任务成功。摘要使用${language}，写 2 到 4 个短句，最多 120 个中文字符或 70 个英文单词。优先交代：是否完成、最重要的结果或修改、测试/验证结果、失败原因，以及用户必须采取的下一步。省略代码、命令、URL、完整路径、哈希、冗长文件清单、日志和 Markdown；不要使用标题、列表、“总结如下”等套话。\n\n如果 sessionNeedsName 为 true，请根据 userPrompt 生成一个具体、简短、便于检索的名称：中文建议 6 到 18 个字，英文建议 3 到 8 个词；使用任务主题或目标，不写“新会话”“任务总结”等空泛名称，不带句号、引号、Emoji 或路径。如果 sessionNeedsName 为 false，sessionName 必须为 null。\n\n只输出一个合法 JSON 对象，不要输出 Markdown 代码块、解释或任何额外文字。有名称时使用 {"summary":"适合直接朗读的摘要","sessionName":"简短名称"}；无需命名时使用 {"summary":"适合直接朗读的摘要","sessionName":null}。summary 必须是 JSON 字符串，sessionName 必须是 JSON 字符串或 null。`}
   private async speak(agentId:string,playbackId:string,text:string,signal:AbortSignal){
-    const response=await this.fetcher(endpoint(this.config.speechBaseUrl,'/audio/speech'),{method:'POST',signal,headers:{'content-type':'application/json',...authHeaders(this.config.speechApiKey)},body:JSON.stringify({model:this.config.ttsModel,voice:this.config.ttsVoice,input:text,response_format:this.config.ttsFormat,sample_rate:this.config.sampleRate,stream_format:'audio'})});
+    const response=await this.fetcher(endpoint(this.config.speechBaseUrl,'/audio/speech'),{method:'POST',signal:deadline(this.config.requestTimeoutMs,signal),headers:{'content-type':'application/json',...authHeaders(this.config.speechApiKey)},body:JSON.stringify({model:this.config.ttsModel,voice:this.config.ttsVoice,input:text,response_format:this.config.ttsFormat,sample_rate:this.config.sampleRate,stream_format:'audio'})});
     if(!response.ok)throw new Error(`Speech synthesis failed (${response.status}): ${(await response.text()).slice(0,500)}`);
     if(this.config.ttsFormat==='mp3'){
       const audio=Buffer.from(await response.arrayBuffer());if(!audio.length)throw new Error('Speech synthesis returned no audio');

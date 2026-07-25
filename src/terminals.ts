@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { stat } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import * as pty from 'node-pty';
@@ -30,7 +31,7 @@ export class TerminalManager {
     if(this.list().filter(x=>x.status==='running').length>=this.maxRunning)throw Object.assign(new Error(`At most ${this.maxRunning} terminals may run at once`),{code:'TERMINAL_LIMIT'});
     const workspace=this.workspaces.get(workspaceId);if(!workspace)throw Object.assign(new Error('Workspace not found'),{code:'WORKSPACE_NOT_FOUND'});
     const cwd=await this.workspaces.resolve(workspace,relativeCwd);
-    if(!(await import('node:fs/promises')).stat(cwd).then(s=>s.isDirectory()))throw Object.assign(new Error('cwd is not a directory'),{code:'NOT_A_DIRECTORY'});
+    if(!(await stat(cwd)).isDirectory())throw Object.assign(new Error('cwd is not a directory'),{code:'NOT_A_DIRECTORY'});
     const terminalId=`terminal-${randomUUID()}`,now=new Date().toISOString(),process=this.factory(cwd,this.dimension(cols,80),this.dimension(rows,24));
     const record:TerminalRecord={terminalId,workspaceId,cwd,title:path.basename(cwd)||cwd,status:'running',createdAt:now,lastActiveAt:now};
     const entry:TerminalEntry={record,process,emitter:new EventEmitter(),buffer:''};this.terminals.set(terminalId,entry);
