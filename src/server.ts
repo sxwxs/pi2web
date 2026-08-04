@@ -18,9 +18,16 @@ export class RemotePiServer {
  private recordLoginFailure(key:string){const now=Date.now();if(this.loginFailures.size>1000)for(const [id,value] of this.loginFailures)if(value.expiresAt<=now&&value.lockedUntil<=now)this.loginFailures.delete(id);const entry=this.loginFailures.get(key);if(!entry||(entry.expiresAt<=now&&entry.lockedUntil<=now)){this.loginFailures.set(key,{count:1,expiresAt:now+this.loginWindowMs,lockedUntil:0,lockLevel:0});return 0}entry.count+=1;entry.expiresAt=now+this.loginWindowMs;if(entry.count<this.loginMaxFailures)return 0;entry.count=0;entry.lockLevel=Math.min(entry.lockLevel+1,5);entry.lockedUntil=now+Math.min(this.loginLockMs*2**(entry.lockLevel-1),this.loginMaxLockMs);entry.expiresAt=entry.lockedUntil+this.loginWindowMs;return entry.lockedUntil-now}
  private connection(ws:WebSocket,_req:http.IncomingMessage){
   this.clients.add(ws);const subscriptions=new Map<string,()=>void>();
-  const send=(message:unknown)=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(message))};
+  // Pi providers may emit one delta per character. Sending every delta as its own
+  // WebSocket frame is especially expensive over a high-latency/low-bandwidth
+  // link: agent_end gets stuck behind thousands of tiny frames. Coalesce adjacent
+  // text/thinking deltas while preserving their sequence cursor and event order.
+  let pendingDelta:any,deltaTimer:ReturnType<typeof setTimeout>|undefined;
+  const sendNow=(message:unknown)=>{if(ws.readyState!==WebSocket.OPEN)return;if(ws.bufferedAmount>2*1024*1024){ws.close(1013,'Agent client is too slow');return}ws.send(JSON.stringify(message))};
+  const flushDelta=()=>{if(deltaTimer)clearTimeout(deltaTimer);deltaTimer=undefined;if(pendingDelta){const message=pendingDelta;pendingDelta=undefined;sendNow(message)}};
+  const send=(message:any)=>{const update=message?.type==='agent_event'&&message.event?.type==='message_update'?message.event.assistantMessageEvent:undefined,isDelta=update&&(update.type==='text_delta'||update.type==='thinking_delta')&&typeof update.delta==='string';if(!isDelta){flushDelta();sendNow(message);return}const previous=pendingDelta?.event?.assistantMessageEvent;if(pendingDelta&&pendingDelta.agentId===message.agentId&&previous?.type===update.type){previous.delta+=update.delta;pendingDelta.eventId=message.eventId;pendingDelta.sequence=message.sequence;pendingDelta.timestamp=message.timestamp}else{flushDelta();pendingDelta={...message,event:{...message.event,assistantMessageEvent:{...update}}}}if(!deltaTimer)deltaTimer=setTimeout(flushDelta,40)};
   const unsubscribeVoice=this.voice?.subscribe((agentId,event)=>{if(subscriptions.has('*')||subscriptions.has(agentId))send({type:'voice_event',agentId,event})});
-  ws.on('close',()=>{this.clients.delete(ws);unsubscribeVoice?.();for(const unsubscribe of subscriptions.values())unsubscribe()});
+  ws.on('close',()=>{if(deltaTimer)clearTimeout(deltaTimer);pendingDelta=undefined;this.clients.delete(ws);unsubscribeVoice?.();for(const unsubscribe of subscriptions.values())unsubscribe()});
   ws.on('message',raw=>{void (async()=>{
    let m:any;
    try{
@@ -32,7 +39,7 @@ export class RemotePiServer {
     if(m.type==='subscribe'){
      subscriptions.get(m.agentId)?.();const forward=(e:any)=>send({type:'agent_event',agentId:m.agentId,eventId:e.id,sequence:e.sequence,timestamp:e.timestamp,event:e.event});
      subscriptions.set(m.agentId,this.agents.subscribe(m.agentId,forward));send({type:'subscribed',agentId:m.agentId,protocolVersion:1,currentSequence:this.agents.currentSequence(m.agentId)});if(m.fromNow===true)return;
-     const last=Number(m.lastSequence??0);if(this.agents.hasReplayGap(m.agentId,last)){const messageLimit=m.messageLimit===undefined?undefined:Number(m.messageLimit);send({type:'agent_snapshot',agentId:m.agentId,...await this.agents.snapshot(m.agentId,Number.isFinite(messageLimit)?messageLimit:undefined)})}else for(const e of this.agents.events(m.agentId,last))forward(e);return;
+     const last=Number(m.lastSequence??0),replay=this.agents.events(m.agentId,last);if(this.agents.hasReplayGap(m.agentId,last)||replay.length>250){const messageLimit=m.messageLimit===undefined?undefined:Number(m.messageLimit);send({type:'agent_snapshot',agentId:m.agentId,...await this.agents.snapshot(m.agentId,Number.isFinite(messageLimit)?messageLimit:undefined)})}else for(const e of replay)forward(e);return;
     }
     if(['prompt','steer','follow-up','abort'].includes(m.type)){if(m.type!=='abort')this.voice?.recordUserPrompt(m.agentId,String(m.message??''));await this.agents.command(m.agentId,m.type,m.message);send({type:'command_result',requestId:m.requestId,success:true});return}
     throw new Error('Unknown command');

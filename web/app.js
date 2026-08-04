@@ -257,7 +257,7 @@
     state.selectedKind='agent';state.terminalWs?.close();state.terminalWs=null;state.agent = agent; localStorage.rpAgentId = agent.agentId;localStorage.rpSelectedKind='agent';showAgentView();updateAgentHeader();
     if (openView) navigateMobile('agent');
     if (state.workspace && isInside(clean(agent.cwd), clean(state.workspace.rootPath))) $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
-    $('messages').replaceChildren(); state.streams.clear();state.messagePageStart=0;state.messageTotal=0;
+    $('messages').replaceChildren(); discardStreams();state.messagePageStart=0;state.messageTotal=0;
     try { await loadMessagePage(agent.agentId,undefined,true); await loadSessionIdentity(); } catch (error) { addCard('加载消息失败', error.message, 'error', true); }
     renderAgentList();
     connectSocket();
@@ -320,9 +320,22 @@
     if(!page.total)box.innerHTML='<div class="empty">尚无消息</div>';
   }
   function ensureStream(key, title, kind) {
-    if (!state.streams.has(key)) state.streams.set(key, addCard(title, '', kind, true));
+    if (!state.streams.has(key)) { const card=addCard(title,'',kind,true);card.kind=kind;card.renderFrame=null;state.streams.set(key,card); }
     return state.streams.get(key);
   }
+  // Parsing and sanitizing the complete accumulated Markdown for every tiny
+  // provider delta is O(n²) and can leave the browser minutes behind the agent.
+  // Paint plain text at most once per animation frame and parse Markdown once
+  // when the message finishes.
+  function paintStream(card) {
+    card.renderFrame=null;card.body.textContent=card.content;card.summaryText.textContent=(card.content.trim().split('\n')[0]||card.kind||'Assistant').slice(0,160);
+    $('messages').scrollTop=$('messages').scrollHeight;
+  }
+  function scheduleStreamPaint(card) { if(card.renderFrame===null)card.renderFrame=requestAnimationFrame(()=>paintStream(card)); }
+  function finalizeAgentStreams() {
+    for(const key of ['assistant','thinking']){const card=state.streams.get(key);if(!card)continue;if(card.renderFrame!==null){cancelAnimationFrame(card.renderFrame);card.renderFrame=null;}renderCardBody(card.body,card.content,key==='assistant');card.summaryText.textContent=(card.content.trim().split('\n')[0]||key).slice(0,160);state.streams.delete(key);}
+  }
+  function discardStreams() { for(const card of state.streams.values())if(card.renderFrame!==null&&card.renderFrame!==undefined)cancelAnimationFrame(card.renderFrame);state.streams.clear(); }
   function extensionRequest(agentId, ev, timestamp) {
     const card = addCard(ev.title || `Extension ${ev.kind}`, ev.message || ev.placeholder || ev.prefill || '', 'system', true, timestamp);
     const controls = document.createElement('div'); controls.className = 'dialog-actions';
@@ -384,7 +397,7 @@
       return;
     }
     if (message.type === 'agent_snapshot') {
-      localStorage[`rpSeq:${message.agentId}`] = message.lastSequence; if (state.agent?.agentId === message.agentId) { $('messages').replaceChildren(); renderMessages(message.messages);state.messagePageStart=message.messagePage?.start||0;state.messageTotal=message.messagePage?.total??message.messages?.length??0;updateMessageHistoryControl(); } return;
+      localStorage[`rpSeq:${message.agentId}`] = message.lastSequence; if (state.agent?.agentId === message.agentId) { discardStreams();$('messages').replaceChildren(); renderMessages(message.messages);state.messagePageStart=message.messagePage?.start||0;state.messageTotal=message.messagePage?.total??message.messages?.length??0;updateMessageHistoryControl(); } return;
     }
     if (message.type !== 'agent_event') return;
     const key = `rpSeq:${message.agentId}`, last = Number(localStorage[key] || 0); if (message.sequence <= last) return; localStorage[key] = message.sequence;
@@ -394,16 +407,17 @@
     if (ev.type === 'agent_start' || ev.type === 'auto_retry_start') eventAgent=setAgentStatus(message.agentId,'streaming')||eventAgent;
     else if (ev.type === 'agent_end') {
       const final=!ev.willRetry;eventAgent=setAgentStatus(message.agentId,final?'idle':'streaming')||eventAgent;
-      if(final){if(selected)state.streams.clear();notifyComplete(eventAgent||{agentId:message.agentId},message.timestamp);if(eventAgent)void loadAgentContexts([eventAgent]);}
+      if(final){if(selected)finalizeAgentStreams();notifyComplete(eventAgent||{agentId:message.agentId},message.timestamp);if(eventAgent)void loadAgentContexts([eventAgent]);}
     } else if (ev.type === 'agent_settled') { eventAgent=setAgentStatus(message.agentId,'idle')||eventAgent;if(eventAgent)void loadAgentContexts([eventAgent]); }
     else if (ev.type === 'session_info_changed') { if(eventAgent)eventAgent.sessionName=ev.name||undefined;if(selected)state.agent.sessionName=ev.name||undefined;renderAgentList();if(selected)updateAgentHeader(); }
     if (!selected) return;
     if (ev.type === 'agent_start') { $('messages').querySelector('.empty')?.remove(); }
     else if (ev.type === 'message_update') {
       const update = ev.assistantMessageEvent || {};
-      if (update.type === 'text_delta') { const c=ensureStream('assistant',null,'assistant');c.content+=update.delta||'';renderCardBody(c.body,c.content,true);c.summaryText.textContent=c.content||'Assistant'; }
-      else if (update.type === 'thinking_delta') {const c=ensureStream('thinking','Thinking','thinking');c.content+=update.delta||'';c.body.textContent=c.content;}
-    } else if (ev.type === 'tool_execution_start') addCard(`🔧 ${ev.toolName || 'Tool'}`, JSON.stringify(ev.args || {}, null, 2), 'tool', false, message.timestamp);
+      if (update.type === 'text_delta') { const c=ensureStream('assistant',null,'assistant');c.content+=update.delta||'';scheduleStreamPaint(c); }
+      else if (update.type === 'thinking_delta') {const c=ensureStream('thinking','Thinking','thinking');c.content+=update.delta||'';scheduleStreamPaint(c);}
+    } else if (ev.type === 'message_end') finalizeAgentStreams();
+    else if (ev.type === 'tool_execution_start') addCard(`🔧 ${ev.toolName || 'Tool'}`, JSON.stringify(ev.args || {}, null, 2), 'tool', false, message.timestamp);
     else if (ev.type === 'tool_execution_end') addCard(`${ev.isError ? '✗' : '✓'} ${ev.toolName || 'Tool'}`, textContent(ev.result) || (ev.isError ? '执行失败' : '执行完成'), ev.isError ? 'error' : 'tool', false, message.timestamp);
     else if (ev.type === 'auto_retry_start' || ev.type === 'auto_retry_end') addCard('Retry', ev.errorMessage || ev.type, 'system', false, message.timestamp);
     else if (ev.type === 'extension_ui_request') extensionRequest(message.agentId, ev, message.timestamp);
@@ -412,7 +426,7 @@
     else if (ev.type === 'extension_ui_widget') { ev.content ? state.widgets.set(ev.key, ev.content) : state.widgets.delete(ev.key); renderWidgets(); }
     else if (ev.type === 'extension_ui_title') { state.agent.sessionName = ev.title; updateAgentHeader(); }
     else if (ev.type === 'extension_ui_working_message') { ev.message ? state.extensionStatus.set('working',ev.message) : state.extensionStatus.delete('working'); renderExtensionStatus(); }
-    else if (!['message_start','message_end','agent_end','agent_settled','session_info_changed'].includes(ev.type)) addCard(ev.title || ev.type || 'Event', JSON.stringify(ev, null, 2), 'system', false, message.timestamp);
+    else if (!['message_start','agent_end','agent_settled','session_info_changed'].includes(ev.type)) addCard(ev.title || ev.type || 'Event', JSON.stringify(ev, null, 2), 'system', false, message.timestamp);
     $('messages').scrollTop = $('messages').scrollHeight;
   }
   function renderExtensionStatus() { let row=$('extensionStatus'); if (!state.extensionStatus.size) { row?.remove(); return; } if(!row){row=document.createElement('div');row.id='extensionStatus';row.className='status-row';$('widgets').after(row);} row.textContent=[...state.extensionStatus.values()].join(' · '); }
