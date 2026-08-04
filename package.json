@@ -34,7 +34,7 @@
   },
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "npm run clean && tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json && chmod +x dist/main.js",
     "check": "npm run build",
     "test": "vitest run",
     "dev": "tsx src/main.ts",
