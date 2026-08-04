@@ -4,7 +4,7 @@
   const state = {
     base: localStorage.rpBase || location.origin, token: '', workspace: null, workspaces: [], treePath: '.',
     filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], terminals: [], terminal: null, selectedKind: 'agent', ws: null, terminalWs: null,
-    terminalEmulator: null, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
+    terminalEmulator: null, terminalAssetsPromise: null, terminalConnectAttempt: 0, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
     voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve(),generation:0}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
@@ -70,7 +70,7 @@
     $('pairDialog').close();
   }
   function disconnect(reason = '未配对') {
-    state.connected = false; state.token = ''; state.manuallyClosed = true;state.voiceEnabled=false;state.voiceSttEnabled=false;state.mailNotificationsAvailable=false;$('voicePlayback').hidden=true;$('voiceInput').hidden=true;
+    state.connected = false; state.token = ''; state.manuallyClosed = true;state.terminalConnectAttempt++;state.voiceEnabled=false;state.voiceSttEnabled=false;state.mailNotificationsAvailable=false;$('voicePlayback').hidden=true;$('voiceInput').hidden=true;
     clearTimeout(state.reconnectTimer); state.ws?.close(); state.ws = null; state.terminalWs?.close(); state.terminalWs = null; if(state.mediaRecorder?.state==='recording')state.mediaRecorder.stop();stopVoiceAudio();
     $('status').className = 'bad'; $('status').textContent = reason; $('serverInfo').textContent = '';updateConfigUi();
   }
@@ -232,23 +232,44 @@
   function showAgentView(){
     $('agentToolbar').hidden=false;$('terminalToolbar').hidden=true;$('terminalView').hidden=true;$('widgets').hidden=false;$('messages').hidden=false;$('prompt').hidden=false;
   }
-  function ensureTerminalEmulator(){
-    if(state.terminalEmulator)return;
-    const term=new Terminal({cursorBlink:true,convertEol:false,fontFamily:'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',fontSize:14,scrollback:5000,theme:{background:'#111111',foreground:'#d8dee9',cursor:'#88c0d0'}}),fit=new FitAddon.FitAddon();
+  const loadTerminalStyle=()=>new Promise((resolve,reject)=>{
+    const id='xterm-styles',loaded=document.getElementById(id);if(loaded?.dataset.loaded==='true')return resolve();
+    const link=loaded||document.createElement('link');link.id=id;link.rel='stylesheet';link.href='/vendor/xterm.css';link.onload=()=>{link.dataset.loaded='true';resolve();};link.onerror=()=>{link.remove();reject(Error('无法加载 /vendor/xterm.css'));};if(!loaded)document.head.append(link);
+  });
+  const loadTerminalScript=(id,src)=>new Promise((resolve,reject)=>{
+    const loaded=document.getElementById(id);if(loaded?.dataset.loaded==='true')return resolve();
+    const script=loaded||document.createElement('script');script.id=id;script.src=src;script.async=true;script.onload=()=>{script.dataset.loaded='true';resolve();};script.onerror=()=>{script.remove();reject(Error(`无法加载 ${src}`));};if(!loaded)document.head.append(script);
+  });
+  function loadTerminalAssets(){
+    if(window.Terminal&&window.FitAddon?.FitAddon)return Promise.resolve();
+    if(!state.terminalAssetsPromise)state.terminalAssetsPromise=(async()=>{
+      await Promise.all([loadTerminalStyle(),loadTerminalScript('xterm-script','/vendor/xterm.js')]);
+      await loadTerminalScript('xterm-fit-script','/vendor/addon-fit.js');
+      if(typeof window.Terminal!=='function'||typeof window.FitAddon?.FitAddon!=='function')throw Error('xterm.js 初始化失败');
+    })().catch(error=>{state.terminalAssetsPromise=null;throw error;});
+    return state.terminalAssetsPromise;
+  }
+  async function ensureTerminalEmulator(){
+    if(state.terminalEmulator)return state.terminalEmulator;
+    await loadTerminalAssets();if(state.terminalEmulator)return state.terminalEmulator;
+    const term=new window.Terminal({cursorBlink:true,convertEol:false,fontFamily:'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',fontSize:14,scrollback:5000,theme:{background:'#111111',foreground:'#d8dee9',cursor:'#88c0d0'}}),fit=new window.FitAddon.FitAddon();
     term.loadAddon(fit);term.open($('terminal'));term.onData(data=>{if(state.terminalWs?.readyState===WebSocket.OPEN)state.terminalWs.send(JSON.stringify({type:'input',data}));});
     term.onResize(size=>{if(state.terminalWs?.readyState===WebSocket.OPEN)state.terminalWs.send(JSON.stringify({type:'resize',cols:size.cols,rows:size.rows}));});
-    state.resizeObserver=new ResizeObserver(()=>{if(!$('terminalView').hidden)try{fit.fit();}catch{}});state.resizeObserver.observe($('terminalView'));state.terminalEmulator=term;state.fitAddon=fit;
+    state.resizeObserver=new ResizeObserver(()=>{if(!$('terminalView').hidden)try{fit.fit();}catch{}});state.resizeObserver.observe($('terminalView'));state.terminalEmulator=term;state.fitAddon=fit;return term;
   }
-  function connectTerminalSocket(terminal){
-    state.terminalWs?.close();ensureTerminalEmulator();const term=state.terminalEmulator;term.reset();term.clear();
-    const ws=new WebSocket(state.base.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(terminal.terminalId)}/ws`,['access-token.'+state.token]);state.terminalWs=ws;
-    ws.onopen=()=>{if(ws!==state.terminalWs)return;requestAnimationFrame(()=>{try{state.fitAddon.fit();ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));term.focus();}catch{}});};
-    ws.onmessage=event=>{if(ws!==state.terminalWs)return;try{const message=JSON.parse(event.data);if(message.type==='snapshot'){term.reset();if(message.data)term.write(message.data);terminal.status=message.record.status;updateTerminalHeader();renderAgentList();}else if(message.type==='output')term.write(message.data);else if(message.type==='exit'){terminal.status='exited';terminal.exitCode=message.exitCode;updateTerminalHeader();renderAgentList();void refreshAgents();}else if(message.type==='error')toast(message.message);}catch(error){console.error(error);}};
-    ws.onerror=()=>{};ws.onclose=()=>{if(ws===state.terminalWs&&terminal.status==='running')$('terminalStatus').textContent=`${terminal.cwd} · 连接已断开`;};
+  async function connectTerminalSocket(terminal){
+    state.terminalWs?.close();state.terminalWs=null;const terminalId=terminal.terminalId,attempt=++state.terminalConnectAttempt;$('terminalStatus').textContent=`${terminal.cwd} · 正在加载 Terminal…`;
+    try{
+      const term=await ensureTerminalEmulator();if(attempt!==state.terminalConnectAttempt||state.selectedKind!=='terminal'||state.terminal?.terminalId!==terminalId)return;term.reset();term.clear();$('terminalStatus').textContent=`${terminal.cwd} · 正在连接…`;
+      const ws=new WebSocket(state.base.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(terminalId)}/ws`,['access-token.'+state.token]);state.terminalWs=ws;
+      ws.onopen=()=>{if(ws!==state.terminalWs)return;requestAnimationFrame(()=>{try{state.fitAddon.fit();ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));term.focus();}catch{}});};
+      ws.onmessage=event=>{if(ws!==state.terminalWs)return;try{const message=JSON.parse(event.data);if(message.type==='snapshot'){term.reset();if(message.data)term.write(message.data);terminal.status=message.record.status;updateTerminalHeader();renderAgentList();}else if(message.type==='output')term.write(message.data);else if(message.type==='exit'){terminal.status='exited';terminal.exitCode=message.exitCode;updateTerminalHeader();renderAgentList();void refreshAgents();}else if(message.type==='error')toast(message.message);}catch(error){console.error(error);}};
+      ws.onerror=()=>{};ws.onclose=()=>{if(ws===state.terminalWs&&terminal.status==='running')$('terminalStatus').textContent=`${terminal.cwd} · 连接已断开`;};
+    }catch(error){if(attempt===state.terminalConnectAttempt&&state.selectedKind==='terminal'&&state.terminal?.terminalId===terminalId){$('terminalStatus').textContent=`${terminal.cwd} · Terminal 加载失败`;toast(`Terminal 加载失败：${error.message}`);}}
   }
   function updateTerminalHeader(){const terminal=state.terminal;if(!terminal)return;$('terminalTitle').textContent=terminal.title||'Terminal';$('terminalStatus').textContent=`${terminal.cwd}${terminal.exitCode===undefined?'':` · exit ${terminal.exitCode}`}`;const badge=$('terminalStateBadge');badge.textContent=terminal.status;badge.className=`state-badge state-${terminal.status}`;}
   async function selectTerminal(terminal,openView=true){
-    state.selectedKind='terminal';state.terminal=terminal;localStorage.rpTerminalId=terminal.terminalId;localStorage.rpSelectedKind='terminal';$('agentToolbar').hidden=true;$('terminalToolbar').hidden=false;$('terminalView').hidden=false;$('widgets').hidden=true;$('messages').hidden=true;$('prompt').hidden=true;updateTerminalHeader();renderAgentList();if(openView)navigateMobile('agent');connectTerminalSocket(terminal);
+    state.selectedKind='terminal';state.terminal=terminal;localStorage.rpTerminalId=terminal.terminalId;localStorage.rpSelectedKind='terminal';$('agentToolbar').hidden=true;$('terminalToolbar').hidden=false;$('terminalView').hidden=false;$('widgets').hidden=true;$('messages').hidden=true;$('prompt').hidden=true;updateTerminalHeader();renderAgentList();if(openView)navigateMobile('agent');void connectTerminalSocket(terminal);
   }
   async function startAgent(relativePath){if(!state.workspace)return toast('请先选择 Workspace');$('contextMenu').hidden=true;try{const agent=await post('/api/v1/agents',{workspaceId:state.workspace.id,relativeCwd:relativePath});$('agentCwd').value=relativePath;await refreshAgents();await selectAgent(agent);}catch(error){toast(error.message);}}
   async function openTerminal(relativePath){if(!state.workspace)return toast('请先选择 Workspace');try{const terminal=await post('/api/v1/terminals',{workspaceId:state.workspace.id,relativeCwd:relativePath});state.terminals.unshift(terminal);$('contextMenu').hidden=true;renderAgentList();await selectTerminal(terminal);}catch(error){toast(error.message);}}
