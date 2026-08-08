@@ -1,6 +1,8 @@
-# pi2web 多 Agent 协作中枢（Collaboration Hub）方案 v0.1
+# pi2web 多 Agent 协作中枢（Collaboration Hub）方案 v0.2
 
 > 状态：**待讨论**。本文先给出整体架构、协议、状态机、数据模型和分期计划；确认后再进入实现。
+>
+> v0.2 相对 v0.1 的补充：代码基线锚定与再验证（§3.5）、盲评/防锚定（§4.3）、评分场景的资格与利益回避（§4.4）、测试策略（§12）、决策清单给出推荐默认值（§10）。
 
 ## 0. 目标与定位
 
@@ -213,6 +215,28 @@ POST /api/v1/collab/sessions/{id}/findings
 
 中枢**不自动合并**，只标注 `possibleDuplicates`：同 `path` 且行区间重叠 → 权重 0.5；标题/建议的词集合 Jaccard 相似度 → 权重 0.5；`score ≥ 0.7` 提示。合并由 moderator/人工调 `POST /issues/{id}/merge-into` 完成（被合并方状态 `duplicate`，裁定权归主 issue）。理由：误合并会丢掉真实缺陷，代价高于重复处理。
 
+### 3.5 代码基线锚定与再验证（v0.2 新增，关键）
+
+v0.1 把 `subject` 当成纯描述，这会在第 2 轮出问题：实现 Agent 改完代码后，评审 Agent 裁定时看到的可能已经是**另一份代码**，却按第 1 轮的记忆做判断。因此：
+
+- 每个 round 有一个不可变的 **baseline**：
+
+```jsonc
+{ "round": 1,
+  "baselineId": "b-1",
+  "vcs": "git",
+  "commit": "9f2c1ab…",           // 由中枢在 session 的 cwd 执行 `git rev-parse HEAD` 解析并冻结
+  "range": "HEAD~3..HEAD",
+  "dirtyHash": "sha256:…",        // 有未提交改动时对工作区改动文件内容做的 sha256
+  "paths": ["src/pay/**"],
+  "capturedAt": "…" }
+```
+
+- **所有 finding 必须携带 `baselineId`**；针对旧 baseline 的提交返回 `409 STALE_BASELINE`，回执带当前 baseline，Agent 自行重新取代码。
+- 实现 Agent 的 `fixed` 回应必须带 `codeRef`（新 commit / dirtyHash）。中枢据此为下一轮生成新 baseline，并在裁定任务包里给出 `baselineFrom → baselineTo` 与受影响文件列表，让评审 Agent 明确知道"要复核的是这一段变更"。
+- 若实现 Agent 声称 `fixed` 但 `codeRef` 与上一轮完全相同（没有任何改动），中枢直接拒收：`422 NO_CODE_CHANGE`。这堵住了"嘴上说改了"的最常见失败模式。
+- 中枢**不做语义判断**（不判断修复是否正确），只保证"大家在同一份代码上说话"，判断权仍属评审 Agent 与人。
+
 ---
 
 ## 4. 场景二：Panel Scoring
@@ -291,6 +315,26 @@ analysis ─┬─(全部类目收敛)──────────────
 ```
 
 保留 dissent（少数意见）是刻意设计：强行收敛会掩盖真实风险。
+
+### 4.3 盲评与防锚定（v0.2 新增，关键）
+
+LLM 极易被先看到的内容锚定。如果 A 先提名 6 个类目、先打了 8 分，B 大概率跟着走，那么"多 Agent 评审"退化成"一个 Agent 评审 + N 个复读机"，整套机制就没有价值了。所以：
+
+| 阶段 | 可见性规则 |
+|---|---|
+| 提名 criteria | **盲提名**：提交前 `GET /criteria` 只返回自己的提名；全部提交或超时后统一揭晓 |
+| 投票 | **盲投票**：本轮票不可见，本轮结束后公布分布（含谁投的，便于追责/复盘） |
+| 打分 | **盲打分**：`policy.scoring.blindScoring=true`（默认开）时，未全部提交前 `GET /analysis` 返回 `403 SCORES_SEALED` |
+| 辩论 | **公开**：辩论本来就要看到对方论据 |
+| 改分 | **公开**：改分必须给 `changeReason`，且记录"从 X 改到 Y"，防止无理由跟风 |
+
+实现上是一条 `visibility` 规则表 + 一个 `sealed` 标记，不是散落在各处的 if。揭晓由"全员提交"或"阶段超时"触发。
+
+### 4.4 评审资格与利益回避（v0.2 新增）
+
+- 场景二里 `implementer` 角色**不得**提名、投票、打分，只能在辩论阶段以 `stance:"clarify"` 提供事实澄清（不带倾向）。中枢按角色强制，不靠提示词自觉。
+- 同一 `agentId` 不能在一个 session 里注册两个 reviewer participant（防止一个模型灌两票）。同一底层模型可以多份，但要在 `participant.model` 里如实登记，最终报告里会显示"模型多样性"提示——评审团全是同一个模型时，一致性高是没有意义的。
+- 打分必须带 `evidence[]`（至少一条含 `path`），无证据的分数 `422 EVIDENCE_REQUIRED`（可用 `policy.scoring.requireEvidence=false` 关掉）。
 
 ---
 
@@ -376,6 +420,8 @@ collab_issues(id PK, session_id FK, external_id, reporter_id, title, severity, c
               status, round, version, merged_into, created_at, updated_at)
 collab_issue_messages(id PK, issue_id FK, round, author_id, kind /*response|verdict|note*/,
                       payload_json, created_at)
+collab_baselines(id PK, session_id FK, round, vcs, commit_sha, range_expr, dirty_hash,
+                 paths_json, captured_at, UNIQUE(session_id, round))
 collab_criteria(id PK, session_id FK, state /*candidate|approved|rejected*/, name,
                 definition, anchors_json, weight, source_json, round, created_at)
 collab_votes(id PK, session_id FK, criterion_id FK, participant_id FK, round, stance,
@@ -412,16 +458,22 @@ collab_idempotency(key PK, session_id, participant_id, response_json, created_at
 
 ---
 
-## 10. 需要你拍板的问题
+## 10. 需要你拍板的问题（已给推荐默认值，认可就直接按推荐做）
 
-1. **Agent 接入优先级**：先做「HTTP + 提示词（跨厂商通用）」还是先做「Pi 扩展工具（体验最好但只服务 Pi）」？我倾向前者做地基、后者做糖。
-2. **托管 Agent 的唤醒方式**：用 `follow-up`（排队，不打断当前任务）还是 `prompt`？我倾向 `follow-up`，且任务包用 fenced JSON + 明确指令。
-3. **谁来发起 session**：只允许人在 Web UI 发起，还是也允许"主控 Agent"通过 API 发起并拉人？（后者更自动化，但要防止 Agent 自造循环）
-4. **实现 Agent 是否有权提 issue 反向评审评审者**？（即对称模型）当前方案是非对称的。
-5. **评分场景是否也要挂在真实代码上**（要求 evidence 必须带 path/line），还是允许纯文字论证？我倾向强制 evidence，减少幻觉。
-6. **超时默认值**是否合适（评审 30 分钟、回应 60 分钟）？超时是"视作弃权继续推进"还是"卡住等人"？我倾向前者但记入报告。
-7. **是否需要 session 级别的成本上限**（比如总轮次 / 总 token 预算），到顶自动收敛并出报告？
-8. **人工裁决入口**除 Web UI 外，是否需要邮件里的一键链接（需要考虑安全，链接带一次性 token）？
+| # | 问题 | 选项 | **推荐** | 理由 |
+|---|---|---|---|---|
+| 1 | Agent 接入方式优先级 | A. HTTP+提示词 / B. Pi 扩展工具 / C. MCP | **先 A，M6 补 B** | A 是协议地基且跨厂商；B 只是让 Pi Agent 少犯格式错 |
+| 2 | 托管 Agent 唤醒方式 | `prompt` / `follow-up` | **`follow-up`** | 不打断在跑的任务，Pi 会排队执行 |
+| 3 | 谁能发起 session | 仅人 / 人+主控 Agent | **M1–M5 仅人，M6 再开 Agent 发起并限额** | 先堵住 Agent 自造循环 |
+| 4 | 实现 Agent 能否反向提 issue | 对称 / 非对称 | **非对称** | 对称会让轮次爆炸；实现方有异议走 `rejected` + escalate 已够 |
+| 5 | 评分是否强制 evidence | 强制 / 可选 | **强制（可 policy 关）** | 无证据打分基本等于幻觉 |
+| 6 | 阶段超时语义 | 视作弃权推进 / 卡住等人 | **弃权推进 + 报告标注 `timedOut`** | 一个 Agent 挂掉不该阻塞全局 |
+| 7 | 会话成本上限 | 要 / 不要 | **要：`maxTotalRounds`（默认 6）** | 到顶强制出报告，防烧钱 |
+| 8 | 邮件一键裁决链接 | 要 / 不要 | **不做**（只在邮件里给 Web UI 链接） | 一次性 token 进邮件是明显的攻击面，收益不值 |
+| 9 | 盲评（§4.3） | 开 / 关 | **默认开** | 否则多 Agent 评审退化成复读 |
+| 10 | 场景一是否也要盲评 findings | 开 / 关 | **默认开（reviewer 之间互相看不到，直到本轮截止）** | 同上；截止后可见以便去重 |
+
+> 除此之外还有一个隐含决定：**外部 Agent（非 pi2web 托管）是否是一等公民**。方案里是（长轮询 inbox + 相同提交接口），代价是要维护 token 与 inbox 表。如果只服务 pi2web 自己托管的 Agent，M1–M5 可以砍掉 ~15% 工作量，但会失去"让 Claude Code / Codex 当评审员"的能力。**推荐保留**。
 
 ---
 
@@ -433,3 +485,15 @@ collab_idempotency(key PK, session_id, participant_id, response_json, created_at
 - **雪崩式唤醒**：Dispatcher 串行化每个 Agent 的任务投递（同一 agentId 一个队列），避免同时 follow-up 多次。
 - **`server.ts` 继续膨胀**：本次顺带把路由拆成表驱动的 `routes.ts`，只在 collab 范围内做，不动既有行为。
 - **数据库迁移**：新表全部 `CREATE TABLE IF NOT EXISTS`，不改动既有表，`user_version` 从 1 → 2，向后兼容。
+
+---
+
+## 12. 测试策略
+
+- **纯状态机单测**（`review-flow.ts` / `scoring-flow.ts` 不碰 IO）：全部状态迁移、越权（实现方关 issue）、超时弃权、轮次上限、收敛与强制锁定兜底。这是收益最高的一块，必须先于 HTTP 层。
+- **HTTP 契约测试**：沿用现有 `RemotePiServer({port:0,dataDir})` + `fetch` 的写法（见 `test/mail-settings-server.test.ts`），跑完整闭环：2 reviewer 提 findings → implementer 回应 → verdict → 关闭/升级。
+- **幂等与并发**：同一 `clientRequestId` 重放两次只产生一条 issue；两个 reviewer 同时对同一 issue 写 verdict 时 `409`。
+- **恶意/畸形输入**：超大 payload、错误 severity、跨 session 引用 issueId（必须 404 而不是泄露）、用 A 的 token 改 B 的对象。
+- **持久化**：重启 pi2web 后 session/issue/escalation 全部还在（复用 mail-settings 测试里"重启再查"的写法）。
+- **不做**：真实多 LLM 联调不进 CI（不稳定、烧钱），改用脚本 `examples/collab-demo` 手动跑。
+
