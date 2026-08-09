@@ -103,6 +103,12 @@ export class CollabStore {
         payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, delivered_at INTEGER, acked_at INTEGER,
         FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS collab_phase_completions (
+        session_id TEXT NOT NULL, round INTEGER NOT NULL, phase TEXT NOT NULL, participant_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(session_id, round, phase, participant_id),
+        FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE
+      );
       CREATE TABLE IF NOT EXISTS collab_idempotency (
         key TEXT PRIMARY KEY, session_id TEXT NOT NULL, participant_id TEXT NOT NULL,
         response_json TEXT NOT NULL, created_at INTEGER NOT NULL
@@ -225,6 +231,11 @@ export class CollabStore {
     if(!row)throw notFound(COLLAB_ERRORS.issueNotFound,'Issue not found');
     return issueFrom(row);
   }
+  /** Scoped lookup: an issue id from another session must read as "not found", never leak across sessions. */
+  findIssueInSession(sessionId:string,issueId:string):Issue|undefined{
+    const row=this.db.prepare('SELECT * FROM collab_issues WHERE id=? AND session_id=?').get(issueId,sessionId) as any;
+    return row?issueFrom(row):undefined;
+  }
   listIssues(sessionId:string,filter:{status?:IssueStatus[],reporterId?:string,targetParticipantId?:string,round?:number}={}):Issue[]{
     const where=['session_id=?'],params:unknown[]=[sessionId];
     if(filter.status?.length){where.push(`status IN (${filter.status.map(()=>'?').join(',')})`);params.push(...filter.status)}
@@ -293,6 +304,15 @@ export class CollabStore {
   }
   markDelivered(itemIds:string[]){if(!itemIds.length)return;const timestamp=now(),update=this.db.prepare('UPDATE collab_inbox SET delivered_at=COALESCE(delivered_at,?) WHERE id=?');this.db.transaction(()=>{for(const id of itemIds)update.run(timestamp,id)})()}
   ackInbox(participantId:string,itemIds:string[]){if(!itemIds.length)return;const timestamp=now(),update=this.db.prepare('UPDATE collab_inbox SET acked_at=? WHERE id=? AND participant_id=?');this.db.transaction(()=>{for(const id of itemIds)update.run(timestamp,id,participantId)})()}
+
+  // ---- phase completions ("I am done for this phase and round") ----
+  markPhaseComplete(sessionId:string,round:number,phase:string,participantId:string){
+    this.db.prepare('INSERT OR IGNORE INTO collab_phase_completions(session_id,round,phase,participant_id,created_at) VALUES(?,?,?,?,?)').run(sessionId,round,phase,participantId,now());
+  }
+  listCompletions(sessionId:string):{sessionId:string,round:number,phase:string,participantId:string}[]{
+    return (this.db.prepare('SELECT * FROM collab_phase_completions WHERE session_id=?').all(sessionId) as any[])
+      .map(row=>({sessionId:row.session_id,round:row.round,phase:row.phase,participantId:row.participant_id}));
+  }
 
   // ---- idempotency ----
   getIdempotent<T>(key:string):T|undefined{const row=this.db.prepare('SELECT response_json FROM collab_idempotency WHERE key=?').get(key) as any;return row?json<T|undefined>(row.response_json,undefined):undefined}
