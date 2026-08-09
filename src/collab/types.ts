@@ -76,7 +76,7 @@ export type CollabSubject={type:'diff'|'paths'|'commit_range'|'free';value:strin
 export type StalledInfo={since:string;waitingOn:string[]};
 export type CollabSession={
   sessionId:string;kind:CollabKind;title:string;workspaceId:string;cwd:string;
-  subject:CollabSubject;phase:CollabPhase;round:number;policy:CollabPolicy;
+  subject:CollabSubject;phase:CollabPhase;round:number;debateRound:number;policy:CollabPolicy;
   status:SessionStatus;stalled?:StalledInfo;outcome?:Record<string,unknown>;
   createdAt:string;updatedAt:string;
 };
@@ -104,6 +104,11 @@ export type Escalation={
   urgency:Urgency;status:EscalationStatus;decision?:Record<string,unknown>;resolvedBy?:string;
   createdAt:string;resolvedAt?:string;
 };
+export type Criterion={criterionId:string;sessionId:string;state:CriterionState;name:string;definition:string;anchors?:Record<string,string>;weight?:number;source?:Record<string,unknown>;round:number;createdAt:string};
+export type Vote={voteId:string;sessionId:string;criterionId:string;participantId:string;round:number;stance:VoteStance;weight?:number;amendment?:string;rationale?:string;createdAt:string};
+export type Score={scoreId:string;sessionId:string;criterionId:string;participantId:string;round:number;score:number;rationale:string;evidence:unknown[];confidence?:number;changeReason?:string;createdAt:string};
+export type DebateArgument={argumentId:string;debateId:string;participantId:string;stance:DebateStance;argument:string;evidence:unknown[];respondingTo?:string;createdAt:string};
+export type Debate={debateId:string;sessionId:string;criterionId:string;round:number;status:'open'|'closed';arguments:DebateArgument[];createdAt:string};
 export type InboxItem={itemId:string;sessionId:string;participantId:string;type:string;payload:Record<string,unknown>;createdAt:string;deliveredAt?:string;ackedAt?:string};
 
 /** Error codes returned to agents. Keep them stable: agents branch on these strings. */
@@ -122,5 +127,7 @@ export const COLLAB_ERRORS={
   noCodeChange:'NO_CODE_CHANGE',
   budgetExhausted:'TOKEN_BUDGET_EXHAUSTED',
   humanRulingFinal:'HUMAN_RULING_FINAL',
-  scoresSealed:'SCORES_SEALED'
+  scoresSealed:'SCORES_SEALED',
+  criterionNotFound:'COLLAB_CRITERION_NOT_FOUND',
+  debateNotFound:'COLLAB_DEBATE_NOT_FOUND'
 } as const;

@@ -1,10 +1,11 @@
 import {execFile} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {promisify} from 'node:util';
-import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type Issue,type Participant,type ReviewPhase} from './types.js';
+import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type Issue,type Participant,type ReviewPhase,type ScoringPhase} from './types.js';
 import {CollabStore,type CreateSessionInput} from './store.js';
 import {ValidationError,parse,type FieldError} from './validate.js';
-import {advanceRequest,createParticipantRequest,createSessionRequest,escalationRequest,findingsRequest,policyPatch,resolveEscalationRequest,responsesRequest,verdictsRequest} from './schemas.js';
+import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,policyPatch,resolveEscalationRequest,responsesRequest,scoresRequest,verdictsRequest,votesRequest} from './schemas.js';
+import {analyse,assertScoringCapability,assertScoringPhase,approvedCriteria,contestedCriteria,finalizeScores,isScoringReadyToAdvance,lockRubric,nextScoringPhase,nominationsSealed,scoresSealed,scoringPanel,scoringProgress,scoringWaitingOn,tallyVotes,votesSealed,type ScoringSnapshot} from './scoring-flow.js';
 import {applyEscalation,applyHumanRuling,applyResponse,applyVerdict,applyWithdraw,assertCanFileFinding,assertCapability,canSeeOthersFindings,flowError,isReadyToAdvance,nextPhase,sessionProgress,stallCheck,waitingOn,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from './review-flow.js';
 
 const run=promisify(execFile);
@@ -73,6 +74,10 @@ export class CollabHub {
       throw flowError(COLLAB_ERRORS.conflict,'That agent is already registered in this session');
     const {participant,token}=this.store.createParticipant({sessionId,role:input.role,displayName:input.displayName,model:input.model,bindingType:input.binding.type,agentId:input.binding.agentId,tokenBudget:input.tokenBudget});
     this.record(sessionId,'participant_added',{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,binding:participant.binding,model:participant.model});
+    if(session.kind==='scoring'&&session.phase==='nominating'&&participant.role==='reviewer'){
+      this.store.pushInbox(sessionId,participant.participantId,'nominate_criteria',{phase:session.phase,round:session.round});
+      this.record(sessionId,'task_assigned',{participantId:participant.participantId,task:'nominate_criteria',phase:session.phase,round:session.round});
+    }
     return {participant,token,session};
   }
   /** Moves a review session from draft into its first collecting phase and pins the baseline. */
@@ -89,6 +94,13 @@ export class CollabHub {
   /** The only way to move past participants that never submitted. Everything about the override is logged. */
   async advance(sessionId:string,body:unknown,actor='human'){
     const input=parse(advanceRequest,body),session=this.store.getSession(sessionId);
+    if(session.kind==='scoring'){
+      const pendingPanel=scoringWaitingOn(this.scoringSnapshot(sessionId));
+      if(pendingPanel.length&&!input.force)throw flowError(COLLAB_ERRORS.wrongPhase,`Still waiting on ${pendingPanel.length} panelist(s): ${pendingPanel.join(', ')}. Pass force=true to override.`);
+      if(pendingPanel.length&&!input.reason.trim())throw new ValidationError([fieldError('reason','REQUIRED','A forced advance must state why the pending panelists are being skipped')]);
+      await this.settleScoring(sessionId,input.force,input.reason);
+      return this.store.getSession(sessionId);
+    }
     if(session.phase==='draft')return this.openRound(sessionId);
     const snapshot=this.snapshot(sessionId),pending=waitingOn(snapshot);
     if(pending.length&&!input.force)throw flowError(COLLAB_ERRORS.wrongPhase,`Still waiting on ${pending.length} participant(s): ${pending.join(', ')}. Pass force=true to override.`);
@@ -246,8 +258,10 @@ export class CollabHub {
   }
 
   /** Role-specific task package: exactly what this participant owes right now, and nothing else. */
-  digest(participant:Participant){
-    const session=this.store.getSession(participant.sessionId),snapshot=this.snapshot(session.sessionId);
+  digest(participant:Participant):Record<string,unknown>{
+    const session=this.store.getSession(participant.sessionId);
+    if(session.kind==='scoring')return this.scoringDigest(participant);
+    const snapshot=this.snapshot(session.sessionId);
     const baseline=this.store.getBaselineForRound(session.sessionId,session.round);
     const base={sessionId:session.sessionId,kind:session.kind,title:session.title,phase:session.phase,round:session.round,subject:session.subject,
       baseline,you:{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,tokensUsed:participant.tokensUsed,tokenBudget:participant.tokenBudget,state:participant.state},
@@ -279,7 +293,7 @@ export class CollabHub {
     return issues.filter(issue=>issue.reporterId===participant.participantId||issue.targetParticipantId===participant.participantId);
   }
   events(sessionId:string,since=0,limit=500){return this.store.listEvents(sessionId,since,limit)}
-  progress(sessionId:string){return sessionProgress(this.snapshot(sessionId))}
+  progress(sessionId:string){return this.store.getSession(sessionId).kind==='scoring'?scoringProgress(this.scoringSnapshot(sessionId)):sessionProgress(this.snapshot(sessionId))}
   issueDetail(sessionId:string,issueId:string){
     const issue=this.store.findIssueInSession(sessionId,issueId);
     if(!issue)throw flowError(COLLAB_ERRORS.issueNotFound,'Issue not found in this session',404);
@@ -291,6 +305,202 @@ export class CollabHub {
     return items;
   }
   ackInbox(participant:Participant,itemIds:string[]){this.store.ackInbox(participant.participantId,itemIds);return {acknowledged:itemIds.length}}
+
+  // ---------------------------------------------------------------- scoring session operations
+  /** Blind nomination: a participant only sees its own proposals until the panel finishes. */
+  async submitNominations(participant:Participant,body:unknown){
+    const input=parse(nominationsRequest,body);
+    const cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
+    const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId);
+    assertScoringCapability(this.toFlowParticipant(participant),'nominate');
+    assertScoringPhase(snapshot,['nominating'],'Nominating criteria');
+    const accepted=input.nominations.map(nomination=>{
+      const criterion=this.store.createCriterion({sessionId:session.sessionId,name:nomination.name,definition:nomination.definition,
+        anchors:nomination.anchors as Record<string,string>|undefined,weight:nomination.weightSuggestion,
+        source:{participantId:participant.participantId,externalId:nomination.externalId,rationale:nomination.rationale},round:session.round});
+      return {externalId:nomination.externalId,criterionId:criterion.criterionId,name:criterion.name};
+    });
+    if(input.nominationsComplete)this.store.markPhaseComplete(session.sessionId,session.round,'nominating',participant.participantId);
+    const response={accepted,round:session.round,nominationsComplete:input.nominationsComplete};
+    this.finish(participant,input.clientRequestId,body,input.usage,response);
+    this.record(session.sessionId,'criteria_nominated',{count:accepted.length,complete:input.nominationsComplete},participant.participantId);
+    await this.settleScoring(session.sessionId);
+    return response;
+  }
+
+  async submitVotes(participant:Participant,body:unknown){
+    const input=parse(votesRequest,body);
+    const cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
+    const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId);
+    assertScoringCapability(this.toFlowParticipant(participant),'vote');
+    assertScoringPhase(snapshot,['voting'],'Voting on criteria');
+    const accepted:string[]=[],rejected:{criterionId:string,code:string,message:string}[]=[];
+    for(const vote of input.votes){
+      const criterion=this.store.findCriterionInSession(session.sessionId,vote.criterionId);
+      if(!criterion||criterion.state!=='candidate'){rejected.push({criterionId:vote.criterionId,code:COLLAB_ERRORS.criterionNotFound,message:'Unknown or already decided criterion'});continue}
+      if(vote.stance==='reject'&&!(vote.rationale??'').trim()){rejected.push({criterionId:vote.criterionId,code:'RATIONALE_REQUIRED',message:'Rejecting a criterion requires a rationale'});continue}
+      this.store.saveVote({sessionId:session.sessionId,criterionId:vote.criterionId,participantId:participant.participantId,round:session.round,stance:vote.stance,weight:vote.weight,amendment:vote.amendment,rationale:vote.rationale});
+      accepted.push(vote.criterionId);
+    }
+    const response={accepted,rejected,round:session.round};
+    this.finish(participant,input.clientRequestId,body,input.usage,response);
+    this.record(session.sessionId,'criteria_voted',{count:accepted.length},participant.participantId);
+    await this.settleScoring(session.sessionId);
+    return response;
+  }
+
+  async submitScores(participant:Participant,body:unknown){
+    const input=parse(scoresRequest,body);
+    const cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
+    const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId);
+    assertScoringCapability(this.toFlowParticipant(participant),'score');
+    assertScoringPhase(snapshot,['scoring','rescoring'],'Scoring');
+    const {scale}=session.policy.scoring,round=snapshot.phase==='rescoring'?session.debateRound+1:session.debateRound;
+    const errors:FieldError[]=[];
+    input.scores.forEach((entry,index)=>{
+      if(entry.score<scale.min||entry.score>scale.max)errors.push(fieldError(`scores[${index}].score`,'OUT_OF_RANGE',`Score must be between ${scale.min} and ${scale.max}`));
+      const quotient=(entry.score-scale.min)/scale.step;
+      if(Math.abs(quotient-Math.round(quotient))>1e-9)errors.push(fieldError(`scores[${index}].score`,'NOT_A_MULTIPLE',`Score must be a multiple of ${scale.step}`));
+      if(!entry.evidence.every(item=>item.path?.trim()))errors.push(fieldError(`scores[${index}].evidence`,'EVIDENCE_REQUIRED','Every evidence entry must reference a file path'));
+      // A revised score has to say why it moved, otherwise a debate just produces silent herding.
+      if(snapshot.phase==='rescoring'&&!(entry.changeReason??'').trim())errors.push(fieldError(`scores[${index}].changeReason`,'REQUIRED','A rescore must state why the score changed or why it stayed'));
+    });
+    if(errors.length)throw new ValidationError(errors);
+    const accepted:string[]=[],rejected:{criterionId:string,code:string,message:string}[]=[];
+    for(const entry of input.scores){
+      const criterion=this.store.findCriterionInSession(session.sessionId,entry.criterionId);
+      if(!criterion||criterion.state!=='approved'){rejected.push({criterionId:entry.criterionId,code:COLLAB_ERRORS.criterionNotFound,message:'Criterion is not part of the locked rubric'});continue}
+      this.store.saveScore({sessionId:session.sessionId,criterionId:entry.criterionId,participantId:participant.participantId,round,score:entry.score,rationale:entry.rationale,evidence:entry.evidence,confidence:entry.confidence,changeReason:entry.changeReason});
+      accepted.push(entry.criterionId);
+    }
+    const response={accepted,rejected,round};
+    this.finish(participant,input.clientRequestId,body,input.usage,response);
+    this.record(session.sessionId,'scores_submitted',{count:accepted.length,round},participant.participantId);
+    await this.settleScoring(session.sessionId);
+    return response;
+  }
+
+  async submitDebateArgument(participant:Participant,debateId:string,body:unknown){
+    const input=parse(debateArgumentRequest,body);
+    const cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
+    const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId);
+    // The party under review may only clarify facts; it must not argue for a score.
+    assertScoringCapability(this.toFlowParticipant(participant),participant.role==='implementer'?'clarify':'debate');
+    if(participant.role==='implementer'&&input.stance!=='clarify')throw flowError(COLLAB_ERRORS.forbidden,'The implementer may only contribute clarifications, not scoring positions',403);
+    assertScoringPhase(snapshot,['debating'],'Debating');
+    const debate=this.store.findDebateInSession(session.sessionId,debateId);
+    if(!debate||debate.status!=='open')throw flowError(COLLAB_ERRORS.debateNotFound,'Debate not found or already closed',404);
+    const argumentId=this.store.addDebateArgument(debateId,{participantId:participant.participantId,stance:input.stance,argument:input.argument,evidence:input.evidence,respondingTo:input.respondingTo});
+    const response={argumentId,debateId,criterionId:debate.criterionId};
+    this.finish(participant,input.clientRequestId,body,input.usage,response);
+    this.record(session.sessionId,'debate_argument',{debateId,criterionId:debate.criterionId,stance:input.stance},participant.participantId);
+    await this.settleScoring(session.sessionId);
+    return response;
+  }
+
+  /** Sealed until everyone has committed, so nobody can anchor on someone else's number. */
+  analysis(sessionId:string,viewer?:Participant){
+    const snapshot=this.scoringSnapshot(sessionId);
+    if(viewer&&scoresSealed(snapshot))throw flowError(COLLAB_ERRORS.scoresSealed,'Scores stay sealed until every panelist has submitted',403);
+    return {phase:snapshot.phase,round:snapshot.round,debateRound:snapshot.debateRound,criteria:analyse(snapshot),contested:contestedCriteria(snapshot).map(entry=>entry.criterionId)};
+  }
+  criteria(sessionId:string,viewer?:Participant){
+    const snapshot=this.scoringSnapshot(sessionId),all=this.store.listCriteria(sessionId);
+    if(!viewer)return all;
+    if(nominationsSealed(snapshot))return all.filter(criterion=>(criterion.source as any)?.participantId===viewer.participantId);
+    return all;
+  }
+  votes(sessionId:string,viewer?:Participant){
+    const snapshot=this.scoringSnapshot(sessionId),all=this.store.listVotes(sessionId);
+    return viewer&&votesSealed(snapshot)?all.filter(vote=>vote.participantId===viewer.participantId):all;
+  }
+  /** Human ruling on the criteria a panel could not settle; it also closes the session. */
+  async finalizeScoring(sessionId:string,body:unknown,resolvedBy='human'){
+    const input=parse(finalizeRequest,body),session=this.store.getSession(sessionId);
+    if(session.kind!=='scoring')throw flowError(COLLAB_ERRORS.wrongPhase,'Only scoring sessions can be finalized');
+    const snapshot=this.scoringSnapshot(sessionId);
+    const rulings=Object.fromEntries(input.rulings.map(ruling=>[ruling.criterionId,ruling.score]));
+    const report=finalizeScores(snapshot,rulings);
+    this.store.updateSession(sessionId,{phase:'finalized',status:'finished',outcome:{...report,rulings:input.rulings,resolvedBy}});
+    this.record(sessionId,'session_finished',{outcome:report},resolvedBy);
+    return report;
+  }
+
+  scoringSnapshot(sessionId:string):ScoringSnapshot{
+    const session=this.store.getSession(sessionId);
+    return {
+      phase:session.phase as ScoringPhase,round:session.round,debateRound:session.debateRound,policy:session.policy,status:session.status,
+      participants:this.store.listParticipants(sessionId).map(participant=>this.toFlowParticipant(participant)),
+      criteria:this.store.listCriteria(sessionId).map(criterion=>({criterionId:criterion.criterionId,state:criterion.state,name:criterion.name,round:criterion.round,weight:criterion.weight})),
+      votes:this.store.listVotes(sessionId).map(vote=>({criterionId:vote.criterionId,participantId:vote.participantId,round:vote.round,stance:vote.stance,weight:vote.weight})),
+      scores:this.store.listScores(sessionId).map(score=>({criterionId:score.criterionId,participantId:score.participantId,round:score.round,score:score.score})),
+      debates:this.store.listDebates(sessionId).map(debate=>({debateId:debate.debateId,criterionId:debate.criterionId,round:debate.round,status:debate.status,arguments:debate.arguments.map(entry=>({participantId:entry.participantId}))})),
+      completions:this.store.listCompletions(sessionId).filter(entry=>entry.phase==='nominating').map(entry=>({phase:'nominating' as const,round:entry.round,participantId:entry.participantId})),
+      pendingEscalations:this.store.listEscalations({sessionId,status:'pending'}).length
+    };
+  }
+  /** Scoring counterpart of settle(): advance only while the panel has finished the current step. */
+  async settleScoring(sessionId:string,forced=false,reason=''){
+    for(let guard=0;guard<12;guard++){
+      const session=this.store.getSession(sessionId),snapshot=this.scoringSnapshot(sessionId);
+      if(session.status!=='active')return;
+      if(!isScoringReadyToAdvance(snapshot)&&!(forced&&guard===0))return;
+      const result=nextScoringPhase(snapshot,{forced:forced&&guard===0});
+      if(result.phase===snapshot.phase&&result.round===snapshot.round&&result.debateRound===snapshot.debateRound)return;
+      if(result.rubric)this.applyRubric(sessionId,result.rubric);
+      if(result.phase==='debating')for(const criterionId of result.contested??[])this.store.createDebate(sessionId,criterionId,session.debateRound);
+      if(result.phase==='rescoring')this.store.closeDebates(sessionId,session.debateRound);
+      const finalized=result.phase==='finalized';
+      const updated=this.store.updateSession(sessionId,{phase:result.phase,round:result.round,debateRound:result.debateRound,
+        status:finalized?'finished':session.status,stalled:undefined,
+        outcome:finalized?{...finalizeScores(this.scoringSnapshot(sessionId)),lockedBy:'panel'}:session.outcome});
+      this.record(sessionId,'phase_changed',{from:session.phase,to:result.phase,round:result.round,debateRound:result.debateRound,reason:result.reason,
+        ...(forced&&guard===0?{forced:true,forceReason:reason,skipped:result.skipped??[]}:{}),...(result.contested?{contested:result.contested}:{})});
+      if(result.rubric)this.record(sessionId,'rubric_locked',{lockedBy:result.rubric.lockedBy,reason:result.rubric.reason,criteria:result.rubric.criteria});
+      if(finalized){this.record(sessionId,'session_finished',{outcome:updated.outcome??{}});return}
+      if(result.phase==='awaiting_human')this.raiseScoringEscalation(updated,result.contested??[]);
+      this.dispatchScoring(sessionId);
+    }
+  }
+  private applyRubric(sessionId:string,rubric:{criteria:{criterionId:string,weight:number}[],rejected:string[]}){
+    for(const entry of rubric.criteria)this.store.updateCriterion(entry.criterionId,{state:'approved',weight:entry.weight});
+    for(const criterionId of rubric.rejected)this.store.updateCriterion(criterionId,{state:'rejected'});
+  }
+  private raiseScoringEscalation(session:CollabSession,contested:string[]){
+    if(this.store.findPendingEscalation(session.sessionId,'score_dispute'))return;
+    const names=contested.map(criterionId=>this.store.getCriterion(criterionId).name);
+    const escalation=this.store.createEscalation({sessionId:session.sessionId,kind:'score_dispute',raisedBy:'system',
+      summary:`After ${session.policy.scoring.maxDebateRounds} debate round(s) the panel still disagrees on: ${names.join(', ')}.`,
+      positions:this.store.listScores(session.sessionId).filter(score=>contested.includes(score.criterionId)&&score.round===session.debateRound)
+        .map(score=>({participantId:score.participantId,stance:String(score.score),rationale:score.rationale})),
+      question:'What is the final score for each contested criterion?',options:['take the median','accept the lower score','accept the higher score','set a specific score'],urgency:'normal'});
+    this.record(session.sessionId,'escalation_raised',{escalationId:escalation.escalationId,kind:'score_dispute',contested});
+  }
+  private dispatchScoring(sessionId:string){
+    const session=this.store.getSession(sessionId),snapshot=this.scoringSnapshot(sessionId);
+    const task=({nominating:'nominate_criteria',voting:'vote_on_criteria',scoring:'score_rubric',debating:'debate_contested_scores',rescoring:'rescore_contested'} as Record<string,string>)[session.phase];
+    if(!task)return;
+    for(const participantId of scoringWaitingOn(snapshot).length?scoringWaitingOn(snapshot):scoringPanel(snapshot).map(entry=>entry.participantId)){
+      this.store.pushInbox(sessionId,participantId,task,{phase:session.phase,round:session.round,debateRound:session.debateRound});
+      this.record(sessionId,'task_assigned',{participantId,task,phase:session.phase,round:session.round});
+    }
+  }
+  scoringDigest(participant:Participant){
+    const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId);
+    const base={sessionId:session.sessionId,kind:session.kind,title:session.title,phase:session.phase,round:session.round,debateRound:session.debateRound,
+      subject:session.subject,you:{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,tokensUsed:participant.tokensUsed,tokenBudget:participant.tokenBudget,state:participant.state},
+      progress:scoringProgress(snapshot),stalled:session.stalled};
+    if(session.phase==='nominating')return {...base,task:'nominate_criteria',yourNominations:this.criteria(session.sessionId,participant),
+      instructions:`Propose scoring criteria with a definition and anchors, then set nominationsComplete=true. You cannot see other panelists' proposals until everyone has finished.`};
+    if(session.phase==='voting')return {...base,task:'vote_on_criteria',candidates:this.store.listCriteria(session.sessionId).filter(criterion=>criterion.state==='candidate'),tallies:votesSealed(snapshot)?undefined:tallyVotes(snapshot),
+      instructions:'Vote approve, reject, or abstain on every candidate and suggest a weight. Rejecting requires a rationale.'};
+    if(session.phase==='scoring'||session.phase==='rescoring')return {...base,task:session.phase==='scoring'?'score_rubric':'rescore_contested',
+      rubric:approvedCriteria(snapshot),analysis:scoresSealed(snapshot)?undefined:analyse(snapshot),
+      instructions:`Score every criterion in the locked rubric on a ${session.policy.scoring.scale.min}-${session.policy.scoring.scale.max} scale. Every score needs a rationale and at least one evidence entry with a file path.${session.phase==='rescoring'?' A rescore must include changeReason, even if the score stays the same.':''}`};
+    if(session.phase==='debating')return {...base,task:'debate_contested_scores',debates:this.store.listDebates(session.sessionId).filter(debate=>debate.status==='open'),analysis:analyse(snapshot),
+      instructions:'Argue your position on each contested criterion with evidence. Use stance "hold" if you stand by your score.'};
+    return {...base,task:'wait',instructions:session.phase==='awaiting_human'?'A human is ruling on the contested criteria.':'Nothing is required from you right now.'};
+  }
 
   // ---------------------------------------------------------------- internals
   snapshot(sessionId:string):ReviewSnapshot{

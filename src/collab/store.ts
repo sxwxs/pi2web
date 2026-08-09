@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import {randomUUID,createHash} from 'node:crypto';
-import {COLLAB_ERRORS,DEFAULT_POLICY,type Baseline,type CollabEvent,type CollabPolicy,type CollabSession,type CollabSubject,type Escalation,type EscalationKind,type EscalationStatus,type InboxItem,type Issue,type IssueMessage,type IssueMessageKind,type IssueStatus,type Participant,type Role,type Urgency} from './types.js';
+import {COLLAB_ERRORS,DEFAULT_POLICY,type Baseline,type Criterion,type CriterionState,type Debate,type DebateStance,type Score,type Vote,type VoteStance,type CollabEvent,type CollabPolicy,type CollabSession,type CollabSubject,type Escalation,type EscalationKind,type EscalationStatus,type InboxItem,type Issue,type IssueMessage,type IssueMessageKind,type IssueStatus,type Participant,type Role,type Urgency} from './types.js';
 
 const now=()=>Date.now();
 const iso=(value:number)=>new Date(value).toISOString();
@@ -123,6 +123,9 @@ export class CollabStore {
       CREATE INDEX IF NOT EXISTS collab_inbox_pending ON collab_inbox(participant_id, acked_at, created_at);
       CREATE INDEX IF NOT EXISTS collab_scores_criterion ON collab_scores(session_id, criterion_id, round);
     `);
+    // Additive migration: scoring sessions need a debate counter independent of the voting round.
+    const columns=this.db.prepare('PRAGMA table_info(collab_sessions)').all() as {name:string}[];
+    if(!columns.some(column=>column.name==='debate_round'))this.db.exec('ALTER TABLE collab_sessions ADD COLUMN debate_round INTEGER NOT NULL DEFAULT 0');
     if(Number(this.db.pragma('user_version',{simple:true}))<2)this.db.pragma('user_version = 2');
   }
 
@@ -151,10 +154,10 @@ export class CollabStore {
     const sql=`SELECT * FROM collab_sessions ${where.length?`WHERE ${where.join(' AND ')}`:''} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`;
     return (this.db.prepare(sql).all(...params,limit,offset) as any[]).map(sessionFrom);
   }
-  updateSession(sessionId:string,patch:Partial<Pick<CollabSession,'phase'|'round'|'status'|'stalled'|'outcome'|'policy'|'title'>>):CollabSession{
+  updateSession(sessionId:string,patch:Partial<Pick<CollabSession,'phase'|'round'|'debateRound'|'status'|'stalled'|'outcome'|'policy'|'title'>>):CollabSession{
     const current=this.getSession(sessionId);
-    this.db.prepare('UPDATE collab_sessions SET phase=?,round=?,status=?,stalled_json=?,outcome_json=?,policy_json=?,title=?,updated_at=? WHERE id=?').run(
-      patch.phase??current.phase,patch.round??current.round,patch.status??current.status,
+    this.db.prepare('UPDATE collab_sessions SET phase=?,round=?,debate_round=?,status=?,stalled_json=?,outcome_json=?,policy_json=?,title=?,updated_at=? WHERE id=?').run(
+      patch.phase??current.phase,patch.round??current.round,patch.debateRound??current.debateRound,patch.status??current.status,
       'stalled' in patch?(patch.stalled?JSON.stringify(patch.stalled):null):(current.stalled?JSON.stringify(current.stalled):null),
       'outcome' in patch?(patch.outcome?JSON.stringify(patch.outcome):null):(current.outcome?JSON.stringify(current.outcome):null),
       JSON.stringify(patch.policy??current.policy),patch.title??current.title,now(),sessionId);
@@ -307,6 +310,69 @@ export class CollabStore {
   markDelivered(itemIds:string[]){if(!itemIds.length)return;const timestamp=now(),update=this.db.prepare('UPDATE collab_inbox SET delivered_at=COALESCE(delivered_at,?) WHERE id=?');this.db.transaction(()=>{for(const id of itemIds)update.run(timestamp,id)})()}
   ackInbox(participantId:string,itemIds:string[]){if(!itemIds.length)return;const timestamp=now(),update=this.db.prepare('UPDATE collab_inbox SET acked_at=? WHERE id=? AND participant_id=?');this.db.transaction(()=>{for(const id of itemIds)update.run(timestamp,id,participantId)})()}
 
+  // ---- scoring: criteria, votes, scores, debates ----
+  createCriterion(input:{sessionId:string,name:string,definition:string,anchors?:Record<string,string>,weight?:number,source?:Record<string,unknown>,round:number,state?:CriterionState}):Criterion{
+    const criterionId=`cr-${randomUUID()}`;
+    this.db.prepare('INSERT INTO collab_criteria(id,session_id,state,name,definition,anchors_json,weight,source_json,round,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      .run(criterionId,input.sessionId,input.state??'candidate',input.name,input.definition,input.anchors?JSON.stringify(input.anchors):null,input.weight??null,input.source?JSON.stringify(input.source):null,input.round,now());
+    return this.getCriterion(criterionId);
+  }
+  getCriterion(criterionId:string):Criterion{
+    const row=this.db.prepare('SELECT * FROM collab_criteria WHERE id=?').get(criterionId) as any;
+    if(!row)throw notFound('COLLAB_CRITERION_NOT_FOUND','Criterion not found');
+    return criterionFrom(row);
+  }
+  findCriterionInSession(sessionId:string,criterionId:string):Criterion|undefined{
+    const row=this.db.prepare('SELECT * FROM collab_criteria WHERE id=? AND session_id=?').get(criterionId,sessionId) as any;
+    return row?criterionFrom(row):undefined;
+  }
+  listCriteria(sessionId:string):Criterion[]{return (this.db.prepare('SELECT * FROM collab_criteria WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[]).map(criterionFrom)}
+  updateCriterion(criterionId:string,patch:{state?:CriterionState,weight?:number,definition?:string,name?:string}){
+    const current=this.getCriterion(criterionId);
+    this.db.prepare('UPDATE collab_criteria SET state=?,weight=?,definition=?,name=? WHERE id=?')
+      .run(patch.state??current.state,patch.weight??current.weight??null,patch.definition??current.definition,patch.name??current.name,criterionId);
+    return this.getCriterion(criterionId);
+  }
+  saveVote(input:{sessionId:string,criterionId:string,participantId:string,round:number,stance:VoteStance,weight?:number,amendment?:string,rationale?:string}):Vote{
+    this.db.prepare(`INSERT INTO collab_votes(id,session_id,criterion_id,participant_id,round,stance,weight,amendment,rationale,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(criterion_id,participant_id,round) DO UPDATE SET stance=excluded.stance,weight=excluded.weight,amendment=excluded.amendment,rationale=excluded.rationale,created_at=excluded.created_at`)
+      .run(`v-${randomUUID()}`,input.sessionId,input.criterionId,input.participantId,input.round,input.stance,input.weight??null,input.amendment??null,input.rationale??null,now());
+    return this.listVotes(input.sessionId).find(vote=>vote.criterionId===input.criterionId&&vote.participantId===input.participantId&&vote.round===input.round)!;
+  }
+  listVotes(sessionId:string):Vote[]{
+    return (this.db.prepare('SELECT * FROM collab_votes WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[])
+      .map(row=>({voteId:row.id,sessionId:row.session_id,criterionId:row.criterion_id,participantId:row.participant_id,round:row.round,stance:row.stance,weight:row.weight??undefined,amendment:row.amendment??undefined,rationale:row.rationale??undefined,createdAt:iso(row.created_at)}));
+  }
+  saveScore(input:{sessionId:string,criterionId:string,participantId:string,round:number,score:number,rationale:string,evidence:unknown[],confidence?:number,changeReason?:string}):Score{
+    this.db.prepare(`INSERT INTO collab_scores(id,session_id,criterion_id,participant_id,round,score,rationale,evidence_json,confidence,change_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(criterion_id,participant_id,round) DO UPDATE SET score=excluded.score,rationale=excluded.rationale,evidence_json=excluded.evidence_json,confidence=excluded.confidence,change_reason=excluded.change_reason,created_at=excluded.created_at`)
+      .run(`s-${randomUUID()}`,input.sessionId,input.criterionId,input.participantId,input.round,input.score,input.rationale,JSON.stringify(input.evidence),input.confidence??null,input.changeReason??null,now());
+    return this.listScores(input.sessionId).find(score=>score.criterionId===input.criterionId&&score.participantId===input.participantId&&score.round===input.round)!;
+  }
+  listScores(sessionId:string):Score[]{
+    return (this.db.prepare('SELECT * FROM collab_scores WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[])
+      .map(row=>({scoreId:row.id,sessionId:row.session_id,criterionId:row.criterion_id,participantId:row.participant_id,round:row.round,score:row.score,rationale:row.rationale,evidence:json(row.evidence_json,[] as unknown[]),confidence:row.confidence??undefined,changeReason:row.change_reason??undefined,createdAt:iso(row.created_at)}));
+  }
+  createDebate(sessionId:string,criterionId:string,round:number):Debate{
+    const debateId=`d-${randomUUID()}`;
+    this.db.prepare(`INSERT INTO collab_debates(id,session_id,criterion_id,round,status,created_at) VALUES(?,?,?,?,'open',?)`).run(debateId,sessionId,criterionId,round,now());
+    return this.listDebates(sessionId).find(debate=>debate.debateId===debateId)!;
+  }
+  listDebates(sessionId:string):Debate[]{
+    const rows=this.db.prepare('SELECT * FROM collab_debates WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[];
+    return rows.map(row=>({debateId:row.id,sessionId:row.session_id,criterionId:row.criterion_id,round:row.round,status:row.status,createdAt:iso(row.created_at),
+      arguments:(this.db.prepare('SELECT * FROM collab_debate_arguments WHERE debate_id=? ORDER BY created_at, rowid').all(row.id) as any[])
+        .map(entry=>({argumentId:entry.id,debateId:entry.debate_id,participantId:entry.participant_id,stance:entry.stance,argument:entry.argument,evidence:json(entry.evidence_json,[] as unknown[]),respondingTo:entry.responding_to??undefined,createdAt:iso(entry.created_at)}))}));
+  }
+  findDebateInSession(sessionId:string,debateId:string){return this.listDebates(sessionId).find(debate=>debate.debateId===debateId)}
+  addDebateArgument(debateId:string,input:{participantId:string,stance:DebateStance,argument:string,evidence?:unknown[],respondingTo?:string}){
+    const argumentId=`arg-${randomUUID()}`;
+    this.db.prepare('INSERT INTO collab_debate_arguments(id,debate_id,participant_id,stance,argument,evidence_json,responding_to,created_at) VALUES(?,?,?,?,?,?,?,?)')
+      .run(argumentId,debateId,input.participantId,input.stance,input.argument,JSON.stringify(input.evidence??[]),input.respondingTo??null,now());
+    return argumentId;
+  }
+  closeDebates(sessionId:string,round:number){this.db.prepare(`UPDATE collab_debates SET status='closed' WHERE session_id=? AND round=?`).run(sessionId,round)}
+
   // ---- phase completions ("I am done for this phase and round") ----
   markPhaseComplete(sessionId:string,round:number,phase:string,participantId:string){
     this.db.prepare('INSERT OR IGNORE INTO collab_phase_completions(session_id,round,phase,participant_id,created_at) VALUES(?,?,?,?,?)').run(sessionId,round,phase,participantId,now());
@@ -329,7 +395,7 @@ export function mergePolicy(patch?:Partial<CollabPolicy>):CollabPolicy{
 
 const sessionFrom=(row:any):CollabSession=>({
   sessionId:row.id,kind:row.kind,title:row.title,workspaceId:row.workspace_id,cwd:row.cwd,
-  subject:json(row.subject_json,{type:'free',value:''} as CollabSubject),phase:row.phase,round:row.round,
+  subject:json(row.subject_json,{type:'free',value:''} as CollabSubject),phase:row.phase,round:row.round,debateRound:row.debate_round??0,
   policy:mergePolicy(json(row.policy_json,{} as Partial<CollabPolicy>)),status:row.status,
   stalled:json(row.stalled_json,undefined as CollabSession['stalled']),outcome:json(row.outcome_json,undefined as Record<string,unknown>|undefined),
   createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)
@@ -348,6 +414,9 @@ const issueFrom=(row:any):Issue=>({
   baselineId:row.baseline_id,status:row.status,round:row.round,version:row.version,mergedInto:row.merged_into??undefined,
   createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)
 });
+const criterionFrom=(row:any):Criterion=>({criterionId:row.id,sessionId:row.session_id,state:row.state,name:row.name,definition:row.definition,
+  anchors:json(row.anchors_json,undefined as Record<string,string>|undefined),weight:row.weight??undefined,source:json(row.source_json,undefined as Record<string,unknown>|undefined),
+  round:row.round,createdAt:iso(row.created_at)});
 const escalationFrom=(row:any):Escalation=>({
   escalationId:row.id,sessionId:row.session_id,kind:row.kind,refId:row.ref_id??undefined,raisedBy:row.raised_by,summary:row.summary,
   positions:json(row.positions_json,[] as Escalation['positions']),question:row.question,options:json(row.options_json,[] as string[]),
