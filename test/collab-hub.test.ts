@@ -18,7 +18,7 @@ describe('collab hub',()=>{
 
   beforeEach(async()=>{
     dir=await temp();metadata=new MetadataStore(dir);metadata.init();
-    store=new CollabStore(metadata.connection);
+    store=new CollabStore(()=>metadata.connection);
     commit='commit-1';clock=Date.now();events=[];
     hub=new CollabHub(store,{resolveBaseline:baseline,now:()=>clock});
     hub.init();hub.subscribe(event=>events.push(event));

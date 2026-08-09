@@ -19,7 +19,9 @@ export type CreateEscalationInput={sessionId:string,kind:EscalationKind,refId?:s
  * backup covers agents, sessions, and collaboration state. All tables are additive; existing tables are untouched.
  */
 export class CollabStore {
-  constructor(private readonly db:Database.Database){}
+  /** Takes an accessor, not a handle: the shared database is only opened when the server starts. */
+  constructor(private readonly connection:()=>Database.Database){}
+  private get db(){return this.connection()}
 
   init(){
     this.db.exec(`
@@ -177,7 +179,7 @@ export class CollabStore {
     const row=this.db.prepare('SELECT * FROM collab_participants WHERE token_hash=?').get(hashToken(token)) as any;
     return row?participantFrom(row):undefined;
   }
-  listParticipants(sessionId:string):Participant[]{return (this.db.prepare('SELECT * FROM collab_participants WHERE session_id=? ORDER BY created_at, id').all(sessionId) as any[]).map(participantFrom)}
+  listParticipants(sessionId:string):Participant[]{return (this.db.prepare('SELECT * FROM collab_participants WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[]).map(participantFrom)}
   updateParticipant(participantId:string,patch:Partial<Pick<Participant,'state'|'tokensUsed'|'tokenBudget'|'tokensEstimated'|'lastSeenAt'|'model'>>):Participant{
     const current=this.getParticipant(participantId);
     this.db.prepare('UPDATE collab_participants SET state=?,tokens_used=?,token_budget=?,tokens_estimated=?,last_seen_at=?,model=? WHERE id=?').run(
@@ -242,7 +244,7 @@ export class CollabStore {
     if(filter.reporterId){where.push('reporter_id=?');params.push(filter.reporterId)}
     if(filter.targetParticipantId){where.push('target_participant_id=?');params.push(filter.targetParticipantId)}
     if(filter.round!==undefined){where.push('round=?');params.push(filter.round)}
-    return (this.db.prepare(`SELECT * FROM collab_issues WHERE ${where.join(' AND ')} ORDER BY created_at, id`).all(...params) as any[]).map(issueFrom);
+    return (this.db.prepare(`SELECT * FROM collab_issues WHERE ${where.join(' AND ')} ORDER BY created_at, rowid`).all(...params) as any[]).map(issueFrom);
   }
   /** Optimistic locking: a stale `expectedVersion` means someone else already moved the issue. */
   updateIssue(issueId:string,patch:Partial<Pick<Issue,'status'|'round'|'mergedInto'|'severity'|'requiredAction'>>,expectedVersion?:number):Issue{
@@ -259,7 +261,7 @@ export class CollabStore {
     return {messageId,issueId,round,authorId,kind,payload,createdAt:iso(timestamp)};
   }
   listIssueMessages(issueId:string):IssueMessage[]{
-    return (this.db.prepare('SELECT * FROM collab_issue_messages WHERE issue_id=? ORDER BY created_at, id').all(issueId) as any[])
+    return (this.db.prepare('SELECT * FROM collab_issue_messages WHERE issue_id=? ORDER BY created_at, rowid').all(issueId) as any[])
       .map(row=>({messageId:row.id,issueId:row.issue_id,round:row.round,authorId:row.author_id,kind:row.kind as IssueMessageKind,payload:json(row.payload_json,{}),createdAt:iso(row.created_at)}));
   }
 
@@ -299,7 +301,7 @@ export class CollabStore {
     return {itemId,sessionId,participantId,type,payload,createdAt:iso(timestamp)};
   }
   listInbox(participantId:string,includeAcked=false,limit=50):InboxItem[]{
-    const rows=this.db.prepare(`SELECT * FROM collab_inbox WHERE participant_id=?${includeAcked?'':' AND acked_at IS NULL'} ORDER BY created_at, id LIMIT ?`).all(participantId,Math.min(200,Math.max(1,limit))) as any[];
+    const rows=this.db.prepare(`SELECT * FROM collab_inbox WHERE participant_id=?${includeAcked?'':' AND acked_at IS NULL'} ORDER BY created_at, rowid LIMIT ?`).all(participantId,Math.min(200,Math.max(1,limit))) as any[];
     return rows.map(row=>({itemId:row.id,sessionId:row.session_id,participantId:row.participant_id,type:row.type,payload:json(row.payload_json,{}),createdAt:iso(row.created_at),deliveredAt:row.delivered_at?iso(row.delivered_at):undefined,ackedAt:row.acked_at?iso(row.acked_at):undefined}));
   }
   markDelivered(itemIds:string[]){if(!itemIds.length)return;const timestamp=now(),update=this.db.prepare('UPDATE collab_inbox SET delivered_at=COALESCE(delivered_at,?) WHERE id=?');this.db.transaction(()=>{for(const id of itemIds)update.run(timestamp,id)})()}
