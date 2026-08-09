@@ -65,10 +65,11 @@ export type CollabPolicy={
   tokenBudgetPerParticipant:number;
   scoring:ScoringPolicy;
 };
+/** approvalThreshold is "two thirds" with a little headroom, so an exact 2-of-3 vote passes. */
 export const DEFAULT_POLICY:CollabPolicy={
   maxIssueRounds:3,maxTotalRounds:6,overdueWarningSec:1800,autoEscalateOnDeadlock:true,blindFindings:true,
   tokenBudgetPerParticipant:600_000,
-  scoring:{minCriteria:4,maxCriteria:8,approvalThreshold:0.67,maxVotingRounds:3,scale:{min:0,max:10,step:0.5},convergenceRange:2,maxDebateRounds:2,blindScoring:true}
+  scoring:{minCriteria:4,maxCriteria:8,approvalThreshold:0.66,maxVotingRounds:3,scale:{min:0,max:10,step:0.5},convergenceRange:2,maxDebateRounds:2,blindScoring:true}
 };
 
 export type CollabSubject={type:'diff'|'paths'|'commit_range'|'free';value:string;notes?:string};
