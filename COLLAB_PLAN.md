@@ -1,6 +1,8 @@
-# pi2web 多 Agent 协作中枢（Collaboration Hub）方案 v0.2
+# pi2web 多 Agent 协作中枢（Collaboration Hub）方案 v0.3
 
-> 状态：**待讨论**。本文先给出整体架构、协议、状态机、数据模型和分期计划；确认后再进入实现。
+> 状态：**已定稿，进入实现**。决策记录见 §10。
+>
+> v0.3 相对 v0.2 的变更（全部来自决策）：超时改为**阻塞不推进**、评审改为**对称**（允许反向评审）、evidence **强制且不可关**、session/participant **仅人可创建**、新增**每参与者 600K token 预算**、邮件**永远只是通知**。
 >
 > v0.2 相对 v0.1 的补充：代码基线锚定与再验证（§3.5）、盲评/防锚定（§4.3）、评分场景的资格与利益回避（§4.4）、测试策略（§12）、决策清单给出推荐默认值（§10）。
 
@@ -10,7 +12,7 @@ pi2web 现在是"人 ↔ 单个 Agent"的远程网关。本方案在其上叠加
 
 - 中枢是**唯一事实来源**：所有跨 Agent 的交互都必须经由结构化 API，Agent 之间不直接对话。
 - Agent 之间只交换**结构化数据（JSON）**，不是自由文本聊天；自由文本只作为结构化字段里的 `rationale` / `body`。
-- 中枢负责：身份与权限、汇总与分发、状态机推进、去重、超时、收敛判定、**人工升级（escalation）**。
+- 中枢负责：身份与权限、汇总与分发、状态机推进、去重、僵局告警、收敛判定、**人工升级（escalation）**。
 - 两个首发场景：
   - **场景一 Review Loop**：1 个实现 Agent × N 个评审 Agent，issue 提出 → 汇总 → 回应 → 裁定 → 关闭 / 升级人工。
   - **场景二 Panel Scoring**：N 个评审 Agent 协商评分维度（提名 → 归并 → 投票 → 锁定 rubric）→ 独立打分 → 辩论收敛 → 出分 / 升级人工。
@@ -47,7 +49,7 @@ pi2web 现在是"人 ↔ 单个 Agent"的远程网关。本方案在其上叠加
 | `src/collab/store.ts` | SQLite 读写（复用 `MetadataStore` 的 db 句柄） |
 | `src/collab/review-flow.ts` | 场景一状态机（纯函数，可单测） |
 | `src/collab/scoring-flow.ts` | 场景二状态机（纯函数，可单测） |
-| `src/collab/hub.ts` | 编排：鉴权、事务、事件广播、分发、超时 |
+| `src/collab/hub.ts` | 编排：鉴权、事务、事件广播、分发、僵局告警与 token 计量 |
 | `src/collab/dispatcher.ts` | 唤醒托管 Agent / 维护外部 Agent 的 inbox |
 | `src/collab/routes.ts` | HTTP 路由表（从 `server.ts` 拆出，避免 `handle()` 继续膨胀） |
 | `web/collab.js` + UI | 协作看板 |
@@ -86,12 +88,29 @@ pi2web 现在是"人 ↔ 单个 Agent"的远程网关。本方案在其上叠加
   "sessionId": "collab-...",
   "role": "implementer" | "reviewer" | "moderator" | "human",
   "displayName": "reviewer-security",
-  "binding": { "type": "managed", "agentId": "agent-..." }   // 或 {"type":"external"}
-  "token": "<仅在 join 时返回一次，DB 存 sha256>",
-  "state": "active" | "left" | "timed_out",
+  "model": "anthropic/claude-sonnet-4",                      // 如实登记，用于模型多样性提示
+  "binding": { "type": "managed", "agentId": "agent-..." },  // 或 {"type":"external"}
+  "token": "<仅在人工登记时返回一次，DB 存 sha256>",
+  "state": "active" | "left" | "budget_exhausted",
+  "tokenBudget": 600000,
+  "tokensUsed": 0,
   "lastSeenAt": "..."
 }
 ```
+
+**参与者只能由人登记**（`POST /sessions/{id}/participants`，需 pairing code）。没有 Agent 自助 join，Agent 拿到的只是人交给它的 `participantToken`。
+
+**权限按 capability 判定，而不是角色硬编码**——这是支持对称评审的基础：
+
+| capability | implementer | reviewer | moderator |
+|---|---|---|---|
+| `file_finding`（提 issue） | ✅ | ✅ | ✅ |
+| `respond`（回应指向自己的 issue） | ✅ | ✅ | ✅ |
+| `verdict`（裁定自己提的 issue） | ✅ | ✅ | ✅ |
+| `nominate` / `vote` / `score` | ❌（利益回避，§4.4） | ✅ | ❌ |
+| `debate` | 仅 `stance:"clarify"` | ✅ | ❌ |
+| `merge` / `advance` | ❌ | ❌ | ❌（`advance` 仅人） |
+| `escalate` | ✅ | ✅ | ✅ |
 
 - **managed**：该参与者绑定 pi2web 自己托管的 Agent。中枢有新任务时**直接 `AgentManager.command(agentId,'follow-up'|'prompt', <结构化任务包>)` 主动唤醒**，无需 Agent 轮询。
 - **external**：外部 Agent（Claude Code / Codex / CI 机器人）。通过 `GET /inbox?wait=30`（长轮询，最长 60s）拉取任务。
@@ -109,20 +128,39 @@ pi2web 现在是"人 ↔ 单个 Agent"的远程网关。本方案在其上叠加
 ```jsonc
 {
   "maxIssueRounds": 3,              // 同一 issue 往返超过 3 轮 → 自动 escalate
-  "reviewerSubmitTimeoutSec": 1800, // 评审超时 → 视作弃权，不阻塞流程
-  "implementerReplyTimeoutSec": 3600,
+  "maxTotalRounds": 6,              // 会话总轮次上限，到顶强制出报告
+  "overdueWarningSec": 1800,        // 仅告警，不推进（见下）
   "autoEscalateOnDeadlock": true,
   "severityGate": "major",          // 低于该严重度不阻塞 session 结束
+  "tokenBudgetPerParticipant": 600000,
   "scoring": {
     "minCriteria": 4, "maxCriteria": 8,
     "approvalThreshold": 0.67,      // 类目通过所需赞成比例
     "maxVotingRounds": 3,
     "scale": { "min": 0, "max": 10, "step": 0.5 },
     "convergenceRange": 2.0,        // 同一类目极差 ≤ 2 视为收敛
-    "maxDebateRounds": 2
+    "maxDebateRounds": 2,
+    "blindScoring": true
   }
 }
 ```
+
+### 2.5 超时语义：**超时绝不自动推进**（决策 3）
+
+阶段必须等齐所有应交付的参与者。`overdueWarningSec` 只做三件事，绝不改变流程：
+
+1. 会话打上 `stalled: { since, waitingOn: [participantId…] }` 标记；
+2. 写 `participant_overdue` 事件（WS 推给 Web UI，看板高亮）；
+3. 触发邮件**通知**（邮件永远只是通知，不含任何操作链接或 token）。
+
+打破僵局只有两条路：迟到方补交，或**人**调 `POST /sessions/{id}/advance` 显式强推——强推者、被跳过者、理由全部记入事件日志与最终报告。中枢自身没有任何"视作弃权"的自动逻辑。
+
+### 2.6 Token 预算：每参与者默认 600K（决策 7）
+
+- **managed**：登记时记录该 agent 的 `stats.tokens.total` 作为基线，每次提交后取增量累加（复用 `AgentManager.sessionInfo()`）。
+- **external**：提交体可带 `usage:{inputTokens,outputTokens}` 自报；未自报则按请求体字节数 `bytes/4` 粗估，并在报告中标注 `estimated:true`。
+- 超限：参与者置 `budget_exhausted`，**已提交内容全部保留**，后续写接口返回 `429 TOKEN_BUDGET_EXHAUSTED`，读接口（digest/events）仍可用，便于人工接管后恢复。
+- 因为超时不推进，超限必然导致 `stalled` → 中枢自动开一个 `budget_exhausted` escalation 交人处理（加预算 / 换 Agent / 强推）。
 
 ---
 
@@ -131,13 +169,15 @@ pi2web 现在是"人 ↔ 单个 Agent"的远程网关。本方案在其上叠加
 ### 3.1 Session 阶段机
 
 ```
-draft ──open_round──▶ collecting        (评审 Agent 提交 findings)
-collecting ──全部提交/超时──▶ consolidating (中枢去重、排序、编号)
-consolidating ──自动──▶ responding       (实现 Agent 收到汇总包，逐条回应)
-responding ──全部回应/超时──▶ adjudicating (回应分发回各自提出者，评审裁定)
+draft ──open_round──▶ collecting        (参与者提交 findings)
+collecting ──全员提交 | 人工 advance──▶ consolidating (中枢去重、排序、编号)
+consolidating ──自动──▶ responding       (被指向方收到汇总包，逐条回应)
+responding ──全部回应 | 人工 advance──▶ adjudicating (回应分发回各自提出者，提出者裁定)
 adjudicating ──▶ 若仍有 open issue 且 round < max ──▶ collecting (round+1，只针对未关闭 issue)
              ──▶ 全部 resolved/closed ──▶ finished
              ──▶ 有 escalated 且人工未裁决 ──▶ awaiting_human ──▶ (裁决后回到 adjudicating)
+
+任何阶段超过 overdueWarningSec 仍有人未交 ──▶ 叠加 stalled 标记（**不改变阶段**，见 §2.5）
 ```
 
 ### 3.2 Issue 状态机
@@ -148,7 +188,7 @@ adjudicating ──▶ 若仍有 open issue 且 round < max ──▶ collecting
 open ──implementer 回应──▶ answered ──reviewer verdict──┬─ accept ─▶ resolved
                                                         ├─ reject ─▶ open (round+1)
                                                         └─ escalate ▶ escalated
-open/answered ── 任一方 escalate / round>max / 超时 ──▶ escalated
+open/answered ── 任一方 escalate / round>max / 参与者 budget_exhausted ──▶ escalated
 escalated ── 人工裁决 ──▶ resolved | wontfix | closed(无效)
 ```
 
@@ -164,7 +204,13 @@ escalated ── 人工裁决 ──▶ resolved | wontfix | closed(无效)
 
 `reviewer` 的裁定（`verdict`）：`accept` / `reject`（附 `rationale`）/ `needs_info` / `escalate`（附 `rationale`）。
 
-> 关键约束：**只有 issue 的提出者（或人工）才能把它关掉**，实现 Agent 无权 close。这直接对应你的要求。
+> 关键约束：**只有 issue 的提出者（或人工）才能把它关掉**，被指向方无权 close。
+>
+> **对称评审（决策 4）**：任何参与者都能提 issue，issue 用 `targetParticipantId` 指定回应方（缺省是 implementer）。所以实现 Agent 可以反向对某条评审意见/某个评审者提 issue（例如"该 finding 引用的行号不存在"），走的是**完全相同**的状态机——谁被指向谁回应，谁提出谁裁定。
+>
+> 轮次爆炸由三重兜底控制：`maxIssueRounds`（单 issue）、`maxTotalRounds`（会话）、`tokenBudgetPerParticipant`（成本）。
+>
+> `location.path` **必填**（决策 5）：缺失返回 `422 EVIDENCE_REQUIRED`。确实无法定位到文件的意见（如架构性建议）必须用 `location.path` 指向最相关的文件并把范围说明写进 `evidence`。
 
 ### 3.3 结构化契约（节选）
 
@@ -185,7 +231,9 @@ POST /api/v1/collab/sessions/{id}/findings
     "evidence": "……代码片段或调用链……",
     "impact": "伪造回调可导致订单被置为已支付",
     "suggestion": "使用商户密钥做 HMAC 校验并加时间窗",
-    "requiredAction": "must_fix|should_fix|discuss|fyi"
+    "requiredAction": "must_fix|should_fix|discuss|fyi",
+    "targetParticipantId": "p-2",       // 可选，缺省=session 的 implementer；反向评审时指向某个 reviewer
+    "baselineId": "b-1"                 // 必填，见 §3.5
   }],
   "reviewComplete": true                 // 本轮我提完了
 }
@@ -249,6 +297,8 @@ nominating ─▶ consolidating ─▶ voting ─┬─(未达标且 round<max)�
 analysis ─┬─(全部类目收敛)──────────────────────────────▶ finalized
           └─(有分歧类目)─▶ debating ─▶ rescoring ─▶ analysis (debateRound+1)
                                      └─(超轮次仍分歧)─▶ awaiting_human ─▶ finalized
+
+每个阶段的推进条件均为「全员提交」或「人工 advance」；超时只标 stalled，不推进（§2.5）
 ```
 
 ### 4.2 契约
@@ -322,19 +372,19 @@ LLM 极易被先看到的内容锚定。如果 A 先提名 6 个类目、先打�
 
 | 阶段 | 可见性规则 |
 |---|---|
-| 提名 criteria | **盲提名**：提交前 `GET /criteria` 只返回自己的提名；全部提交或超时后统一揭晓 |
+| 提名 criteria | **盲提名**：提交前 `GET /criteria` 只返回自己的提名；**全员提交**或**人工 advance** 后统一揭晓（不再有"超时揭晓"） |
 | 投票 | **盲投票**：本轮票不可见，本轮结束后公布分布（含谁投的，便于追责/复盘） |
 | 打分 | **盲打分**：`policy.scoring.blindScoring=true`（默认开）时，未全部提交前 `GET /analysis` 返回 `403 SCORES_SEALED` |
 | 辩论 | **公开**：辩论本来就要看到对方论据 |
 | 改分 | **公开**：改分必须给 `changeReason`，且记录"从 X 改到 Y"，防止无理由跟风 |
 
-实现上是一条 `visibility` 规则表 + 一个 `sealed` 标记，不是散落在各处的 if。揭晓由"全员提交"或"阶段超时"触发。
+实现上是一条 `visibility` 规则表 + 一个 `sealed` 标记，不是散落在各处的 if。**揭晓只由"全员提交"或"人工 advance"触发**（决策 3：超时不推进，因此也不揭晓）。
 
 ### 4.4 评审资格与利益回避（v0.2 新增）
 
 - 场景二里 `implementer` 角色**不得**提名、投票、打分，只能在辩论阶段以 `stance:"clarify"` 提供事实澄清（不带倾向）。中枢按角色强制，不靠提示词自觉。
 - 同一 `agentId` 不能在一个 session 里注册两个 reviewer participant（防止一个模型灌两票）。同一底层模型可以多份，但要在 `participant.model` 里如实登记，最终报告里会显示"模型多样性"提示——评审团全是同一个模型时，一致性高是没有意义的。
-- 打分必须带 `evidence[]`（至少一条含 `path`），无证据的分数 `422 EVIDENCE_REQUIRED`（可用 `policy.scoring.requireEvidence=false` 关掉）。
+- 打分必须带 `evidence[]`（至少一条含 `path`），无证据的分数一律 `422 EVIDENCE_REQUIRED`。**这是硬约束，没有 policy 开关可以关掉**（决策 5）——无证据的分数等同于幻觉，允许关掉就等于允许整套机制失效。
 
 ---
 
@@ -350,7 +400,7 @@ POST /api/v1/collab/escalations
 → 202 { "escalationId":"e-3", "status":"pending" }
 ```
 
-- 中枢把它放进**全局待裁决队列**：`GET /api/v1/collab/escalations?status=pending`，Web UI 顶栏红点 + 列表，可选复用 `MailNotifier` 发邮件（沿用现有聚合与开关设置）。
+- 中枢把它放进**全局待裁决队列**：`GET /api/v1/collab/escalations?status=pending`，Web UI 顶栏红点 + 列表；同时可复用 `MailNotifier` 发**通知**邮件（沿用现有聚合与开关设置）。**邮件永远只是通知**（决策 6）：不含一次性 token、不含任何可直接改变状态的链接，最多给一个需要正常登录的 Web UI 地址。裁决只能在已鉴权入口完成。
 - 人裁决：`POST /escalations/{id}/resolve { "decision":"...", "rationale":"...", "appliesTo":{...} }`。
 - **裁决是终局**：写回 issue/criterion/score 后该对象进入 `human_ruled`，任何 Agent 不得再改（API 返回 `HUMAN_RULING_FINAL`）。
 - Agent 侧等待人工时**不阻塞**：可以继续处理别的 issue；被裁决后中枢再唤醒相关方。
@@ -366,7 +416,7 @@ POST /api/v1/collab/escalations
 | **B. Pi 扩展工具注入** | pi2web 托管的 Pi Agent | 工具签名即 schema，模型不易出错；无需 token 管理 | 只对 Pi 生效，需改 `sdk-backend.ts` 注册工具 |
 | **C. MCP server** | 支持 MCP 的客户端 | 生态通用 | 额外传输层与依赖 |
 
-**建议顺序：A（必做，作为协议地基）→ B（Pi Agent 的最佳体验）→ C（以后按需）。**
+**已定（决策 1）：先做 A**，作为协议地基；B/C 后续按需叠加，且必须构建在同一套 HTTP 契约之上，不得另立协议。
 
 配套产物：
 - `POST /sessions/{id}/join` 返回 `participantToken` + **`briefing`**：一段可直接塞进 Agent 系统提示的说明（包含它的角色、当前阶段、要调用的 URL 与 JSON 模板、错误码含义）。
@@ -379,16 +429,16 @@ POST /api/v1/collab/escalations
 
 | Method | Path | 说明 | 谁能调 |
 |---|---|---|---|
-| POST | `/sessions` | 创建协作会话 | 人（pairing code） |
+| POST | `/sessions` | 创建协作会话 | **仅人**（pairing code） |
 | GET | `/sessions` `/sessions/{id}` | 列表 / 详情 | 人 + 参与者 |
-| POST | `/sessions/{id}/join` | 加入并领取 participantToken + briefing | 人代为登记 / 邀请码 |
-| POST | `/sessions/{id}/advance` | 手动推进阶段（超时兜底） | 人 / moderator |
+| POST | `/sessions/{id}/participants` | **仅人**登记参与者，返回 participantToken + briefing | 人（pairing code） |
+| POST | `/sessions/{id}/advance` | 僵局时**人工强推**（记入报告） | **仅人**（pairing code） |
 | GET | `/sessions/{id}/events?since=` | 事件回放 | 全体 |
 | GET | `/sessions/{id}/inbox?wait=` | 外部 Agent 长轮询任务 | 参与者本人 |
 | GET | `/sessions/{id}/digest?for=` | 角色定制的当前任务包 | 参与者本人 |
-| POST | `/sessions/{id}/findings` | 提交评审发现（批量、幂等） | reviewer |
-| POST | `/sessions/{id}/responses` | 实现方回应（批量、幂等） | implementer |
-| POST | `/sessions/{id}/verdicts` | 提出者裁定 | reviewer（仅自己的 issue） |
+| POST | `/sessions/{id}/findings` | 提交评审发现（批量、幂等） | 任何参与者（对称评审） |
+| POST | `/sessions/{id}/responses` | 被指向方回应（批量、幂等） | issue 的 `targetParticipantId` |
+| POST | `/sessions/{id}/verdicts` | 提出者裁定 | issue 的 `reporterId` |
 | GET | `/sessions/{id}/issues` | issue 看板 | 全体 |
 | POST | `/sessions/{id}/issues/{iid}/merge-into` | 合并重复 | moderator / 人 |
 | POST | `/sessions/{id}/criteria/nominations` | 提名评分类目 | reviewer |
@@ -448,7 +498,7 @@ collab_idempotency(key PK, session_id, participant_id, response_json, created_at
 |---|---|---|
 | **M0** | 本方案文档 + 分支 | ✅ 本文 |
 | **M1** | `types.ts` + `validate.ts` + `store.ts` + schema 迁移 | 单测：校验器错误路径、迁移幂等 |
-| **M2** | `review-flow.ts` 纯状态机 | 单测覆盖 issue/session 全部状态迁移与超时、越权关闭被拒 |
+| **M2** | `review-flow.ts` 纯状态机 | 单测覆盖 issue/session 全部状态迁移、僵局不推进、非提出者关闭被拒 |
 | **M3** | `hub.ts` + `routes.ts` + 鉴权 + 幂等 + WS 事件 | 端到端测试：2 reviewer + 1 implementer 走完一轮闭环 |
 | **M4** | escalation + 人工裁决 + Web UI 待裁决队列 + 邮件复用 | 测试：升级→裁决→终局不可改 |
 | **M5** | `scoring-flow.ts` 全阶段（提名/归并/投票/锁定/打分/辩论/收敛） | 单测：收敛判定、权重归一化、强制锁定兜底 |
@@ -458,28 +508,35 @@ collab_idempotency(key PK, session_id, participant_id, response_json, created_at
 
 ---
 
-## 10. 需要你拍板的问题（已给推荐默认值，认可就直接按推荐做）
+## 10. 决策记录（2026-08-08 已拍板）
 
-| # | 问题 | 选项 | **推荐** | 理由 |
-|---|---|---|---|---|
-| 1 | Agent 接入方式优先级 | A. HTTP+提示词 / B. Pi 扩展工具 / C. MCP | **先 A，M6 补 B** | A 是协议地基且跨厂商；B 只是让 Pi Agent 少犯格式错 |
-| 2 | 托管 Agent 唤醒方式 | `prompt` / `follow-up` | **`follow-up`** | 不打断在跑的任务，Pi 会排队执行 |
-| 3 | 谁能发起 session | 仅人 / 人+主控 Agent | **M1–M5 仅人，M6 再开 Agent 发起并限额** | 先堵住 Agent 自造循环 |
-| 4 | 实现 Agent 能否反向提 issue | 对称 / 非对称 | **非对称** | 对称会让轮次爆炸；实现方有异议走 `rejected` + escalate 已够 |
-| 5 | 评分是否强制 evidence | 强制 / 可选 | **强制（可 policy 关）** | 无证据打分基本等于幻觉 |
-| 6 | 阶段超时语义 | 视作弃权推进 / 卡住等人 | **弃权推进 + 报告标注 `timedOut`** | 一个 Agent 挂掉不该阻塞全局 |
-| 7 | 会话成本上限 | 要 / 不要 | **要：`maxTotalRounds`（默认 6）** | 到顶强制出报告，防烧钱 |
-| 8 | 邮件一键裁决链接 | 要 / 不要 | **不做**（只在邮件里给 Web UI 链接） | 一次性 token 进邮件是明显的攻击面，收益不值 |
-| 9 | 盲评（§4.3） | 开 / 关 | **默认开** | 否则多 Agent 评审退化成复读 |
-| 10 | 场景一是否也要盲评 findings | 开 / 关 | **默认开（reviewer 之间互相看不到，直到本轮截止）** | 同上；截止后可见以便去重 |
+| # | 决策 | 实现影响 |
+|---|---|---|
+| 1 | **先做 HTTP 通用协议**（方式 A），Pi 扩展/MCP 后续叠加 | 所有接入方式共用同一份契约，不得另立协议 |
+| 2 | **只有人能创建 session、登记参与者、强推阶段**（长期而非阶段性） | 取消 Agent 自助 `join`；`POST /participants` 与 `/advance` 只接受 pairing code |
+| 3 | **超时绝不自动推进**，只标 `stalled` + 事件 + 邮件通知 | 删除一切"视作弃权"逻辑；盲评揭晓也改为仅由全员提交/人工触发 |
+| 4 | **允许反向评审**（对称模型），权限按 capability 判定 | issue 新增 `targetParticipantId`；状态机复用，不写第二套流程 |
+| 5 | **证据强制且不可关**：`score.evidence[].path` 与 `finding.location.path` 均必填 | 去掉 `requireEvidence` 开关；缺证据一律 422 |
+| 6 | **邮件永远只是通知**，不含 token / 可改变状态的链接 | 复用现有 `MailNotifier`，只加一类通知事件 |
+| 7 | **每参与者 token 预算默认 600K**，超限锁写、保留读、自动升级人工 | 新增 `tokenBudget`/`tokensUsed` 与计量逻辑（§2.6） |
+| 8 | **盲评默认开**（两个场景都开） | 一张 `visibility` 规则表统一控制 |
+| 9 | **外部 Agent 是一等公民**（保留 inbox 长轮询） | 保留 `collab_inbox` 表与 participantToken 体系 |
 
-> 除此之外还有一个隐含决定：**外部 Agent（非 pi2web 托管）是否是一等公民**。方案里是（长轮询 inbox + 相同提交接口），代价是要维护 token 与 inbox 表。如果只服务 pi2web 自己托管的 Agent，M1–M5 可以砍掉 ~15% 工作量，但会失去"让 Claude Code / Codex 当评审员"的能力。**推荐保留**。
+### 实现中的默认解（没听到反对就这么做，随时可推翻）
+
+- **D1** 托管 Agent 用 `follow-up` 唤醒（排队不打断）。
+- **D2** external 参与者不自报 usage 时按 `bytes/4` 粗估，报告里标 `estimated`。
+- **D3** 反向评审的 issue 与正向一视同仁，同样阻塞会话结束。
+- **D4** `budget_exhausted` 后保留只读权限，便于人工接管后恢复。
+- **D5** `maxTotalRounds` 默认 6 作为 token 预算之外的第二道防线；到顶不强制出报告，而是升级人工（与决策 3 保持一致）。
 
 ---
 
 ## 11. 已识别风险
 
-- **死循环**：双方互不让步 → `maxIssueRounds` + 自动升级 + 会话级总轮次上限三重兜底。
+- **死循环**：双方互不让步 → `maxIssueRounds` + `maxTotalRounds` + 每参与者 600K token 预算，三道闸门任一触发都转人工。
+- **僵死（决策 3 的自觉代价）**：某方永久不交 → 会话永远停在 `stalled`。缓解手段：`stalled.waitingOn` 明确点名 + `participant_overdue` 事件 + 邮件通知 + Web UI 高亮 + 人工 `advance`。这是有意接受的权衡：宁可停住等人，也不放行未经评审的结论。
+- **对称评审的轮次放大**：允许反向提 issue 后理论上可能互提互驳。靠 `maxTotalRounds` + token 预算封顶，并在报告里单独统计反向 issue 的采纳率（连续多条反向 issue 被 `reject` 的参与者会被标出来）。
 - **Agent 不按格式提交**：422 + `fieldErrors` + 幂等重试 + briefing 里给完整示例；托管 Agent 还可用扩展工具从根上约束。
 - **越权**：participantToken 作用域限定到 session + 自己的对象；关闭权只属于提出者与人。
 - **雪崩式唤醒**：Dispatcher 串行化每个 Agent 的任务投递（同一 agentId 一个队列），避免同时 follow-up 多次。
@@ -490,10 +547,10 @@ collab_idempotency(key PK, session_id, participant_id, response_json, created_at
 
 ## 12. 测试策略
 
-- **纯状态机单测**（`review-flow.ts` / `scoring-flow.ts` 不碰 IO）：全部状态迁移、越权（实现方关 issue）、超时弃权、轮次上限、收敛与强制锁定兜底。这是收益最高的一块，必须先于 HTTP 层。
+- **纯状态机单测**（`review-flow.ts` / `scoring-flow.ts` 不碰 IO）：全部状态迁移、越权（非提出者关 issue）、**超时阻塞（必须验证不会自动推进）**、轮次上限、token 预算耗尽、收敛与强制锁定兜底。这是收益最高的一块，必须先于 HTTP 层。
 - **HTTP 契约测试**：沿用现有 `RemotePiServer({port:0,dataDir})` + `fetch` 的写法（见 `test/mail-settings-server.test.ts`），跑完整闭环：2 reviewer 提 findings → implementer 回应 → verdict → 关闭/升级。
 - **幂等与并发**：同一 `clientRequestId` 重放两次只产生一条 issue；两个 reviewer 同时对同一 issue 写 verdict 时 `409`。
-- **恶意/畸形输入**：超大 payload、错误 severity、跨 session 引用 issueId（必须 404 而不是泄露）、用 A 的 token 改 B 的对象。
+- **恶意/畸形输入**：超大 payload、错误 severity、缺失 `location.path` / `evidence`、跨 session 引用 issueId（必须 404 而不是泄露）、用 A 的 token 改 B 的对象、用 participantToken 调 `POST /sessions` 或 `/advance`（必须 403）。
 - **持久化**：重启 pi2web 后 session/issue/escalation 全部还在（复用 mail-settings 测试里"重启再查"的写法）。
 - **不做**：真实多 LLM 联调不进 CI（不稳定、烧钱），改用脚本 `examples/collab-demo` 手动跑。
 
