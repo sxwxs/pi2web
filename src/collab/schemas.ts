@@ -1,4 +1,4 @@
-import {CATEGORIES,ESCALATION_KINDS,REQUIRED_ACTIONS,RESPONSE_TYPES,SEVERITIES,VERDICT_TYPES,ROLES} from './types.js';
+import {CATEGORIES,DEBATE_STANCES,ESCALATION_KINDS,REQUIRED_ACTIONS,RESPONSE_TYPES,SEVERITIES,VERDICT_TYPES,VOTE_STANCES,ROLES} from './types.js';
 import {anyJson,arr,bool,num,obj,oneOf,optional,str,withDefault,type Validator} from './validate.js';
 
 /**
@@ -120,3 +120,59 @@ export const resolveEscalationRequest=obj({
 export const ackInboxRequest=obj({itemIds:arr(str({min:1,max:100}),{min:1,max:100})});
 
 export type Schema<T>=Validator<T>;
+
+// ---- scoring session payloads ----
+
+export const nominationsRequest=obj({
+  clientRequestId:clientRequestId(),
+  nominations:arr(obj({
+    externalId:optional(str({max:100})),
+    name:str({min:2,max:80}),
+    definition:str({min:20,max:2000}),
+    weightSuggestion:optional(num({min:0,max:1})),
+    anchors:optional(obj({},{allowUnknown:true})),
+    rationale:optional(str({max:2000}))
+  }),{max:20}),
+  nominationsComplete:withDefault(bool(),()=>false),
+  usage:usage()
+});
+
+export const votesRequest=obj({
+  clientRequestId:clientRequestId(),
+  votes:arr(obj({
+    criterionId:str({min:1,max:100}),
+    stance:oneOf(VOTE_STANCES),
+    weight:optional(num({min:0,max:1})),
+    amendment:optional(str({max:1000})),
+    rationale:optional(str({max:2000}))
+  }),{min:1,max:40}),
+  usage:usage()
+});
+
+/** Evidence is mandatory and each entry must point at a file: an unanchored score is a guess. */
+export const scoresRequest=obj({
+  clientRequestId:clientRequestId(),
+  scores:arr(obj({
+    criterionId:str({min:1,max:100}),
+    score:num({min:0,max:1000}),
+    rationale:str({min:20,max:4000}),
+    evidence:arr(evidenceItem(),{min:1,max:20}),
+    confidence:optional(num({min:0,max:1})),
+    changeReason:optional(str({max:2000}))
+  }),{min:1,max:40}),
+  usage:usage()
+});
+
+export const debateArgumentRequest=obj({
+  clientRequestId:clientRequestId(),
+  stance:oneOf(DEBATE_STANCES),
+  argument:str({min:20,max:4000}),
+  evidence:withDefault(arr(evidenceItem(),{max:20}),()=>[]),
+  respondingTo:optional(str({max:100})),
+  usage:usage()
+});
+
+export const finalizeRequest=obj({
+  /** Human overrides for criteria the panel could not settle, keyed by criterionId. */
+  rulings:withDefault(arr(obj({criterionId:str({min:1,max:100}),score:num({min:0,max:1000}),rationale:str({min:10,max:2000})}),{max:40}),()=>[])
+});

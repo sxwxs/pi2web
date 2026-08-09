@@ -79,6 +79,15 @@ export class CollabRouter {
     if(method==='GET'&&tail==='issues'&&!sub)return ok(isHuman?this.hub.store.listIssues(sessionId):this.hub.listIssues(asParticipant()));
     if(method==='GET'&&tail==='issues'&&sub)return ok(this.hub.issueDetail(sessionId,sub));
     if(method==='POST'&&tail==='issues'&&parts[7]==='withdraw')return ok(await this.hub.withdrawIssue(asParticipant(),sub));
+    if(method==='POST'&&tail==='nominations')return ok(await this.hub.submitNominations(asParticipant(),await ctx.body()),201);
+    if(method==='GET'&&tail==='criteria')return ok(this.hub.criteria(sessionId,participant));
+    if(method==='POST'&&tail==='votes')return ok(await this.hub.submitVotes(asParticipant(),await ctx.body()));
+    if(method==='GET'&&tail==='votes')return ok(this.hub.votes(sessionId,participant));
+    if(method==='POST'&&tail==='scores')return ok(await this.hub.submitScores(asParticipant(),await ctx.body()));
+    if(method==='GET'&&tail==='analysis')return ok(this.hub.analysis(sessionId,participant));
+    if(method==='GET'&&tail==='debates')return ok(this.hub.store.listDebates(sessionId));
+    if(method==='POST'&&tail==='debates'&&parts[7]==='arguments')return ok(await this.hub.submitDebateArgument(asParticipant(),sub,await ctx.body()),201);
+    if(method==='POST'&&tail==='finalize'){human('Finalizing a scoring session');return ok(await this.hub.finalizeScoring(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='findings')return ok(await this.hub.submitFindings(asParticipant(),await ctx.body()),201);
     if(method==='POST'&&tail==='responses')return ok(await this.hub.submitResponses(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='verdicts')return ok(await this.hub.submitVerdicts(asParticipant(),await ctx.body()));
