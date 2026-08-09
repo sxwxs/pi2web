@@ -68,10 +68,13 @@ export class MetadataStore {
       CREATE INDEX IF NOT EXISTS sessions_workspace_active_recent ON sessions(workspace_id,last_active_at DESC,session_id DESC) WHERE archived_at IS NULL;
       CREATE INDEX IF NOT EXISTS sessions_cwd_active_recent ON sessions(cwd,last_active_at DESC,session_id DESC) WHERE archived_at IS NULL;
     `);
-    db.pragma('user_version = 1');
+    // Only stamp the initial version: later migrations (collaboration tables) raise it and must not be reset on restart.
+    if(Number(db.pragma('user_version',{simple:true}))<1)db.pragma('user_version = 1');
     this.archivedAgents=new Set((db.prepare('SELECT id FROM agents WHERE archived_at IS NOT NULL').all() as {id:string}[]).map(row=>row.id));
   }
   private get database(){if(!this.db)throw new Error('Metadata store is not initialized');return this.db}
+  /** Shared handle so collaboration tables live in the same file and the same backup. */
+  get connection(){return this.database}
   getSetting<T>(key:string):T|undefined{const row=this.database.prepare('SELECT value FROM settings WHERE key=?').get(key) as {value:string}|undefined;if(!row)return;try{return JSON.parse(row.value) as T}catch{return}}
   setSetting(key:string,value:unknown){this.database.prepare('INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').run(key,JSON.stringify(value),Date.now())}
   listWorkspaces():Workspace[]{return (this.database.prepare('SELECT id,label,root_path,created_at FROM workspaces ORDER BY created_at,id').all() as any[]).map(row=>({id:row.id,label:row.label,rootPath:row.root_path,createdAt:new Date(row.created_at).toISOString()}))}
