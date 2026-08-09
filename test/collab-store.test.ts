@@ -83,7 +83,7 @@ describe('collab capabilities',()=>{
 
 describe('collab store',()=>{
   let dir:string,metadata:MetadataStore,store:CollabStore;
-  beforeEach(async()=>{dir=await temp();metadata=new MetadataStore(dir);metadata.init();store=new CollabStore(metadata.connection);store.init()});
+  beforeEach(async()=>{dir=await temp();metadata=new MetadataStore(dir);metadata.init();store=new CollabStore(()=>metadata.connection);store.init()});
   afterEach(()=>metadata.close());
 
   const newSession=()=>store.createSession({kind:'review',title:'Pay refactor',workspaceId:'ws-1',cwd:dir,subject:{type:'commit_range',value:'HEAD~3..HEAD'}});
@@ -220,7 +220,7 @@ describe('collab store',()=>{
     store.appendEvent(session.sessionId,'session_created',{});
     metadata.close();
     const reopened=new MetadataStore(dir);reopened.init();
-    const restored=new CollabStore(reopened.connection);restored.init();
+    const restored=new CollabStore(()=>reopened.connection);restored.init();
     expect(restored.getSession(session.sessionId).title).toBe('Pay refactor');
     expect(restored.listEvents(session.sessionId)).toHaveLength(1);
     reopened.close();

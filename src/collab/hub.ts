@@ -279,6 +279,7 @@ export class CollabHub {
     return issues.filter(issue=>issue.reporterId===participant.participantId||issue.targetParticipantId===participant.participantId);
   }
   events(sessionId:string,since=0,limit=500){return this.store.listEvents(sessionId,since,limit)}
+  progress(sessionId:string){return sessionProgress(this.snapshot(sessionId))}
   issueDetail(sessionId:string,issueId:string){
     const issue=this.store.findIssueInSession(sessionId,issueId);
     if(!issue)throw flowError(COLLAB_ERRORS.issueNotFound,'Issue not found in this session',404);
