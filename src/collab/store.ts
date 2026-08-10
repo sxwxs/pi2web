@@ -126,7 +126,10 @@ export class CollabStore {
     // Additive migration: scoring sessions need a debate counter independent of the voting round.
     const columns=this.db.prepare('PRAGMA table_info(collab_sessions)').all() as {name:string}[];
     if(!columns.some(column=>column.name==='debate_round'))this.db.exec('ALTER TABLE collab_sessions ADD COLUMN debate_round INTEGER NOT NULL DEFAULT 0');
-    if(Number(this.db.pragma('user_version',{simple:true}))<2)this.db.pragma('user_version = 2');
+    // Additive migration: a managed participant keeps its token in clear text so the hub can hand it to the agent it wakes.
+    const participantColumns=this.db.prepare('PRAGMA table_info(collab_participants)').all() as {name:string}[];
+    if(!participantColumns.some(column=>column.name==='dispatch_token'))this.db.exec('ALTER TABLE collab_participants ADD COLUMN dispatch_token TEXT');
+    if(Number(this.db.pragma('user_version',{simple:true}))<3)this.db.pragma('user_version = 3');
   }
 
   transaction<T>(work:()=>T):T{return this.db.transaction(work)()}
@@ -196,6 +199,13 @@ export class CollabStore {
     const current=this.getParticipant(participantId),used=current.tokensUsed+Math.max(0,Math.round(tokens));
     return this.updateParticipant(participantId,{tokensUsed:used,tokensEstimated:current.tokensEstimated||estimated,state:current.state==='left'?'left':used>=current.tokenBudget?'budget_exhausted':'active'});
   }
+  /**
+   * Stores the plaintext token of a *managed* participant. The hub must be able to give the token to the agent
+   * it wakes, and there is nobody to type it in. External participants keep hash-only storage.
+   */
+  setDispatchToken(participantId:string,token:string){this.db.prepare('UPDATE collab_participants SET dispatch_token=? WHERE id=?').run(token,participantId)}
+  getDispatchToken(participantId:string):string|undefined{const row=this.db.prepare('SELECT dispatch_token FROM collab_participants WHERE id=?').get(participantId) as any;return row?.dispatch_token??undefined}
+  clearDispatchToken(participantId:string){this.db.prepare('UPDATE collab_participants SET dispatch_token=NULL WHERE id=?').run(participantId)}
   getTokenBaseline(participantId:string):number|undefined{const row=this.db.prepare('SELECT token_baseline FROM collab_participants WHERE id=?').get(participantId) as any;return row?.token_baseline??undefined}
   setTokenBaseline(participantId:string,value:number){this.db.prepare('UPDATE collab_participants SET token_baseline=? WHERE id=?').run(Math.max(0,Math.round(value)),participantId)}
 

@@ -83,8 +83,19 @@ export const policyPatch=obj({
   overdueWarningSec:optional(num({integer:true,min:60,max:86_400})),
   autoEscalateOnDeadlock:optional(bool()),
   blindFindings:optional(bool()),
+  implementationFirst:optional(bool()),
+  autoReviewOnAgentIdle:optional(bool()),
   tokenBudgetPerParticipant:optional(num({integer:true,min:1000,max:100_000_000})),
   scoring:optional(scoringPolicyPatch)
+});
+
+/** The implementer's "I am done, call the reviewers" signal. It is what turns build-then-review into one loop. */
+export const readyRequest=obj({
+  clientRequestId:clientRequestId(),
+  summary:str({min:10,max:4000}),
+  changes:withDefault(arr(obj({path:str({min:1,max:400}),summary:str({min:5,max:1000})}),{max:100}),()=>[]),
+  codeRef:optional(obj({commit:optional(str({max:100})),dirtyHash:optional(str({max:200}))})),
+  usage:usage()
 });
 
 export const createSessionRequest=obj({

@@ -47,6 +47,7 @@ export function assertPhase(snapshot:ReviewSnapshot,phases:ReviewPhase[],action:
 export function requiredActors(snapshot:ReviewSnapshot):string[]{
   const participants=active(snapshot);
   switch(snapshot.phase){
+    case 'implementing':return participants.filter(participant=>participant.role==='implementer').map(participant=>participant.participantId);
     case 'collecting':return participants.filter(participant=>participant.role==='reviewer').map(participant=>participant.participantId);
     case 'responding':return unique(snapshot.issues.filter(issue=>issue.status==='open').map(issue=>issue.targetParticipantId));
     case 'adjudicating':return unique(snapshot.issues.filter(issue=>issue.status==='answered').map(issue=>issue.reporterId));
@@ -57,8 +58,8 @@ export function requiredActors(snapshot:ReviewSnapshot):string[]{
 /** Required actors that have not finished yet. An exhausted or departed participant still blocks: a human must intervene. */
 export function waitingOn(snapshot:ReviewSnapshot):string[]{
   const required=requiredActors(snapshot);
-  if(snapshot.phase==='collecting'){
-    const done=new Set(snapshot.completions.filter(entry=>entry.phase==='collecting'&&entry.round===snapshot.round).map(entry=>entry.participantId));
+  if(snapshot.phase==='collecting'||snapshot.phase==='implementing'){
+    const done=new Set(snapshot.completions.filter(entry=>entry.phase===snapshot.phase&&entry.round===snapshot.round).map(entry=>entry.participantId));
     return required.filter(participantId=>!done.has(participantId));
   }
   return required;
@@ -88,7 +89,11 @@ export function nextPhase(snapshot:ReviewSnapshot,options:{forced?:boolean}={}):
   }
   const skipped=options.forced&&pending.length?{skipped:pending}:{};
   switch(snapshot.phase){
-    case 'draft':return {phase:'collecting',round:snapshot.round,reason:'round_opened',...skipped};
+    case 'draft':return snapshot.policy.implementationFirst
+      ? {phase:'implementing',round:snapshot.round,reason:'implementation_started',...skipped}
+      : {phase:'collecting',round:snapshot.round,reason:'round_opened',...skipped};
+    // The implementer declares itself done (or a managed agent goes idle); only then are the reviewers called.
+    case 'implementing':return {phase:'collecting',round:snapshot.round,reason:'implementation_ready',...skipped};
     case 'collecting':return {phase:'consolidating',round:snapshot.round,reason:'findings_complete',...skipped};
     case 'consolidating':return {phase:'responding',round:snapshot.round,reason:'digest_ready',...skipped};
     case 'responding':return {phase:'adjudicating',round:snapshot.round,reason:'responses_complete',...skipped};
@@ -173,6 +178,22 @@ export type HumanDecision='resolved'|'wontfix'|'closed'|'reopen';
 export function applyHumanRuling(issue:FlowIssue,decision:HumanDecision):VerdictOutcome{
   if(decision==='reopen')return {status:'open',round:issue.round+1,escalate:false};
   return {status:decision==='resolved'?'human_ruled':decision,round:issue.round,escalate:false};
+}
+
+/** Everyone the reviewers have to agree with before a session may finish clean. */
+export function approvalSummary(snapshot:ReviewSnapshot){
+  const reviewers=active(snapshot).filter(participant=>participant.role==='reviewer');
+  const approvals=reviewers.map(reviewer=>{
+    const filed=snapshot.issues.filter(issue=>issue.reporterId===reviewer.participantId);
+    const unresolved=filed.filter(isOpenIssue);
+    return {participantId:reviewer.participantId,filed:filed.length,unresolved:unresolved.length,approved:unresolved.length===0};
+  });
+  return {
+    reviewers:approvals,
+    // "Approved" means every reviewer's own findings are settled and nothing needed a human ruling.
+    unanimous:approvals.length>0&&approvals.every(entry=>entry.approved),
+    humanRuledCount:snapshot.issues.filter(issue=>issue.status==='human_ruled'||issue.status==='wontfix'||issue.status==='closed').length
+  };
 }
 
 export function sessionProgress(snapshot:ReviewSnapshot){

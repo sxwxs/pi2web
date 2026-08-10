@@ -1,12 +1,12 @@
 import {execFile} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {promisify} from 'node:util';
-import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type Issue,type Participant,type ReviewPhase,type ScoringPhase} from './types.js';
+import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type InboxItem,type Issue,type Participant,type ReviewPhase,type ScoringPhase} from './types.js';
 import {CollabStore,type CreateSessionInput} from './store.js';
 import {ValidationError,parse,type FieldError} from './validate.js';
-import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,policyPatch,resolveEscalationRequest,responsesRequest,scoresRequest,verdictsRequest,votesRequest} from './schemas.js';
+import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,policyPatch,readyRequest,resolveEscalationRequest,responsesRequest,scoresRequest,verdictsRequest,votesRequest} from './schemas.js';
 import {analyse,assertScoringCapability,assertScoringPhase,approvedCriteria,contestedCriteria,finalizeScores,isScoringReadyToAdvance,lockRubric,nextScoringPhase,nominationsSealed,scoresSealed,scoringPanel,scoringProgress,scoringWaitingOn,tallyVotes,votesSealed,type ScoringSnapshot} from './scoring-flow.js';
-import {applyEscalation,applyHumanRuling,applyResponse,applyVerdict,applyWithdraw,assertCanFileFinding,assertCapability,canSeeOthersFindings,flowError,isReadyToAdvance,nextPhase,sessionProgress,stallCheck,waitingOn,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from './review-flow.js';
+import {applyEscalation,applyHumanRuling,applyResponse,applyVerdict,applyWithdraw,approvalSummary,assertCanFileFinding,assertCapability,canSeeOthersFindings,flowError,isOpenIssue,isReadyToAdvance,nextPhase,sessionProgress,stallCheck,waitingOn,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from './review-flow.js';
 
 const run=promisify(execFile);
 
@@ -38,6 +38,9 @@ const fieldError=(path:string,code:string,message:string):FieldError=>({path,cod
  */
 export class CollabHub {
   private listeners=new Set<(event:CollabEvent)=>void>();
+  /** Long-poll waiters, keyed by participantId. Resolved as soon as that participant gets an inbox item. */
+  private waiters=new Map<string,Set<()=>void>>();
+  private closed=false;
   private readonly resolveBaseline:BaselineResolver;
   private readonly now:()=>number;
   constructor(readonly store:CollabStore,private readonly options:HubOptions={}){
@@ -45,9 +48,30 @@ export class CollabHub {
     this.now=options.now??(()=>Date.now());
   }
   init(){this.store.init()}
+  /** Releases every long-poll waiter so a shutdown is not blocked by parked agent requests. */
+  shutdown(){this.closed=true;for(const [participantId] of this.waiters)this.wake(participantId)}
   subscribe(listener:(event:CollabEvent)=>void){this.listeners.add(listener);return()=>this.listeners.delete(listener)}
   private emit(event:CollabEvent){for(const listener of this.listeners)try{listener(event)}catch{/* A broken subscriber must not roll back committed state. */}}
   private record(sessionId:string,type:string,payload:Record<string,unknown>={},actorId?:string){const event=this.store.appendEvent(sessionId,type,payload,actorId);this.emit(event);return event}
+  /** Queues an inbox item and releases anyone parked on a long poll for that participant. */
+  private push(sessionId:string,participantId:string,type:string,payload:Record<string,unknown>){
+    const item=this.store.pushInbox(sessionId,participantId,type,payload);
+    this.wake(participantId);
+    return item;
+  }
+  private wake(participantId:string){
+    const set=this.waiters.get(participantId);if(!set)return;
+    this.waiters.delete(participantId);
+    for(const resolve of set)try{resolve()}catch{/* a broken waiter must not block the others */}
+  }
+  /** A finished session no longer needs to wake anyone, so the stored managed credentials are dropped. */
+  retireDispatchTokens(sessionId:string){
+    for(const participant of this.store.listParticipants(sessionId))if(participant.binding.type==='managed')this.store.clearDispatchToken(participant.participantId);
+  }
+  /** Public so the dispatcher can log a wake-up attempt on the session timeline without reaching into internals. */
+  logDispatch(sessionId:string,type:'agent_dispatched'|'dispatch_failed',payload:Record<string,unknown>){
+    try{this.record(sessionId,type,payload)}catch{/* the session may have been removed while a wake-up was in flight */}
+  }
 
   // ---------------------------------------------------------------- human operations
   /** Only humans create sessions: agents must never be able to spawn collaboration loops on their own. */
@@ -73,23 +97,69 @@ export class CollabHub {
     if(input.binding.agentId&&this.store.listParticipants(sessionId).some(existing=>existing.binding.agentId===input.binding.agentId))
       throw flowError(COLLAB_ERRORS.conflict,'That agent is already registered in this session');
     const {participant,token}=this.store.createParticipant({sessionId,role:input.role,displayName:input.displayName,model:input.model,bindingType:input.binding.type,agentId:input.binding.agentId,tokenBudget:input.tokenBudget});
+    // A managed agent is woken by the hub itself, so the hub has to keep the credential it will hand over.
+    if(participant.binding.type==='managed')this.store.setDispatchToken(participant.participantId,token);
     this.record(sessionId,'participant_added',{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,binding:participant.binding,model:participant.model});
     if(session.kind==='scoring'&&session.phase==='nominating'&&participant.role==='reviewer'){
-      this.store.pushInbox(sessionId,participant.participantId,'nominate_criteria',{phase:session.phase,round:session.round});
+      this.push(sessionId,participant.participantId,'nominate_criteria',{phase:session.phase,round:session.round});
       this.record(sessionId,'task_assigned',{participantId:participant.participantId,task:'nominate_criteria',phase:session.phase,round:session.round});
     }
     return {participant,token,session};
   }
-  /** Moves a review session from draft into its first collecting phase and pins the baseline. */
+  /** Moves a review session out of draft. Build-then-review sessions start in `implementing`; the rest go straight to `collecting`. */
   async openRound(sessionId:string){
     const session=this.store.getSession(sessionId);
     if(session.phase!=='draft')throw flowError(COLLAB_ERRORS.wrongPhase,`Round already open: session is in phase ${session.phase}`);
-    if(!this.store.listParticipants(sessionId).some(participant=>participant.role==='reviewer'))throw flowError(COLLAB_ERRORS.wrongPhase,'Register at least one reviewer before opening the round');
-    const updated=this.store.updateSession(sessionId,{phase:'collecting'});
-    await this.captureBaseline(updated);
-    this.record(sessionId,'phase_changed',{from:'draft',to:'collecting',round:updated.round,reason:'round_opened'});
+    const participants=this.store.listParticipants(sessionId);
+    if(!participants.some(participant=>participant.role==='reviewer'))throw flowError(COLLAB_ERRORS.wrongPhase,'Register at least one reviewer before opening the round');
+    const buildFirst=session.policy.implementationFirst;
+    if(buildFirst&&!participants.some(participant=>participant.role==='implementer'))throw flowError(COLLAB_ERRORS.wrongPhase,'An implementationFirst session needs an implementer before it can open');
+    // Same ordering rule as applyPhase: the baseline exists before anyone can see phase `collecting`.
+    if(!buildFirst)await this.captureBaseline({...session,phase:'collecting'});
+    const updated=this.store.updateSession(sessionId,{phase:buildFirst?'implementing':'collecting'});
+    this.record(sessionId,'phase_changed',{from:'draft',to:updated.phase,round:updated.round,reason:buildFirst?'implementation_started':'round_opened'});
     this.dispatch(sessionId);
     return this.store.getSession(sessionId);
+  }
+  /**
+   * The implementer declares the work ready for review. This is the hand-off that makes the loop automatic:
+   * once every implementer has signalled, the hub pins a fresh baseline and calls the reviewers itself.
+   */
+  async markImplementationReady(participant:Participant,body:unknown){
+    const input=parse(readyRequest,body);
+    const cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
+    const session=this.store.getSession(participant.sessionId);
+    assertCapability(this.toFlowParticipant(participant),'respond');
+    if(participant.role!=='implementer')throw flowError(COLLAB_ERRORS.forbidden,'Only an implementer may declare the implementation ready',403);
+    if(session.phase!=='implementing')throw flowError(COLLAB_ERRORS.wrongPhase,`Ready is only accepted in phase implementing, but the session is in ${session.phase}`);
+    this.store.markPhaseComplete(session.sessionId,session.round,'implementing',participant.participantId);
+    this.record(session.sessionId,'implementation_ready',{participantId:participant.participantId,summary:input.summary,codeRef:input.codeRef,changedFiles:input.changes.length,trigger:'self_reported'},participant.participantId);
+    await this.settle(session.sessionId);
+    const current=this.store.getSession(session.sessionId);
+    const response={accepted:true,phase:current.phase,round:current.round,waitingOn:waitingOn(this.snapshot(session.sessionId))};
+    this.finish(participant,input.clientRequestId,body,input.usage,response);
+    return response;
+  }
+  /**
+   * Called when a pi2web agent settles. A managed implementer that was told to implement and then went idle
+   * is treated as ready, which is what makes "the developer finished, call the reviewers" fully automatic.
+   * Idle chatter cannot trigger it: the agent must be holding an `implement` task for the current round.
+   */
+  async noteAgentIdle(agentId:string){
+    if(!agentId)return;
+    const sessions=this.store.listSessions({status:'active',limit:200}).filter(session=>session.kind==='review'&&session.phase==='implementing'&&session.policy.autoReviewOnAgentIdle);
+    for(const session of sessions){
+      for(const participant of this.store.listParticipants(session.sessionId)){
+        if(participant.binding.agentId!==agentId||participant.role!=='implementer'||participant.state!=='active')continue;
+        const done=this.store.listCompletions(session.sessionId).some(entry=>entry.phase==='implementing'&&entry.round===session.round&&entry.participantId===participant.participantId);
+        if(done)continue;
+        const assigned=this.store.listInbox(participant.participantId,true,50).some(item=>item.type==='implement'&&Number(item.payload.round)===session.round);
+        if(!assigned)continue;
+        this.store.markPhaseComplete(session.sessionId,session.round,'implementing',participant.participantId);
+        this.record(session.sessionId,'implementation_ready',{participantId:participant.participantId,trigger:'agent_idle',agentId},participant.participantId);
+        await this.settle(session.sessionId);
+      }
+    }
   }
   /** The only way to move past participants that never submitted. Everything about the override is logged. */
   async advance(sessionId:string,body:unknown,actor='human'){
@@ -266,6 +336,12 @@ export class CollabHub {
     const base={sessionId:session.sessionId,kind:session.kind,title:session.title,phase:session.phase,round:session.round,subject:session.subject,
       baseline,you:{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,tokensUsed:participant.tokensUsed,tokenBudget:participant.tokenBudget,state:participant.state},
       progress:sessionProgress(snapshot),stalled:session.stalled};
+    if(session.phase==='implementing'){
+      if(participant.role!=='implementer')return {...base,task:'wait',instructions:'The implementer is still working. You will be called as soon as the code is ready for review.'};
+      const carried=this.store.listIssues(session.sessionId,{targetParticipantId:participant.participantId,status:['open']});
+      return {...base,task:'implement',issues:carried.map(issue=>this.withHistory(issue)),
+        instructions:`Do the implementation work in ${session.cwd}. When it is finished, POST /api/v1/collab/sessions/${session.sessionId}/ready with a summary, the changed files and a codeRef (commit or dirtyHash), then end your turn. The hub pins a baseline at that moment, calls the reviewers itself, and pushes their findings back to you: never sleep or poll waiting for the review.`};
+    }
     if(session.phase==='collecting'){
       const own=this.store.listIssues(session.sessionId,{reporterId:participant.participantId,round:session.round});
       const required=participant.role==='reviewer';
@@ -282,7 +358,7 @@ export class CollabHub {
       return {...base,task:mine.length?'rule_on_responses':'wait',issues:mine.map(issue=>this.withHistory(issue)),
         instructions:`Rule on each response via POST /api/v1/collab/sessions/${session.sessionId}/verdicts. Accept closes the issue, reject reopens it for another round, escalate hands it to a human.`};
     }
-    return {...base,task:'wait',instructions:session.phase==='awaiting_human'?'A human ruling is pending. Do not resubmit; you will be notified.':'Nothing is required from you right now.'};
+    return {...base,task:'wait',instructions:session.phase==='awaiting_human'?'A human ruling is pending. Do not resubmit and do not poll; you will be prompted when it is your turn again.':'Nothing is required from you right now. End your turn; the hub prompts you when something needs you.'};
   }
 
   /** Blind review: while findings are being collected, a participant only sees their own. */
@@ -303,6 +379,24 @@ export class CollabHub {
     const items=this.store.listInbox(participant.participantId);
     this.store.markDelivered(items.map(item=>item.itemId));
     return items;
+  }
+  /**
+   * Long poll: returns immediately when the inbox is not empty, otherwise parks for up to `waitSeconds`
+   * (capped at 60) until a task arrives. An external agent can therefore idle without hammering the server.
+   */
+  async inboxWait(participant:Participant,waitSeconds=0):Promise<InboxItem[]>{
+    const seconds=Math.min(60,Math.max(0,Math.trunc(Number(waitSeconds)||0)));
+    const immediate=this.inbox(participant);
+    if(immediate.length||seconds<=0||this.closed)return immediate;
+    await new Promise<void>(resolve=>{
+      let settled=false;
+      const finish=()=>{if(settled)return;settled=true;clearTimeout(timer);const set=this.waiters.get(participant.participantId);set?.delete(finish);if(set&&!set.size)this.waiters.delete(participant.participantId);resolve()};
+      const timer=setTimeout(finish,seconds*1000);
+      timer.unref?.();
+      const set=this.waiters.get(participant.participantId)??new Set<()=>void>();
+      set.add(finish);this.waiters.set(participant.participantId,set);
+    });
+    return this.inbox(participant);
   }
   ackInbox(participant:Participant,itemIds:string[]){this.store.ackInbox(participant.participantId,itemIds);return {acknowledged:itemIds.length}}
 
@@ -423,6 +517,7 @@ export class CollabHub {
     const report=finalizeScores(snapshot,rulings);
     this.store.updateSession(sessionId,{phase:'finalized',status:'finished',outcome:{...report,rulings:input.rulings,resolvedBy}});
     this.record(sessionId,'session_finished',{outcome:report},resolvedBy);
+    this.announceFinish(this.store.getSession(sessionId));
     return report;
   }
 
@@ -457,7 +552,7 @@ export class CollabHub {
       this.record(sessionId,'phase_changed',{from:session.phase,to:result.phase,round:result.round,debateRound:result.debateRound,reason:result.reason,
         ...(forced&&guard===0?{forced:true,forceReason:reason,skipped:result.skipped??[]}:{}),...(result.contested?{contested:result.contested}:{})});
       if(result.rubric)this.record(sessionId,'rubric_locked',{lockedBy:result.rubric.lockedBy,reason:result.rubric.reason,criteria:result.rubric.criteria});
-      if(finalized){this.record(sessionId,'session_finished',{outcome:updated.outcome??{}});return}
+      if(finalized){this.record(sessionId,'session_finished',{outcome:updated.outcome??{}});this.announceFinish(this.store.getSession(sessionId));return}
       if(result.phase==='awaiting_human')this.raiseScoringEscalation(updated,result.contested??[]);
       this.dispatchScoring(sessionId);
     }
@@ -481,7 +576,7 @@ export class CollabHub {
     const task=({nominating:'nominate_criteria',voting:'vote_on_criteria',scoring:'score_rubric',debating:'debate_contested_scores',rescoring:'rescore_contested'} as Record<string,string>)[session.phase];
     if(!task)return;
     for(const participantId of scoringWaitingOn(snapshot).length?scoringWaitingOn(snapshot):scoringPanel(snapshot).map(entry=>entry.participantId)){
-      this.store.pushInbox(sessionId,participantId,task,{phase:session.phase,round:session.round,debateRound:session.debateRound});
+      this.push(sessionId,participantId,task,{phase:session.phase,round:session.round,debateRound:session.debateRound});
       this.record(sessionId,'task_assigned',{participantId,task,phase:session.phase,round:session.round});
     }
   }
@@ -509,7 +604,7 @@ export class CollabHub {
       phase:session.phase as ReviewPhase,round:session.round,policy:session.policy,status:session.status,
       participants:this.store.listParticipants(sessionId).map(participant=>this.toFlowParticipant(participant)),
       issues:this.store.listIssues(sessionId).map(issue=>this.toFlowIssue(issue)),
-      completions:this.store.listCompletions(sessionId).filter(entry=>entry.phase==='collecting').map(entry=>({phase:'collecting' as const,round:entry.round,participantId:entry.participantId})),
+      completions:this.store.listCompletions(sessionId).filter(entry=>entry.phase==='collecting'||entry.phase==='implementing').map(entry=>({phase:entry.phase as 'collecting'|'implementing',round:entry.round,participantId:entry.participantId})),
       pendingEscalations:this.store.listEscalations({sessionId,status:'pending'}).length
     };
   }
@@ -524,13 +619,15 @@ export class CollabHub {
   }
   private async applyPhase(session:CollabSession,result:{phase:ReviewPhase,round:number,reason:string,escalateDeadlock?:boolean,skipped?:string[]},context:{forced?:boolean,reason?:string,actor?:string}){
     const finished=result.phase==='finished';
+    // Pin the baseline *before* the phase is visible: otherwise a reviewer that polls in between sees
+    // `collecting` with no baseline and its findings bounce off with STALE_BASELINE.
+    if(result.phase==='collecting'&&(result.round!==session.round||session.phase==='implementing'))await this.captureBaseline({...session,phase:result.phase,round:result.round});
     const updated=this.store.updateSession(session.sessionId,{phase:result.phase,round:result.round,status:finished?'finished':session.status,
       stalled:undefined,outcome:finished?this.outcome(session.sessionId):session.outcome});
-    if(result.phase==='collecting'&&result.round!==session.round)await this.captureBaseline(updated);
     this.record(session.sessionId,'phase_changed',{from:session.phase,to:result.phase,round:result.round,reason:result.reason,
       ...(context.forced?{forced:true,forcedBy:context.actor??'human',forceReason:context.reason,skipped:result.skipped??[]}:{})},context.forced?(context.actor??'human'):undefined);
     if(result.escalateDeadlock)this.raiseDeadlockEscalation(updated);
-    if(finished)this.record(session.sessionId,'session_finished',{outcome:updated.outcome??{}});
+    if(finished){this.record(session.sessionId,'session_finished',{outcome:updated.outcome??{}});this.announceFinish(this.store.getSession(session.sessionId))}
     else this.dispatch(session.sessionId);
   }
   private async captureBaseline(session:CollabSession){
@@ -543,11 +640,13 @@ export class CollabHub {
   private dispatch(sessionId:string){
     const session=this.store.getSession(sessionId),participants=this.store.listParticipants(sessionId).filter(participant=>participant.state==='active');
     const targets=new Map<string,string>();
-    if(session.phase==='collecting')for(const participant of participants)if(participant.role!=='moderator')targets.set(participant.participantId,participant.role==='reviewer'?'file_findings':'file_findings_optional');
+    if(session.phase==='implementing')for(const participant of participants)if(participant.role==='implementer')targets.set(participant.participantId,'implement');
+    // In build-then-review the implementer is writing code, not filing reverse findings, so it gets no task here.
+    if(session.phase==='collecting')for(const participant of participants)if(participant.role!=='moderator'&&!(session.policy.implementationFirst&&participant.role==='implementer'))targets.set(participant.participantId,participant.role==='reviewer'?'file_findings':'file_findings_optional');
     if(session.phase==='responding')for(const issue of this.store.listIssues(sessionId,{status:['open']}))targets.set(issue.targetParticipantId,'respond_to_issues');
     if(session.phase==='adjudicating')for(const issue of this.store.listIssues(sessionId,{status:['answered']}))targets.set(issue.reporterId,'rule_on_responses');
     for(const [participantId,task] of targets){
-      this.store.pushInbox(sessionId,participantId,task,{phase:session.phase,round:session.round});
+      this.push(sessionId,participantId,task,{phase:session.phase,round:session.round});
       this.record(sessionId,'task_assigned',{participantId,task,phase:session.phase,round:session.round});
     }
   }
@@ -571,22 +670,47 @@ export class CollabHub {
   checkStalls(){
     const changed:CollabSession[]=[];
     for(const session of this.store.listSessions({status:'active'})){
-      const snapshot=this.snapshot(session.sessionId),check=stallCheck(snapshot,Date.parse(session.updatedAt),this.now());
-      const wasStalled=!!session.stalled;
-      if(check.stalled&&!wasStalled){
-        const updated=this.store.updateSession(session.sessionId,{stalled:{since:new Date(this.now()).toISOString(),waitingOn:check.waitingOn}});
-        this.record(session.sessionId,'participant_overdue',{waitingOn:check.waitingOn,overdueBySec:check.overdueBySec,phase:session.phase});
-        changed.push(updated);
-      }else if(!check.stalled&&wasStalled){
-        changed.push(this.store.updateSession(session.sessionId,{stalled:undefined}));
+      const snapshot=this.snapshot(session.sessionId),pending=waitingOn(snapshot);
+      if(session.stalled){
+        /*
+         * Do NOT re-run the timer here: writing the stall flag bumps updatedAt, so a fresh stallCheck would
+         * always report "not overdue" and clear the flag a minute later, then alert again every window.
+         * The flag only goes away when the situation actually changed.
+         */
+        if(!pending.length||pending.join('|')!==session.stalled.waitingOn.join('|'))
+          changed.push(this.store.updateSession(session.sessionId,{stalled:undefined}));
+        continue;
       }
+      const check=stallCheck(snapshot,Date.parse(session.updatedAt),this.now());
+      if(!check.stalled)continue;
+      const updated=this.store.updateSession(session.sessionId,{stalled:{since:new Date(this.now()).toISOString(),waitingOn:check.waitingOn}});
+      this.record(session.sessionId,'participant_overdue',{waitingOn:check.waitingOn,overdueBySec:check.overdueBySec,phase:session.phase});
+      changed.push(updated);
     }
     return changed;
+  }
+  /**
+   * Closing hand-off: every participant is told the session is over. Without it a managed agent that is waiting
+   * for review feedback would sit there forever (or start polling), because a clean review pushes no other task.
+   * The stored managed credentials are dropped by the dispatcher once the note has been delivered.
+   */
+  private announceFinish(session:CollabSession){
+    const participants=this.store.listParticipants(session.sessionId).filter(participant=>participant.state!=='left');
+    for(const participant of participants){
+      this.push(session.sessionId,participant.participantId,'session_result',{phase:session.phase,round:session.round,outcome:session.outcome??{}});
+      this.record(session.sessionId,'task_assigned',{participantId:participant.participantId,task:'session_result',phase:session.phase,round:session.round});
+    }
+    if(!participants.some(participant=>participant.binding.type==='managed'&&participant.binding.agentId))this.retireDispatchTokens(session.sessionId);
   }
   private outcome(sessionId:string){
     const issues=this.store.listIssues(sessionId),byStatus:Record<string,number>={};
     for(const issue of issues)byStatus[issue.status]=(byStatus[issue.status]??0)+1;
-    return {totalIssues:issues.length,byStatus,participants:this.store.listParticipants(sessionId).map(participant=>({participantId:participant.participantId,displayName:participant.displayName,role:participant.role,model:participant.model,tokensUsed:participant.tokensUsed,tokensEstimated:participant.tokensEstimated,state:participant.state}))};
+    const snapshot=this.snapshot(sessionId),approval=approvalSummary(snapshot);
+    return {totalIssues:issues.length,byStatus,
+      // Explicit close-out: "approved" only when every reviewer's findings were settled without a human ruling.
+      verdict:issues.some(issue=>isOpenIssue(this.toFlowIssue(issue)))?'closed_with_open_issues':approval.humanRuledCount?'closed_after_human_ruling':approval.unanimous?'approved':'closed',
+      approval,
+      participants:this.store.listParticipants(sessionId).map(participant=>({participantId:participant.participantId,displayName:participant.displayName,role:participant.role,model:participant.model,tokensUsed:participant.tokensUsed,tokensEstimated:participant.tokensEstimated,state:participant.state}))};
   }
   private withHistory(issue:Issue){return {...issue,history:this.store.listIssueMessages(issue.issueId)}}
   /** Flags likely duplicates without merging: a wrong merge silently drops a real defect. */

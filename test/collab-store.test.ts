@@ -92,7 +92,7 @@ describe('collab store',()=>{
     requiredAction:'must_fix',location:{path:'src/pay/callback.ts',startLine:42,endLine:58},baselineId,round:1
   });
 
-  it('creates sessions with merged policy defaults and keeps the schema version at 2',()=>{
+  it('creates sessions with merged policy defaults and keeps the schema version at 3',()=>{
     const session=store.createSession({kind:'review',title:'x',workspaceId:'ws-1',cwd:dir,subject:{type:'free',value:'x'},policy:{maxIssueRounds:5,scoring:{convergenceRange:1.5} as any}});
     expect(session.phase).toBe('draft');
     expect(session.policy.maxIssueRounds).toBe(5);
@@ -100,7 +100,7 @@ describe('collab store',()=>{
     expect(session.policy.scoring.convergenceRange).toBe(1.5);
     expect(session.policy.scoring.maxDebateRounds).toBe(DEFAULT_POLICY.scoring.maxDebateRounds);
     expect(store.createSession({kind:'scoring',title:'y',workspaceId:'ws-1',cwd:dir,subject:{type:'free',value:'y'}}).phase).toBe('nominating');
-    expect(Number(metadata.connection.pragma('user_version',{simple:true}))).toBe(2);
+    expect(Number(metadata.connection.pragma('user_version',{simple:true}))).toBe(3);
   });
 
   it('stores only the hash of a participant token and resolves it back',()=>{

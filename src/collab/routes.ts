@@ -88,11 +88,12 @@ export class CollabRouter {
     if(method==='GET'&&tail==='debates')return ok(this.hub.store.listDebates(sessionId));
     if(method==='POST'&&tail==='debates'&&parts[7]==='arguments')return ok(await this.hub.submitDebateArgument(asParticipant(),sub,await ctx.body()),201);
     if(method==='POST'&&tail==='finalize'){human('Finalizing a scoring session');return ok(await this.hub.finalizeScoring(sessionId,await ctx.body()))}
+    if(method==='POST'&&tail==='ready')return ok(await this.hub.markImplementationReady(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='findings')return ok(await this.hub.submitFindings(asParticipant(),await ctx.body()),201);
     if(method==='POST'&&tail==='responses')return ok(await this.hub.submitResponses(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='verdicts')return ok(await this.hub.submitVerdicts(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='escalations')return ok(await this.hub.raiseEscalation(asParticipant(),await ctx.body()),202);
-    if(method==='GET'&&tail==='inbox')return ok(this.hub.inbox(asParticipant()));
+    if(method==='GET'&&tail==='inbox')return ok(await this.hub.inboxWait(asParticipant(),number('wait',0)));
     if(method==='POST'&&tail==='inbox'&&sub==='ack')return ok(this.hub.ackInbox(asParticipant(),parse(ackInboxRequest,await ctx.body()).itemIds));
     if(method==='GET'&&tail==='report')return ok({session:this.hub.getSession(sessionId),progress:this.hub.progress(sessionId),issues:this.hub.store.listIssues(sessionId),escalations:this.hub.listEscalations({sessionId})});
     return undefined;

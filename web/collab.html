@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#2b303b">
+  <title>Remote Pi · 协作看板</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    main{grid-template-columns:360px minmax(0,1fr)}
+    article{overflow:auto;padding:16px}
+    .card{margin:0 0 14px;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+    .card h3{margin:0 0 10px;font-size:14px;display:flex;align-items:center;gap:8px}
+    .card h3 .grow{flex:1}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .row>label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+    .row input,.row select,.row textarea{min-width:150px}
+    table{width:100%;border-collapse:collapse;font-size:12px}
+    th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+    th{color:var(--muted);font-weight:600}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;background:#3b4252;color:#dfe5ef}
+    .pill.blue{background:var(--blue);color:#16202a}.pill.green{background:var(--green);color:#16210f}
+    .pill.yellow{background:var(--yellow);color:#221c0c}.pill.red{background:var(--red);color:#fff}
+    .session-item{display:block;width:100%;margin:6px 0;padding:10px;text-align:left;background:var(--input);border:1px solid transparent;border-radius:7px}
+    .session-item.selected{border-color:var(--blue)}
+    .session-item b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .session-item small{display:block;margin-top:4px;color:var(--muted)}
+    .events{max-height:320px;overflow:auto;font:12px ui-monospace,monospace}
+    .events div{padding:3px 0;border-bottom:1px solid #363c48}
+    .token-box{margin-top:8px;padding:8px;background:#1d2129;border:1px solid var(--yellow);border-radius:6px;word-break:break-all;font:12px ui-monospace,monospace}
+    details.raw pre{max-height:280px;overflow:auto;background:#1d2129;padding:8px;border-radius:6px;font:12px ui-monospace,monospace}
+    @media(max-width:700px){main{display:block}aside{height:auto;border-bottom:1px solid var(--line)}article{display:block;height:auto}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="brand"><img src="/icon.svg" alt="" width="32" height="32"><h1>协作看板</h1></div>
+  <a href="/" style="color:var(--blue)">← 返回 Agent 控制台</a>
+  <button id="connect" type="button">输入配对码</button>
+  <button id="refresh" type="button" title="刷新">↻</button>
+  <span id="status" class="muted">未配对</span>
+  <span id="escalationBadge" class="muted"></span>
+</header>
+<main>
+  <aside>
+    <section>
+      <div class="section-title"><h2>协作会话</h2><span><select id="statusFilter" aria-label="状态"><option value="active">进行中</option><option value="">全部</option><option value="finished">已结束</option><option value="aborted">已中止</option></select></span></div>
+      <div id="sessions"><p class="muted">尚未连接</p></div>
+    </section>
+    <section>
+      <div class="section-title"><h2>新建会话</h2></div>
+      <form id="createForm" class="card">
+        <div class="row">
+          <label>类型<select id="newKind"><option value="review">review 评审</option><option value="scoring">scoring 评分</option></select></label>
+          <label>Workspace<select id="newWorkspace"></select></label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label style="flex:1">标题<input id="newTitle" required placeholder="支付回调评审"></label>
+          <label>相对路径<input id="newCwd" value="." size="8"></label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label>评审对象<select id="newSubjectType"><option value="commit_range">commit_range</option><option value="diff">diff</option><option value="paths">paths</option><option value="free">free</option></select></label>
+          <label style="flex:1">值<input id="newSubjectValue" required value="HEAD~1..HEAD"></label>
+        </div>
+        <label class="row" style="margin-top:8px;flex-direction:column;align-items:stretch">任务说明 / 评审重点（会原样进入每个 Agent 的任务包）<textarea id="newSubjectNotes" rows="4" placeholder="要开发的功能：……；验收标准：……；评审重点：并发与幂等"></textarea></label>
+        <label class="toggle-row" style="margin-top:8px;display:flex;align-items:center;gap:8px"><input id="newImplementationFirst" type="checkbox" style="width:auto">先开发后评审：会话先进入 implementing，开发 Agent 完工（POST /ready 或托管 Agent 空闲）后自动召集评审</label>
+        <div class="row" style="margin-top:8px"><button type="submit">创建会话</button></div>
+      </form>
+    </section>
+  </aside>
+  <article id="detail"><p class="muted">选择左侧的协作会话，或先创建一个。</p></article>
+</main>
+<dialog id="pairDialog"><form method="dialog" id="pairForm"><h2>连接 Remote Pi</h2><label>服务地址<input id="pairBase" required></label><label>配对码<input id="pairToken" type="password" autocomplete="off" required autofocus></label><label class="toggle-row" style="display:flex;align-items:center;gap:8px"><input id="pairRemember" type="checkbox" style="width:auto">在此浏览器保存配对码（仅限可信设备）</label><div class="dialog-actions"><button id="pairCancel" type="button">取消</button><button type="submit">连接</button></div></form></dialog>
+<div id="toast" hidden></div>
+<script src="/collab.js"></script>
+</body>
+</html>
