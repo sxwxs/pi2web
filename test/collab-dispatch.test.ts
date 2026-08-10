@@ -144,6 +144,28 @@ describe('collab dispatcher',()=>{
       .toThrow(/binding\.agentId/);
   });
 
+  it('raises the alarm quickly when a queued task is never even collected',async()=>{
+    let clock=Date.now();
+    const timed=new CollabHub(store,{resolveBaseline:baseline,now:()=>clock});timed.init();
+    const created=await timed.createSession({kind:'review',title:'Uncollected task',workspaceId:'ws-1',subject:{type:'commit_range',value:'HEAD~1..HEAD'},policy:{implementationFirst:true}},async()=>dir);
+    const dev=timed.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',binding:{type:'external'}}).participant;
+    timed.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'external'}});
+    await timed.openRound(created.sessionId);
+
+    expect(timed.checkStalls()).toHaveLength(0);           // a task queued seconds ago is not yet suspicious
+    clock+=3*60_000;                                       // …but two minutes without anyone fetching it is
+    const stalled=timed.checkStalls();
+    expect(stalled[0]?.stalled?.waitingOn).toEqual([dev.participantId]);
+    expect(timed.events(created.sessionId).find(event=>event.type==='participant_overdue')?.payload)
+      .toMatchObject({reason:'task_never_collected',waitingOn:[dev.participantId]});
+    // The board must be able to show "queued but never fetched" without digging through the event log.
+    expect(timed.participantsForHuman(created.sessionId).find(entry=>entry.displayName==='dev'))
+      .toMatchObject({pendingTasks:1,uncollectedTasks:1});
+
+    // The flag stays put while nothing changes, instead of flapping once a minute.
+    expect(timed.checkStalls()).toHaveLength(0);
+  });
+
   it('releases a long-polling inbox as soon as a task arrives',async()=>{
     const created=await session();
     const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'external'}});
