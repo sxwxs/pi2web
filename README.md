@@ -175,7 +175,7 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 两种凭证：**配对码**代表人，可以建会话、登记参与者、强制推进、裁定升级；**participantToken** 代表一个 Agent，只能操作自己所在的会话。会话和参与者只能由人创建，Agent 无法自助加入。
 
-参与者有两种绑定方式（登记只在 `draft` / `implementing` / `collecting`——scoring 会话则是 `nominating`——阶段开放，中枢会当场把当前任务派给新座位；其它阶段新增人只会把阶段卡死，因此被拒绝）：
+参与者有两种绑定方式（登记只在 `draft` / `implementing` / `collecting`——scoring 会话则是 `nominating`——阶段开放，中枢会当场把当前任务派给新座位；其它阶段新增人只会把阶段卡死，因此被拒绝）。`role` 只能是 `implementer` / `reviewer` / `moderator`：`human` 不是可登记的席位——人用配对码操作，给人发一个能提名/投票/打分、面板却从不等它的 token，只会让它的提交在无人等待的情况下改变结果：
 
 - `binding:{"type":"managed","agentId":"agent-..."}`：绑定本机 pi2web Agent。轮到它干活时中枢直接把任务包 prompt 给该 Agent（忙碌时用 follow-up 排队），无需轮询；participantToken 由中枢保管并写进唤醒消息，会话结束后清除保管的明文副本。
 - `binding:{"type":"external"}`：外部 Agent（Claude Code / Codex / CI）。用 `GET .../inbox?wait=30` 长轮询领任务（最长 60 秒），`POST .../inbox/ack` 确认。**中枢不会主动唤醒 external 参与者**：如果没有人拿着它的 participantToken 去轮询，事件日志里会出现 `task_assigned` 但没有任何 Agent 开工。登错了可以改绑：
@@ -216,7 +216,7 @@ draft ──advance──▶ implementing ──POST /ready 或托管 Agent 空�
 
 之后评审方 `POST /findings`、实现方 `POST /responses`、评审方 `POST /verdicts`，人用 `GET /report` 收口。校验失败返回 `422` 且带 `fieldErrors`，基线过期返回 `409 STALE_BASELINE`，预算耗尽返回 `429`；所有提交都需要 `clientRequestId` 做幂等。
 
-人工升级（escalation）进入 `GET /api/v1/collab/escalations`，用 `POST /api/v1/collab/escalations/:id/resolve` 裁定；裁定会真的落地：`issue_dispute` 必须给 `issueDecision`，`budget_exhausted` 传 `extra.tokenBudget` 就提额并解封该参与者，`other`（轮次封顶死锁）传 `extra.maxTotalRounds` 就抬高轮次上限——参数不合法（字符串、比已用量还小、没比现有上限高）直接 422，不会“看似成功实则什么都没做”地用掉那一次机会；裁定事件里的 `applied` 记录实际生效的变更。预算也可以事后单独提：`POST /sessions/:id/participants/:pid/budget -d '{"tokenBudget":600000}'`。`score_dispute` 不走裁定接口，而是用 `POST /sessions/:id/finalize` 一次性给出每个争议维度的分数（该调用同时关掉这条升级；若人工强推跳过了结算，中枢也会自动关掉它，并把这些维度标为 `method:"forced"` 而不是“已收敛”）。配置了 MailDispatch 时，升级和会话停滞会立即发信（不参与聚合，可在配置对话框关闭；同一会话 5 分钟内最多一封，避免 Agent 连续升级刷爆邮箱）。
+人工升级（escalation）进入 `GET /api/v1/collab/escalations`，用 `POST /api/v1/collab/escalations/:id/resolve` 裁定；裁定会真的落地：`issue_dispute` 必须给 `issueDecision`，`budget_exhausted` 传 `extra.tokenBudget` 就提额并解封该参与者，`other`（轮次封顶死锁）传 `extra.maxTotalRounds` 就抬高轮次上限——参数不合法（字符串、比已用量还小、没比现有上限高）直接 422，不会“看似成功实则什么都没做”地用掉那一次机会；裁定事件里的 `applied` 记录实际生效的变更。预算也可以事后单独提：`POST /sessions/:id/participants/:pid/budget -d '{"tokenBudget":600000}'`。`score_dispute` 不走裁定接口，而是用 `POST /sessions/:id/finalize` 一次性给出每个争议维度的分数（该调用同时关掉这条升级；若人工强推跳过了结算，中枢也会自动关掉它，并把这些维度标为 `method:"forced"` 而不是“已收敛”）。**评分会话里只要还有未裁定的升级，面板就停在当前阶段**（不会被下一阶段越过，否则会出现“会话已结束、问题还挂在人手上”），裁定后自动继续；不想等就用 `POST /advance -d '{"force":true,"reason":"..."}'`。配置了 MailDispatch 时，升级和会话停滞会立即发信（不参与聚合，可在配置对话框关闭；同一会话 5 分钟内最多一封，避免 Agent 连续升级刷爆邮箱）。
 
 Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与创建、参与者登记与一次性 token、issue/维度、待裁定队列与裁定表单、事件时间线，并通过 WebSocket `subscribe_collab` 实时刷新。
 

@@ -139,6 +139,23 @@ describe('scoring flow: convergence and debate',()=>{
     expect(()=>nextScoringPhase(state)).toThrow(/Still waiting on/);
     expect(nextScoringPhase(state,{forced:true})).toMatchObject({phase:'analysis',skipped:['r1','r2','r3']});
   });
+
+  it('refuses to walk a panel-less session through the rounds',()=>{
+    // With nobody to wait for, every "everyone submitted" check is vacuously true; that used to let /advance
+    // cycle nomination -> voting -> rubric with an empty panel.
+    const empty=snapshot({participants:[{participantId:'impl',role:'implementer',state:'active'}]});
+    expect(isScoringReadyToAdvance(empty)).toBe(false);
+    expect(()=>nextScoringPhase(empty)).toThrow(/no reviewer on the panel/);
+    expect(nextScoringPhase(empty,{forced:true})).toMatchObject({phase:'consolidating'});
+  });
+
+  it('parks the panel while any escalation still awaits a human, not only in awaiting_human',()=>{
+    // A budget escalation raised by the last score submission must not be overtaken by finalization.
+    const state=snapshot({phase:'analysis',criteria:rubric,scores:[...scores('c1',{r1:6,r2:6,r3:6}),...scores('c2',{r1:6,r2:6,r3:6})],pendingEscalations:1});
+    expect(isScoringReadyToAdvance(state)).toBe(false);
+    expect(()=>nextScoringPhase(state)).toThrow(/await a human ruling/);
+    expect(isScoringReadyToAdvance({...state,pendingEscalations:0})).toBe(true);
+  });
 });
 
 describe('scoring flow: final report',()=>{
