@@ -178,7 +178,8 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 参与者有两种绑定方式：
 
 - `binding:{"type":"managed","agentId":"agent-..."}`：绑定本机 pi2web Agent。轮到它干活时中枢直接把任务包 prompt 给该 Agent（忙碌时用 follow-up 排队），无需轮询；participantToken 由中枢保管并写进唤醒消息，会话结束后清除保管的明文副本。
-- `binding:{"type":"external"}`：外部 Agent（Claude Code / Codex / CI）。用 `GET .../inbox?wait=30` 长轮询领任务（最长 60 秒），`POST .../inbox/ack` 确认。
+- `binding:{"type":"external"}`：外部 Agent（Claude Code / Codex / CI）。用 `GET .../inbox?wait=30` 长轮询领任务（最长 60 秒），`POST .../inbox/ack` 确认。**中枢不会主动唤醒 external 参与者**：如果没有人拿着它的 participantToken 去轮询，事件日志里会出现 `task_assigned` 但没有任何 Agent 开工。登错了可以改绑：
+  `POST /sessions/{sessionId}/participants/{participantId}/binding -d '{"agentId":"agent-..."}'`（传空体 `{}` 则改回 external）——改绑会轮换 participantToken，并把已在 inbox 里的任务立即推给新绑定的 Agent。
 
 **中枢是推送式的**：任何一方交完自己的活就应当结束回合，绝不要 sleep 轮询等别人。评审方提交完 findings、开发方要回应时，中枢会主动把任务推给开发 Agent；会话结束时也会推一条 `session_result` 收尾消息，所以没有人需要守着等结果。托管 Agent 的唤醒消息里明确写了这条规则。
 

@@ -70,6 +70,12 @@ export class CollabRouter {
         return ok({participant:created,participantToken:token,briefing:this.hub.digest(created)},201);
       }
       if(method==='GET')return ok(this.hub.store.listParticipants(sessionId).map(entry=>({...entry})));
+      // .../participants/{participantId}/binding — repairs a seat that was registered with the wrong binding.
+      if(method==='POST'&&sub&&parts[7]==='binding'){
+        human('Rebinding a participant');
+        const {participant:bound,token}=this.hub.rebindParticipant(sessionId,sub,await ctx.body());
+        return ok({participant:bound,participantToken:bound.binding.type==='external'?token:undefined});
+      }
     }
     if(method==='POST'&&tail==='advance'){human('Advancing a phase');return ok(await this.hub.advance(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='policy'){human('Changing the policy');return ok(this.hub.updatePolicy(sessionId,await ctx.body()))}

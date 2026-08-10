@@ -119,6 +119,31 @@ describe('collab dispatcher',()=>{
     expect(sent.map(entry=>entry.agentId)).toEqual(['agent-1']);
   });
 
+  it('rebinds a seat that was registered as external and delivers the task it already had',async()=>{
+    const created=await hub.createSession({kind:'review',title:'Payment callback review',workspaceId:'ws-1',subject:{type:'commit_range',value:'HEAD~1..HEAD'},policy:{implementationFirst:true}},async()=>dir);
+    // The trap this fixes: an implementer registered as `external` looks assigned in the log but nobody wakes it.
+    const impl=hub.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',binding:{type:'external'}});
+    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'external'}});
+    await hub.openRound(created.sessionId);
+    await dispatcher.drain();
+    expect(sent).toHaveLength(0);
+
+    const rebound=hub.rebindParticipant(created.sessionId,impl.participant.participantId,{agentId:'agent-dev'});
+    await dispatcher.drain();
+    expect(rebound.participant.binding).toEqual({type:'managed',agentId:'agent-dev'});
+    expect(sent).toHaveLength(1);
+    expect(sent[0].agentId).toBe('agent-dev');
+    expect(sent[0].message).toContain('task now due: implement');
+    expect(sent[0].message).toContain(rebound.token);        // the rotated token, not the one handed out at registration
+    expect(store.findParticipantByToken(impl.token)).toBeUndefined();
+  });
+
+  it('refuses an external binding that carries an agentId instead of silently ignoring it',async()=>{
+    const created=await session();
+    expect(()=>hub.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',binding:{type:'external',agentId:'agent-1'}}))
+      .toThrow(/binding\.agentId/);
+  });
+
   it('releases a long-polling inbox as soon as a task arrives',async()=>{
     const created=await session();
     const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'external'}});

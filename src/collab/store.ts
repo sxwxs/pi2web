@@ -186,6 +186,16 @@ export class CollabStore {
     return row?participantFrom(row):undefined;
   }
   listParticipants(sessionId:string):Participant[]{return (this.db.prepare('SELECT * FROM collab_participants WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[]).map(participantFrom)}
+  /**
+   * Moves a seat between `managed` and `external`. The token is rotated because the old one may already be in the
+   * hands of whoever used to hold the seat, and a managed seat needs a plaintext token the hub can hand over.
+   */
+  rebindParticipant(participantId:string,agentId?:string):{participant:Participant,token:string}{
+    const token=`cpt_${randomUUID().replace(/-/g,'')}${randomUUID().replace(/-/g,'')}`;
+    this.db.prepare('UPDATE collab_participants SET binding_type=?,agent_id=?,token_hash=?,dispatch_token=? WHERE id=?')
+      .run(agentId?'managed':'external',agentId??null,hashToken(token),agentId?token:null,participantId);
+    return {participant:this.getParticipant(participantId),token};
+  }
   updateParticipant(participantId:string,patch:Partial<Pick<Participant,'state'|'tokensUsed'|'tokenBudget'|'tokensEstimated'|'lastSeenAt'|'model'>>):Participant{
     const current=this.getParticipant(participantId);
     this.db.prepare('UPDATE collab_participants SET state=?,tokens_used=?,token_budget=?,tokens_estimated=?,last_seen_at=?,model=? WHERE id=?').run(
