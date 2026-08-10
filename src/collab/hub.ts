@@ -4,7 +4,7 @@ import {promisify} from 'node:util';
 import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type InboxItem,type Issue,type Participant,type ReviewPhase,type ScoringPhase} from './types.js';
 import {CollabStore,type CreateSessionInput} from './store.js';
 import {ValidationError,parse,type FieldError} from './validate.js';
-import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,policyPatch,readyRequest,resolveEscalationRequest,responsesRequest,scoresRequest,verdictsRequest,votesRequest} from './schemas.js';
+import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,policyPatch,readyRequest,rebindParticipantRequest,resolveEscalationRequest,responsesRequest,scoresRequest,verdictsRequest,votesRequest} from './schemas.js';
 import {analyse,assertScoringCapability,assertScoringPhase,approvedCriteria,contestedCriteria,finalizeScores,isScoringReadyToAdvance,lockRubric,nextScoringPhase,nominationsSealed,scoresSealed,scoringPanel,scoringProgress,scoringWaitingOn,tallyVotes,votesSealed,type ScoringSnapshot} from './scoring-flow.js';
 import {applyEscalation,applyHumanRuling,applyResponse,applyVerdict,applyWithdraw,approvalSummary,assertCanFileFinding,assertCapability,canSeeOthersFindings,flowError,isOpenIssue,isReadyToAdvance,nextPhase,sessionProgress,stallCheck,waitingOn,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from './review-flow.js';
 
@@ -93,6 +93,8 @@ export class CollabHub {
   addParticipant(sessionId:string,body:unknown){
     const input=parse(createParticipantRequest,body),session=this.store.getSession(sessionId);
     if(input.binding.type==='managed'&&!input.binding.agentId)throw new ValidationError([fieldError('binding.agentId','REQUIRED','A managed participant must reference an agentId')]);
+    // Silently dropping the agentId is how a session ends up with participants nobody ever wakes: reject it instead.
+    if(input.binding.type==='external'&&input.binding.agentId)throw new ValidationError([fieldError('binding.agentId','UNEXPECTED','An external participant polls the inbox itself; use binding.type=managed to have the hub wake that agent')]);
     // One agent may not hold two seats: a single model must not be able to vote twice.
     if(input.binding.agentId&&this.store.listParticipants(sessionId).some(existing=>existing.binding.agentId===input.binding.agentId))
       throw flowError(COLLAB_ERRORS.conflict,'That agent is already registered in this session');
@@ -105,6 +107,27 @@ export class CollabHub {
       this.record(sessionId,'task_assigned',{participantId:participant.participantId,task:'nominate_criteria',phase:session.phase,round:session.round});
     }
     return {participant,token,session};
+  }
+  /**
+   * Repairs a mis-registered seat: `external` <-> `managed`. Without it, the only way out of "the hub never wakes
+   * anybody" is to throw the session away. The token is rotated, and any task still sitting in the inbox is
+   * re-announced so the dispatcher picks the participant up immediately.
+   */
+  rebindParticipant(sessionId:string,participantId:string,body:unknown){
+    const input=parse(rebindParticipantRequest,body),session=this.store.getSession(sessionId);
+    const current=this.store.getParticipant(participantId);
+    if(current.sessionId!==sessionId)throw flowError(COLLAB_ERRORS.participantNotFound,'Participant not found in this session',404);
+    if(session.status!=='active')throw flowError(COLLAB_ERRORS.wrongPhase,'A finished session cannot be rebound');
+    const agentId=input.agentId?.trim()||undefined;
+    if(agentId&&this.store.listParticipants(sessionId).some(other=>other.participantId!==participantId&&other.binding.agentId===agentId))
+      throw flowError(COLLAB_ERRORS.conflict,'That agent is already registered in this session');
+    const {participant,token}=this.store.rebindParticipant(participantId,agentId);
+    this.record(sessionId,'participant_rebound',{participantId,binding:participant.binding,previousBinding:current.binding});
+    // The dispatcher reacts to `task_assigned`, so a task queued while the seat was external still gets delivered.
+    if(participant.binding.type==='managed')
+      for(const item of this.store.listInbox(participantId))
+        this.record(sessionId,'task_assigned',{participantId,task:item.type,phase:session.phase,round:session.round,reason:'rebound'});
+    return {participant,token};
   }
   /** Moves a review session out of draft. Build-then-review sessions start in `implementing`; the rest go straight to `collecting`. */
   async openRound(sessionId:string){

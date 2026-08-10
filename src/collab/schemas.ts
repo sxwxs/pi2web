@@ -115,6 +115,11 @@ export const createParticipantRequest=obj({
   tokenBudget:optional(num({integer:true,min:100,max:100_000_000}))
 });
 
+export const rebindParticipantRequest=obj({
+  /** Empty/absent means "make this seat external again"; a local agentId means "the hub wakes this agent". */
+  agentId:optional(str({max:200}))
+});
+
 export const advanceRequest=obj({
   force:withDefault(bool(),()=>false),
   reason:withDefault(str({max:2000}),()=>'')

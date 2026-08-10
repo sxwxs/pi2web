@@ -112,8 +112,34 @@
   function renderWorkspaces() {
     $('newWorkspace').innerHTML = state.workspaces.map(workspace => `<option value="${esc(workspace.id)}">${esc(workspace.label)}</option>`).join('');
   }
+  /** Local agents that may still take a seat: the hub rejects the same agentId twice in one session. */
+  const availableAgents = session => {
+    const taken = new Set((session.participants || []).map(participant => participant.binding.agentId).filter(Boolean));
+    return state.agents.filter(agent => !taken.has(agent.agentId));
+  };
+  /** external 参与者只会拿到一个 inbox 条目，中枢不会替你启动它们——这一点必须写在人眼能看到的地方。 */
+  const externalHint = session => {
+    const external = (session.participants || []).filter(participant => participant.binding.type === 'external');
+    if (!external.length) return '';
+    return `<p class="pill yellow" style="display:block">有 ${external.length} 个 external 参与者（${esc(external.map(entry => entry.displayName).join('、'))}）：
+      中枢只会把任务放进它们的 inbox，不会主动唤醒。请用它们的 participantToken 轮询
+      <code>GET /api/v1/collab/sessions/${esc(session.sessionId)}/inbox?wait=30</code>，否则会话会一直停在当前阶段。
+      想让中枢自动唤醒，请在“绑定 Agent”里选一个本机 Agent（managed）。</p>`;
+  };
+  /** innerHTML 重建会清空正在填写的表单；刷新由每条 hub 事件触发，所以必须显式保存草稿。 */
+  const PARTICIPANT_FIELDS = ['pRole', 'pName', 'pAgent', 'pModel'];
+  const readParticipantDraft = () => PARTICIPANT_FIELDS.map(id => [id, $(id)?.value ?? '']).filter(([, value]) => value !== '');
+  const restoreParticipantDraft = draft => {
+    for (const [id, value] of draft) {
+      const field = $(id);
+      if (!field) continue;
+      if (field.tagName === 'SELECT' && ![...field.options].some(option => option.value === value)) continue;
+      field.value = value;
+    }
+  };
   function renderDetail() {
     if (!state.detail) {$('detail').innerHTML = '<p class="muted">选择左侧的协作会话，或先创建一个。</p>'; return}
+    const draft = readParticipantDraft();
     const {session, issues, events, escalations, criteria} = state.detail;
     const progress = session.progress || {};
     const pending = escalations.filter(entry => entry.status === 'pending');
@@ -139,16 +165,17 @@
           ${(session.participants || []).map(participant => `<tr>
             <td>${esc(participant.displayName)}<br><small class="muted">${esc(participant.participantId)}</small></td>
             <td>${esc(participant.role)}</td>
-            <td>${esc(participant.binding.type)}${participant.binding.agentId ? `<br><small class="muted">${esc(participant.binding.agentId)}</small>` : ''}</td>
+            <td>${esc(participant.binding.type)}${participant.binding.agentId ? `<br><small class="muted">${esc(participant.binding.agentId)}</small>` : ''}
+              <br><button type="button" class="rebind" data-participant="${esc(participant.participantId)}">改绑…</button></td>
             <td>${esc(participant.model || '-')}</td>
             <td>${participant.tokensUsed}/${participant.tokenBudget}${participant.tokensEstimated ? ' <small class="muted">(估算)</small>' : ''}</td>
             <td>${esc(participant.state)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">还没有参与者</td></tr>'}
         </tbody></table>
+        ${externalHint(session)}
         <form id="participantForm" class="row" style="margin-top:10px">
           <label>角色<select id="pRole"><option value="reviewer">reviewer</option><option value="implementer">implementer</option><option value="moderator">moderator</option></select></label>
           <label>名称<input id="pName" required placeholder="reviewer-security"></label>
-          <label>绑定<select id="pBinding"><option value="external">external（自建 Agent 轮询）</option><option value="managed">managed（本机 Agent，自动唤醒）</option></select></label>
-          <label>Agent<select id="pAgent"><option value="">—</option>${state.agents.map(agent => `<option value="${esc(agent.agentId)}">${esc(agent.sessionName || agent.agentId)}</option>`).join('')}</select></label>
+          <label>绑定 Agent<select id="pAgent"><option value="">external —— 自建 Agent，自行轮询 /inbox</option>${availableAgents(session).map(agent => `<option value="${esc(agent.agentId)}">managed —— ${esc(agent.sessionName || agent.agentId)}${agent.status ? ` (${esc(agent.status)})` : ''}</option>`).join('')}</select></label>
           <label>模型标注<input id="pModel" placeholder="anthropic/claude-sonnet-4" size="18"></label>
           <button type="submit">登记参与者</button>
         </form>
@@ -189,6 +216,7 @@
       <div class="card"><h3>事件（最新 ${Math.min(events.length, 60)} 条）</h3>
         <div class="events">${events.slice(-60).reverse().map(event => `<div><span class="muted">${esc(event.createdAt.slice(11, 19))}</span> <b>${esc(event.type)}</b> ${esc(JSON.stringify(event.payload).slice(0, 240))}</div>`).join('') || '<span class="muted">暂无事件</span>'}</div>
       </div>`;
+    restoreParticipantDraft(draft);
     bindDetail();
   }
 
@@ -213,14 +241,29 @@
     }
     const participantForm = $('participantForm');
     if (participantForm) participantForm.onsubmit = guard(async () => {
-      const bindingType = $('pBinding').value, agentId = $('pAgent').value;
-      if (bindingType === 'managed' && !agentId) throw Error('managed 参与者必须选择一个本机 Agent');
+      // The chosen agent *is* the binding: an agentId sent with binding=external used to be dropped silently,
+      // which produced sessions whose participants nobody ever woke up.
+      const agentId = $('pAgent').value, managed = !!agentId;
       const result = await post(`/api/v1/collab/sessions/${sessionId}/participants`, {
         role: $('pRole').value, displayName: $('pName').value.trim(), ...($('pModel').value.trim() ? {model: $('pModel').value.trim()} : {}),
-        binding: bindingType === 'managed' ? {type: 'managed', agentId} : {type: 'external'}
+        binding: managed ? {type: 'managed', agentId} : {type: 'external'}
       });
-      state.lastToken = bindingType === 'managed' ? null : result.participantToken;
-      toast(bindingType === 'managed' ? '已登记，中枢会在有任务时自动唤醒该 Agent' : '已登记，请复制 participantToken');
+      $('pName').value = ''; $('pModel').value = ''; $('pAgent').value = '';
+      state.lastToken = managed ? null : result.participantToken;
+      toast(managed ? '已登记，中枢会在有任务时自动唤醒该 Agent' : '已登记为 external：请复制 participantToken 并自行启动该 Agent，中枢不会唤醒它');
+    });
+    for (const button of $('detail').querySelectorAll('.rebind')) button.onclick = guard(async () => {
+      const session = state.detail.session, choices = availableAgents(session);
+      const answer = prompt([
+        '输入要绑定的本机 Agent 序号（managed，中枢会自动唤醒），或留空改为 external：',
+        ...choices.map((agent, index) => `${index + 1}. ${agent.sessionName || agent.agentId}${agent.status ? ` (${agent.status})` : ''}`)
+      ].join('\n'), '');
+      if (answer === null) return;
+      const picked = answer.trim() ? choices[Number(answer.trim()) - 1] : undefined;
+      if (answer.trim() && !picked) throw Error('序号无效');
+      const result = await post(`/api/v1/collab/sessions/${sessionId}/participants/${button.dataset.participant}/binding`, picked ? {agentId: picked.agentId} : {});
+      state.lastToken = result.participantToken || null;
+      toast(picked ? '已改为 managed，待办任务会立即推送给该 Agent' : '已改为 external，旧 token 已失效，请复制新的 participantToken');
     });
     for (const form of $('detail').querySelectorAll('.resolve-form')) form.onsubmit = guard(async () => {
       const data = new FormData(form), issueDecision = String(data.get('issueDecision') || '');
