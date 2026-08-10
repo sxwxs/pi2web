@@ -228,7 +228,12 @@ export class CollabStore {
   }
   listEvents(sessionId:string,since=0,limit=500):CollabEvent[]{
     const rows=this.db.prepare('SELECT * FROM collab_events WHERE session_id=? AND sequence>? ORDER BY sequence LIMIT ?').all(sessionId,Math.max(0,Math.trunc(since)),Math.min(2000,Math.max(1,Math.trunc(limit)))) as any[];
-    return rows.map(row=>({sessionId:row.session_id,sequence:row.sequence,eventId:row.id,type:row.type,actorId:row.actor_id??undefined,payload:json(row.payload_json,{}),createdAt:iso(row.created_at)}));
+    return rows.map(eventFrom);
+  }
+  /** The newest `limit` events, still returned oldest-first. A UI that wants "the latest" cannot page from 0. */
+  listRecentEvents(sessionId:string,limit=200):CollabEvent[]{
+    const rows=this.db.prepare('SELECT * FROM collab_events WHERE session_id=? ORDER BY sequence DESC LIMIT ?').all(sessionId,Math.min(2000,Math.max(1,Math.trunc(limit)))) as any[];
+    return rows.reverse().map(eventFrom);
   }
 
   // ---- baselines ----
@@ -426,6 +431,7 @@ const participantFrom=(row:any):Participant=>({
   tokenBudget:row.token_budget,tokensUsed:row.tokens_used,tokensEstimated:!!row.tokens_estimated,
   createdAt:iso(row.created_at),lastSeenAt:row.last_seen_at?iso(row.last_seen_at):undefined
 });
+const eventFrom=(row:any):CollabEvent=>({sessionId:row.session_id,sequence:row.sequence,eventId:row.id,type:row.type,actorId:row.actor_id??undefined,payload:json(row.payload_json,{}),createdAt:iso(row.created_at)});
 const baselineFrom=(row:any):Baseline=>({baselineId:row.id,sessionId:row.session_id,round:row.round,vcs:row.vcs,commit:row.commit_sha??undefined,range:row.range_expr??undefined,dirtyHash:row.dirty_hash??undefined,paths:json(row.paths_json,[] as string[]),capturedAt:iso(row.captured_at)});
 const issueFrom=(row:any):Issue=>({
   issueId:row.id,sessionId:row.session_id,externalId:row.external_id??undefined,reporterId:row.reporter_id,targetParticipantId:row.target_participant_id,

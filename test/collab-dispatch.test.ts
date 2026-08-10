@@ -119,6 +119,44 @@ describe('collab dispatcher',()=>{
     expect(sent.map(entry=>entry.agentId)).toEqual(['agent-1']);
   });
 
+  it('delivers the closing note to every managed seat and only retires the credential it used',async()=>{
+    const created=await session();
+    const first=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-a',binding:{type:'managed',agentId:'agent-1'}});
+    const second=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-b',binding:{type:'managed',agentId:'agent-2'}});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    await hub.openRound(created.sessionId);
+    await dispatcher.drain();
+    for(const seat of [first,second])
+      await hub.submitFindings(seat.participant,{clientRequestId:rid(),baselineId:(hub.digest(seat.participant) as any).baseline.baselineId,findings:[],reviewComplete:true});
+    await dispatcher.drain();
+
+    // Both agents must be told the session is over: retiring the whole session's tokens on the first delivery
+    // used to leave the second one without a credential, so its closing note was silently dropped.
+    const closing=sent.filter(entry=>entry.message.includes('is finished'));
+    expect(closing.map(entry=>entry.agentId).sort()).toEqual(['agent-1','agent-2']);
+    expect(store.getDispatchToken(first.participant.participantId)).toBeUndefined();
+    expect(store.getDispatchToken(second.participant.participantId)).toBeUndefined();
+  });
+
+  it('delivers a closing note that was queued but never dispatched before a restart',async()=>{
+    const created=await session();
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'managed',agentId:'agent-1'}});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    await hub.openRound(created.sessionId);
+    await dispatcher.drain();
+    sent.length=0;
+    await dispatcher.stop();                              // the process dies between announceFinish() and delivery
+    await hub.submitFindings(reviewer.participant,{clientRequestId:rid(),baselineId:(hub.digest(reviewer.participant) as any).baseline.baselineId,findings:[],reviewComplete:true});
+    expect(store.getSession(created.sessionId).status).toBe('finished');
+    expect(sent).toHaveLength(0);
+
+    const restarted=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    restarted.start();
+    await restarted.drain();
+    await restarted.stop();
+    expect(sent.at(-1)?.message).toContain('is finished');
+  });
+
   it('rebinds a seat that was registered as external and delivers the task it already had',async()=>{
     const created=await hub.createSession({kind:'review',title:'Payment callback review',workspaceId:'ws-1',subject:{type:'commit_range',value:'HEAD~1..HEAD'},policy:{implementationFirst:true}},async()=>dir);
     // The trap this fixes: an implementer registered as `external` looks assigned in the log but nobody wakes it.

@@ -100,6 +100,8 @@ describe('collaboration HTTP API',()=>{
     expect((await call('POST',`/api/v1/collab/sessions/${first.sessionId}/participants`,{role:'reviewer',displayName:'r2',binding:{type:'external'}},token)).status).toBe(403);
     expect((await call('POST',`/api/v1/collab/sessions/${first.sessionId}/advance`,{force:true,reason:'because I said so'},token)).status).toBe(403);
     expect((await call('GET','/api/v1/collab/escalations',undefined,token)).status).toBe(403);
+    // The close-out report lists every issue and escalation, so it is a human view even inside the own session.
+    expect((await call('GET',`/api/v1/collab/sessions/${first.sessionId}/report`,undefined,token)).status).toBe(403);
 
     const leak=await call('GET',`/api/v1/collab/sessions/${second.sessionId}`,undefined,token);
     expect(leak.status).toBe(404);

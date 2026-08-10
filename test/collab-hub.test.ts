@@ -270,6 +270,48 @@ describe('collab hub',()=>{
     const tail=hub.events(session.sessionId,all.length-1);
     expect(tail).toHaveLength(1);
     expect(events.at(-1)?.sequence).toBe(all.length);
+    // The tail view is what a board needs: paging from sequence 0 stops showing new activity once the log grows.
+    expect(hub.recentEvents(session.sessionId,2).map(event=>event.sequence)).toEqual([all.length-1,all.length]);
+  });
+
+  it('withholds another participant\'s sealed submissions from the event timeline',async()=>{
+    const {session,r1,r2}=await setup();
+    await fileFindings(r1,[finding()],false);
+    const seen=hub.events(session.sessionId,0,500,r2).filter(event=>event.type==='issue_opened');
+    expect(seen).toHaveLength(1);
+    expect(seen[0].payload).toMatchObject({redacted:true});
+    // The reporter still sees its own, and a human sees everything.
+    expect(hub.events(session.sessionId,0,500,r1).find(event=>event.type==='issue_opened')?.payload.title).toBeTruthy();
+    expect(hub.events(session.sessionId).find(event=>event.type==='issue_opened')?.payload.title).toBeTruthy();
+    // Once collection closes there is nothing left to hide.
+    await fileFindings(r1,[],true);
+    await fileFindings(r2,[],true);
+    expect(hub.events(session.sessionId,0,500,r2).find(event=>event.type==='issue_opened')?.payload.title).toBeTruthy();
+  });
+
+  it('gives a late participant the current task and refuses a seat the phase cannot assign',async()=>{
+    const {session,r1,r2,impl}=await setup();
+    const late=addParticipant(session.sessionId,'reviewer','reviewer-late').participant;
+    expect(store.listInbox(late.participantId).map(item=>item.type)).toEqual(['file_findings']);
+    expect(hub.progress(session.sessionId).waitingOn).toContain(late.participantId);
+    for(const reviewer of [r1,r2,late])await fileFindings(reviewer,[finding()],true);
+    expect(hub.getSession(session.sessionId).phase).toBe('responding');
+    expect(()=>addParticipant(session.sessionId,'reviewer','reviewer-too-late')).toThrow(/can only be registered in phase/);
+    expect(hub.digest(impl)).toMatchObject({task:'respond_to_issues'});
+  });
+
+  it('applies the structured action of a non-issue escalation instead of only recording it',async()=>{
+    const session=await newSession();
+    const reviewer=addParticipant(session.sessionId,'reviewer','reviewer-security',{tokenBudget:100}).participant;
+    addParticipant(session.sessionId,'implementer','implementer');
+    await hub.openRound(session.sessionId);
+    await fileFindings(reviewer,[finding()],false);
+    const escalation=hub.listEscalations({status:'pending'})[0];
+    await hub.resolveEscalation(escalation.escalationId,{decision:'raise budget',rationale:'The review is worth another 50k tokens.',extra:{tokenBudget:50_000}});
+    const restored=store.getParticipant(reviewer.participantId);
+    expect(restored).toMatchObject({state:'active',tokenBudget:50_000});
+    expect(typeOf('budget_raised')).toHaveLength(1);
+    await expect(fileFindings(restored,[finding()],true)).resolves.toMatchObject({round:1});
   });
 });
 

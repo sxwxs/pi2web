@@ -37,8 +37,9 @@
     state.base = candidateBase; state.token = token.trim(); state.connected = true;
     localStorage.rpBase = state.base;
     // Same rule as the main console: the code is only persisted when the user asks for it on this device.
+    // Unchecking must always clear it, including when the saved code is the one just used to reconnect.
     if ($('pairRemember').checked) localStorage.rpToken = state.token;
-    else if (localStorage.rpToken && localStorage.rpToken !== state.token) localStorage.removeItem('rpToken');
+    else localStorage.removeItem('rpToken');
     $('status').className = 'ok'; $('status').textContent = '已配对';
     $('pairDialog').close();
     openSocket();
@@ -82,7 +83,8 @@
     const session = await api(`/api/v1/collab/sessions/${sessionId}`);
     const [issues, events, escalations, criteria] = await Promise.all([
       api(`/api/v1/collab/sessions/${sessionId}/issues`).catch(() => []),
-      api(`/api/v1/collab/sessions/${sessionId}/events?limit=200`).catch(() => []),
+      // `tail` asks for the newest events; paging from sequence 0 would freeze the timeline after 200 events.
+      api(`/api/v1/collab/sessions/${sessionId}/events?tail=200`).catch(() => []),
       api(`/api/v1/collab/escalations?sessionId=${sessionId}`).catch(() => []),
       session.kind === 'scoring' ? api(`/api/v1/collab/sessions/${sessionId}/criteria`).catch(() => []) : Promise.resolve([])
     ]);
@@ -141,6 +143,29 @@
       field.value = value;
     }
   };
+  /**
+   * 结算只在 awaiting_human 阶段出现，而且必须为每个争议维度填一个合法分数：
+   * 空 rulings 会让中枢用 0 分关掉一个还没结束的会话。
+   */
+  const finalizeCard = (session, criteria) => {
+    if (session.kind !== 'scoring' || session.phase !== 'awaiting_human' || session.status !== 'active') return '';
+    const contested = (session.progress && session.progress.contested) || [];
+    const scale = session.policy?.scoring?.scale || {min: 0, max: 10, step: 1};
+    if (!contested.length) return `<div class="card"><h3>人工结算评分</h3><p class="muted">没有争议维度需要裁定；请先处理其它待裁定项。</p></div>`;
+    const name = criterionId => (criteria.find(entry => entry.criterionId === criterionId) || {}).name || criterionId;
+    return `<div class="card">
+      <h3><span class="pill yellow">人工结算评分</span></h3>
+      <p class="muted">面板在 ${contested.length} 个维度上没有收敛，请为每个维度给出最终分（${scale.min}–${scale.max}，步长 ${scale.step}）。</p>
+      <form id="finalizeForm">
+        ${contested.map(criterionId => `<div class="row" data-criterion="${esc(criterionId)}">
+          <label>${esc(name(criterionId))}<input name="score-${esc(criterionId)}" type="number" required
+            min="${scale.min}" max="${scale.max}" step="${scale.step}" style="width:90px"></label>
+          <label style="flex:1">理由（≥10 字符）<input name="rationale-${esc(criterionId)}" required minlength="10"></label>
+        </div>`).join('')}
+        <div class="row"><button type="submit">结算并结束会话</button></div>
+      </form>
+    </div>`;
+  };
   function renderDetail() {
     if (!state.detail) {$('detail').innerHTML = '<p class="muted">选择左侧的协作会话，或先创建一个。</p>'; return}
     const draft = readParticipantDraft();
@@ -159,7 +184,6 @@
         <div class="row">
           <button data-action="advance">推进阶段</button>
           <button data-action="force">强制推进…</button>
-          ${session.kind === 'scoring' ? '<button data-action="finalize">结算评分</button>' : ''}
         </div>
       </div>
 
@@ -195,14 +219,18 @@
           <p>${esc(entry.summary)}</p><p><b>问题：</b>${esc(entry.question)}</p>
           ${entry.options.length ? `<p class="muted">候选：${esc(entry.options.join(' / '))}</p>` : ''}
           ${entry.positions.length ? `<details class="raw"><summary>各方立场</summary><pre>${esc(JSON.stringify(entry.positions, null, 2))}</pre></details>` : ''}
-          <form class="row resolve-form" data-escalation="${esc(entry.escalationId)}" style="margin-top:8px">
+          ${entry.kind === 'score_dispute'
+            ? '<p class="muted">评分争议在下方“人工结算评分”里一次性裁定（需要每个争议维度的分数），提交后本条自动关闭。</p>'
+            : `<form class="row resolve-form" data-escalation="${esc(entry.escalationId)}" style="margin-top:8px">
             <label>裁定<input name="decision" required placeholder="fix in this round"></label>
             <label style="flex:1">理由（≥10 字符）<input name="rationale" required></label>
             ${entry.refId && entry.kind === 'issue_dispute' ? `<label>Issue 处理<select name="issueDecision"><option value="">不改状态</option><option value="resolved">resolved</option><option value="wontfix">wontfix</option><option value="closed">closed</option><option value="reopen">reopen</option></select></label>` : ''}
             <button type="submit">提交裁定</button>
-          </form>
+          </form>`}
         </div>`).join('')}
       </div>` : ''}
+
+      ${finalizeCard(session, criteria)}
 
       ${session.kind === 'review' ? `<div class="card">
         <h3>Issues（${issues.length}）</h3>
@@ -242,9 +270,23 @@
           await post(`/api/v1/collab/sessions/${sessionId}/advance`, {force: true, reason});
           toast('已强制推进');
         }
-        if (action === 'finalize') {await post(`/api/v1/collab/sessions/${sessionId}/finalize`, {rulings: []}); toast('已结算')}
       });
     }
+    const finalizeForm = $('finalizeForm');
+    if (finalizeForm) finalizeForm.onsubmit = guard(async () => {
+      const session = state.detail.session, scale = session.policy?.scoring?.scale || {min: 0, max: 10, step: 1};
+      const data = new FormData(finalizeForm);
+      const rulings = [...finalizeForm.querySelectorAll('[data-criterion]')].map(row => {
+        const criterionId = row.dataset.criterion, score = Number(data.get(`score-${criterionId}`));
+        if (!Number.isFinite(score) || score < scale.min || score > scale.max) throw Error(`分数必须在 ${scale.min}–${scale.max} 之间`);
+        if (Math.abs((score - scale.min) / scale.step - Math.round((score - scale.min) / scale.step)) > 1e-9) throw Error(`分数必须是 ${scale.step} 的整数倍`);
+        const rationale = String(data.get(`rationale-${criterionId}`) || '').trim();
+        if (rationale.length < 10) throw Error('每个维度的裁定都需要至少 10 个字符的理由');
+        return {criterionId, score, rationale};
+      });
+      await post(`/api/v1/collab/sessions/${sessionId}/finalize`, {rulings});
+      toast('已结算');
+    });
     const participantForm = $('participantForm');
     if (participantForm) participantForm.onsubmit = guard(async () => {
       // The chosen agent *is* the binding: an agentId sent with binding=external used to be dropped silently,
