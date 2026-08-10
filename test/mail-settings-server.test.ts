@@ -14,8 +14,8 @@ describe('mail notification settings API',()=>{
     const dataDir=await mkdtemp(path.join(tmpdir(),'remote-pi-mail-'));
     server=new RemotePiServer({port:0,dataDir,mailNotifier:notifier()});const auth=await server.auth.init(),address=await server.start(),base=`http://127.0.0.1:${address!.port}`,headers={authorization:`Bearer ${auth.token}`,'content-type':'application/json'};
     const initial=(await (await fetch(base+'/api/v1/mail-notifications',{headers})).json()).data;expect(initial).toMatchObject({available:true,settings:{enabled:true,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true}});
-    const updated=(await (await fetch(base+'/api/v1/mail-notifications',{method:'POST',headers,body:JSON.stringify({enabled:false,aggregationDelaySeconds:90,includeResponse:false,includeSessionDetails:true})})).json()).data.settings;
-    expect(updated).toEqual({enabled:false,aggregationDelaySeconds:90,includeResponse:false,includeSessionDetails:true});
+    const updated=(await (await fetch(base+'/api/v1/mail-notifications',{method:'POST',headers,body:JSON.stringify({enabled:false,aggregationDelaySeconds:90,includeResponse:false,includeSessionDetails:true,collabEscalations:false})})).json()).data.settings;
+    expect(updated).toEqual({enabled:false,aggregationDelaySeconds:90,includeResponse:false,includeSessionDetails:true,collabEscalations:false});
     await server.stop();server=new RemotePiServer({port:0,dataDir,mailNotifier:notifier()});const restarted=await server.start();const persisted=(await (await fetch(`http://127.0.0.1:${restarted!.port}/api/v1/mail-notifications`,{headers})).json()).data.settings;expect(persisted).toEqual(updated);
   });
 });

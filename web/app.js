@@ -8,7 +8,7 @@
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
     voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve(),generation:0}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
-    mailNotificationsAvailable:false,mailSettings:{enabled:false,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true},
+    mailNotificationsAvailable:false,mailSettings:{enabled:false,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true,collabEscalations:true},
   };
   $('api').value = state.base;
   $('pairBase').value = state.base;
@@ -500,8 +500,8 @@
   }
   function updateMailControls(){
     const available=state.connected&&state.mailNotificationsAvailable,settings=state.mailSettings;
-    $('mailNotificationEnabled').checked=!!settings.enabled;$('mailAggregationDelay').value=String(settings.aggregationDelaySeconds??0);$('mailIncludeResponse').checked=!!settings.includeResponse;$('mailIncludeSessionDetails').checked=!!settings.includeSessionDetails;
-    for(const id of ['mailNotificationEnabled','mailAggregationDelay','mailIncludeResponse','mailIncludeSessionDetails','configSave'])$(id).disabled=!available;
+    $('mailNotificationEnabled').checked=!!settings.enabled;$('mailAggregationDelay').value=String(settings.aggregationDelaySeconds??0);$('mailIncludeResponse').checked=!!settings.includeResponse;$('mailIncludeSessionDetails').checked=!!settings.includeSessionDetails;$('mailCollabEscalations').checked=!!settings.collabEscalations;
+    for(const id of ['mailNotificationEnabled','mailAggregationDelay','mailIncludeResponse','mailIncludeSessionDetails','mailCollabEscalations','configSave'])$(id).disabled=!available;
     $('mailNotificationAvailability').textContent=!state.connected?'连接服务后可以配置邮件通知。':available?'MailDispatch 已在服务端配置。设置对所有 Agent 和客户端生效。':'服务端启动时未配置 MailDispatch endpoint、API key 和通知邮箱。';
   }
   function updateConfigUi(){
@@ -512,7 +512,7 @@
     if(!requireConnection())return;if(!state.mailNotificationsAvailable)return toast('服务端未配置 MailDispatch');
     const delay=Number($('mailAggregationDelay').value);if(!Number.isInteger(delay)||delay<0||delay>86400)return toast('聚合时间必须是 0 到 86400 之间的整数秒');
     $('configSave').disabled=true;
-    try{const result=await post('/api/v1/mail-notifications',{enabled:$('mailNotificationEnabled').checked,aggregationDelaySeconds:delay,includeResponse:$('mailIncludeResponse').checked,includeSessionDetails:$('mailIncludeSessionDetails').checked});state.mailSettings=result.settings;updateMailControls();toast('邮件通知设置已保存');}
+    try{const result=await post('/api/v1/mail-notifications',{enabled:$('mailNotificationEnabled').checked,aggregationDelaySeconds:delay,includeResponse:$('mailIncludeResponse').checked,includeSessionDetails:$('mailIncludeSessionDetails').checked,collabEscalations:$('mailCollabEscalations').checked});state.mailSettings=result.settings;updateMailControls();toast('邮件通知设置已保存');}
     catch(error){toast(error.message)}finally{$('configSave').disabled=!state.mailNotificationsAvailable;}
   }
 

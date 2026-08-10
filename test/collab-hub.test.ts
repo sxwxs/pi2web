@@ -177,6 +177,11 @@ describe('collab hub',()=>{
     expect(hub.getSession(session.sessionId).stalled?.waitingOn).toEqual([expect.any(String)]);
     expect(hub.getSession(session.sessionId).phase).toBe('collecting');
 
+    // Writing the stall flag bumps updatedAt, so a second sweep must not "un-stall" the session (and re-alert later).
+    clock+=60*1000;
+    expect(hub.checkStalls()).toEqual([]);
+    expect(hub.getSession(session.sessionId).stalled?.waitingOn).toEqual([expect.any(String)]);
+
     await expect(hub.advance(session.sessionId,{force:false})).rejects.toMatchObject({code:'COLLAB_WRONG_PHASE'});
     await expect(hub.advance(session.sessionId,{force:true})).rejects.toBeInstanceOf(ValidationError);
     await hub.advance(session.sessionId,{force:true,reason:'reviewer-correctness crashed and will not return'});

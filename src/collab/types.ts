@@ -3,10 +3,10 @@
 export type CollabKind='review'|'scoring';
 export type SessionStatus='active'|'finished'|'aborted';
 /** Review phases. `stalled` is a flag on the session, never a phase: timeouts must not advance anything. */
-export type ReviewPhase='draft'|'collecting'|'consolidating'|'responding'|'adjudicating'|'awaiting_human'|'finished';
+export type ReviewPhase='draft'|'implementing'|'collecting'|'consolidating'|'responding'|'adjudicating'|'awaiting_human'|'finished';
 export type ScoringPhase='nominating'|'consolidating'|'voting'|'rubric_locked'|'scoring'|'analysis'|'debating'|'rescoring'|'awaiting_human'|'finalized';
 export type CollabPhase=ReviewPhase|ScoringPhase;
-export const REVIEW_PHASES:ReviewPhase[]=['draft','collecting','consolidating','responding','adjudicating','awaiting_human','finished'];
+export const REVIEW_PHASES:ReviewPhase[]=['draft','implementing','collecting','consolidating','responding','adjudicating','awaiting_human','finished'];
 export const SCORING_PHASES:ScoringPhase[]=['nominating','consolidating','voting','rubric_locked','scoring','analysis','debating','rescoring','awaiting_human','finalized'];
 
 export type Role='implementer'|'reviewer'|'moderator'|'human';
@@ -62,12 +62,17 @@ export type CollabPolicy={
   overdueWarningSec:number;
   autoEscalateOnDeadlock:boolean;
   blindFindings:boolean;
+  /** Build-then-review: the session opens in `implementing` and the reviewers are only called once the code is ready. */
+  implementationFirst:boolean;
+  /** With implementationFirst, a managed implementer going idle after its `implement` task counts as "ready". */
+  autoReviewOnAgentIdle:boolean;
   tokenBudgetPerParticipant:number;
   scoring:ScoringPolicy;
 };
 /** approvalThreshold is "two thirds" with a little headroom, so an exact 2-of-3 vote passes. */
 export const DEFAULT_POLICY:CollabPolicy={
   maxIssueRounds:3,maxTotalRounds:6,overdueWarningSec:1800,autoEscalateOnDeadlock:true,blindFindings:true,
+  implementationFirst:false,autoReviewOnAgentIdle:true,
   tokenBudgetPerParticipant:600_000,
   scoring:{minCriteria:4,maxCriteria:8,approvalThreshold:0.66,maxVotingRounds:3,scale:{min:0,max:10,step:0.5},convergenceRange:2,maxDebateRounds:2,blindScoring:true}
 };
