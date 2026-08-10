@@ -1,7 +1,7 @@
 import {execFile} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {promisify} from 'node:util';
-import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type InboxItem,type Issue,type Participant,type ReviewPhase,type ScoringPhase} from './types.js';
+import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type Issue,type Participant,type ReviewPhase,type ScoringPhase} from './types.js';
 import {CollabStore,type CreateSessionInput} from './store.js';
 import {ValidationError,parse,type FieldError} from './validate.js';
 import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,participantBudgetRequest,policyPatch,readyRequest,rebindParticipantRequest,resolveEscalationRequest,responsesRequest,scoresRequest,verdictsRequest,votesRequest} from './schemas.js';
@@ -10,8 +10,8 @@ import {applyEscalation,applyHumanRuling,applyResponse,applyVerdict,applyWithdra
 
 const run=promisify(execFile);
 
-/** How long a queued task may stay *uncollected* before the human is told that nobody is listening. */
-const UNCLAIMED_TASK_WARNING_MS=120_000;
+/** How long a queued task may sit undelivered before the human is told that the wake-up is not landing. */
+const UNDELIVERED_TASK_WARNING_MS=120_000;
 
 export type BaselineSnapshot={vcs:string,commit?:string,range?:string,dirtyHash?:string,paths:string[]};
 export type BaselineResolver=(input:{cwd:string,subject:CollabSubject,round:number})=>Promise<BaselineSnapshot>;
@@ -41,8 +41,6 @@ const fieldError=(path:string,code:string,message:string):FieldError=>({path,cod
  */
 export class CollabHub {
   private listeners=new Set<(event:CollabEvent)=>void>();
-  /** Long-poll waiters, keyed by participantId. Resolved as soon as that participant gets an inbox item. */
-  private waiters=new Map<string,Set<()=>void>>();
   private closed=false;
   private readonly resolveBaseline:BaselineResolver;
   private readonly now:()=>number;
@@ -51,25 +49,17 @@ export class CollabHub {
     this.now=options.now??(()=>Date.now());
   }
   init(){this.store.init()}
-  /** Releases every long-poll waiter so a shutdown is not blocked by parked agent requests. */
-  shutdown(){this.closed=true;for(const [participantId] of this.waiters)this.wake(participantId)}
+  shutdown(){this.closed=true}
   subscribe(listener:(event:CollabEvent)=>void){this.listeners.add(listener);return()=>this.listeners.delete(listener)}
   private emit(event:CollabEvent){for(const listener of this.listeners)try{listener(event)}catch{/* A broken subscriber must not roll back committed state. */}}
   private record(sessionId:string,type:string,payload:Record<string,unknown>={},actorId?:string){const event=this.store.appendEvent(sessionId,type,payload,actorId);this.emit(event);return event}
-  /** Queues an inbox item and releases anyone parked on a long poll for that participant. */
+  /** Queues a wake-up. The dispatcher turns it into a prompt and acks it; nothing else reads this queue. */
   private push(sessionId:string,participantId:string,type:string,payload:Record<string,unknown>){
-    const item=this.store.pushInbox(sessionId,participantId,type,payload);
-    this.wake(participantId);
-    return item;
+    return this.store.pushInbox(sessionId,participantId,type,payload);
   }
-  private wake(participantId:string){
-    const set=this.waiters.get(participantId);if(!set)return;
-    this.waiters.delete(participantId);
-    for(const resolve of set)try{resolve()}catch{/* a broken waiter must not block the others */}
-  }
-  /** A finished session no longer needs to wake anyone, so the stored managed credentials are dropped. */
+  /** A finished session no longer needs to wake anyone, so the stored credentials are dropped. */
   retireDispatchTokens(sessionId:string){
-    for(const participant of this.store.listParticipants(sessionId))if(participant.binding.type==='managed')this.store.clearDispatchToken(participant.participantId);
+    for(const participant of this.store.listParticipants(sessionId))this.store.clearDispatchToken(participant.participantId);
   }
   /**
    * Retires one seat's credential. Each delivery must retire its own: dropping the whole session's tokens after
@@ -77,8 +67,8 @@ export class CollabHub {
    */
   retireDispatchToken(participantId:string){this.store.clearDispatchToken(participantId)}
   /**
-   * Marks the queued items of a task as handled after the hub itself delivered them. A managed agent is pushed to
-   * and never acks anything, so without this its inbox item would look pending forever and be re-sent on restart.
+   * Marks the queued items of a task as handled once the agent has been told about them. Nobody acks for
+   * itself any more, so without this an item would look pending forever and be re-sent on every restart.
    */
   completeDelivery(participantId:string,task:string){
     const items=this.store.listInbox(participantId).filter(item=>item.type===task);
@@ -120,16 +110,13 @@ export class CollabHub {
         // would be advice an operator cannot act on. Repairing the existing seat is the real path.
         ?`A scoring panel is fixed once the rubric is locked (the session is in ${session.phase}). Repair the existing seat instead: POST /participants/{participantId}/binding to hand it to another agent, and POST /participants/{participantId}/budget if it ran out of tokens.`
         :`A participant can only be registered in phase ${this.registrationPhases(session).join('/')}, but the session is in ${session.phase}. Wait for the next round, or rebind an existing seat.`);
-    if(input.binding.type==='managed'&&!input.binding.agentId)throw new ValidationError([fieldError('binding.agentId','REQUIRED','A managed participant must reference an agentId')]);
-    // Silently dropping the agentId is how a session ends up with participants nobody ever wakes: reject it instead.
-    if(input.binding.type==='external'&&input.binding.agentId)throw new ValidationError([fieldError('binding.agentId','UNEXPECTED','An external participant polls the inbox itself; use binding.type=managed to have the hub wake that agent')]);
     // One agent may not hold two seats: a single model must not be able to vote twice.
-    if(input.binding.agentId&&this.store.listParticipants(sessionId).some(existing=>existing.binding.agentId===input.binding.agentId))
+    if(this.store.listParticipants(sessionId).some(existing=>existing.agentId===input.agentId))
       throw flowError(COLLAB_ERRORS.conflict,'That agent is already registered in this session');
-    const {participant,token}=this.store.createParticipant({sessionId,role:input.role,displayName:input.displayName,model:input.model,bindingType:input.binding.type,agentId:input.binding.agentId,tokenBudget:input.tokenBudget});
-    // A managed agent is woken by the hub itself, so the hub has to keep the credential it will hand over.
-    if(participant.binding.type==='managed')this.store.setDispatchToken(participant.participantId,token);
-    this.record(sessionId,'participant_added',{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,binding:participant.binding,model:participant.model});
+    const {participant,token}=this.store.createParticipant({sessionId,role:input.role,displayName:input.displayName,model:input.model,agentId:input.agentId,tokenBudget:input.tokenBudget});
+    // The hub wakes this agent itself, so it keeps the credential it will hand over.
+    this.store.setDispatchToken(participant.participantId,token);
+    this.record(sessionId,'participant_added',{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,agentId:participant.agentId,model:participant.model});
     this.assignCurrentTask(session,participant);
     return {participant,token,session};
   }
@@ -146,24 +133,29 @@ export class CollabHub {
     this.record(session.sessionId,'task_assigned',{participantId:participant.participantId,task,phase:session.phase,round:session.round});
   }
   /**
-   * Repairs a mis-registered seat: `external` <-> `managed`. Without it, the only way out of "the hub never wakes
-   * anybody" is to throw the session away. The token is rotated, and any task still sitting in the inbox is
-   * re-announced so the dispatcher picks the participant up immediately.
+   * Hands a seat to another local agent: the bound one crashed, was deleted, or was picked by mistake. Without it
+   * the only way out of "that agent will never answer" is to throw the session away. The token is rotated, and any
+   * task still queued is re-announced so the dispatcher picks the new agent up immediately.
    */
   rebindParticipant(sessionId:string,participantId:string,body:unknown){
     const input=parse(rebindParticipantRequest,body),session=this.store.getSession(sessionId);
     const current=this.store.getParticipant(participantId);
     if(current.sessionId!==sessionId)throw flowError(COLLAB_ERRORS.participantNotFound,'Participant not found in this session',404);
     if(session.status!=='active')throw flowError(COLLAB_ERRORS.wrongPhase,'A finished session cannot be rebound');
-    const agentId=input.agentId?.trim()||undefined;
-    if(agentId&&this.store.listParticipants(sessionId).some(other=>other.participantId!==participantId&&other.binding.agentId===agentId))
+    const agentId=input.agentId.trim();
+    if(this.store.listParticipants(sessionId).some(other=>other.participantId!==participantId&&other.agentId===agentId))
       throw flowError(COLLAB_ERRORS.conflict,'That agent is already registered in this session');
     const {participant,token}=this.store.rebindParticipant(participantId,agentId);
-    this.record(sessionId,'participant_rebound',{participantId,binding:participant.binding,previousBinding:current.binding});
-    // The dispatcher reacts to `task_assigned`, so a task queued while the seat was external still gets delivered.
-    if(participant.binding.type==='managed')
-      for(const item of this.store.listInbox(participantId))
-        this.record(sessionId,'task_assigned',{participantId,task:item.type,phase:session.phase,round:session.round,reason:'rebound'});
+    this.record(sessionId,'participant_rebound',{participantId,agentId:participant.agentId,previousAgentId:current.agentId});
+    // Whatever this seat owes has to reach the *new* agent, even when the old one was already prompted: a rebind
+    // exists precisely because that first delivery led nowhere. An entry that was never delivered is simply
+    // re-announced; one that was already acked is queued again for the replacement.
+    const undelivered=this.store.listInbox(participantId),history=this.store.listInbox(participantId,true,50);
+    const last=undelivered[undelivered.length-1]??history[history.length-1];
+    if(last&&session.status==='active'){
+      if(!undelivered.length)this.push(sessionId,participantId,last.type,last.payload);
+      this.record(sessionId,'task_assigned',{participantId,task:last.type,phase:session.phase,round:session.round,reason:'rebound'});
+    }
     return {participant,token};
   }
   /**
@@ -230,7 +222,7 @@ export class CollabHub {
     const sessions=this.store.listSessions({status:'active',limit:200}).filter(session=>session.kind==='review'&&session.phase==='implementing'&&session.policy.autoReviewOnAgentIdle);
     for(const session of sessions){
       for(const participant of this.store.listParticipants(session.sessionId)){
-        if(participant.binding.agentId!==agentId||participant.role!=='implementer'||participant.state!=='active')continue;
+        if(participant.agentId!==agentId||participant.role!=='implementer'||participant.state!=='active')continue;
         const done=this.store.listCompletions(session.sessionId).some(entry=>entry.phase==='implementing'&&entry.round===session.round&&entry.participantId===participant.participantId);
         if(done)continue;
         const assigned=this.store.listInbox(participant.participantId,true,50).some(item=>item.type==='implement'&&Number(item.payload.round)===session.round);
@@ -539,30 +531,6 @@ export class CollabHub {
   private canSeeIssue(sessionId:string,issue:Issue,viewer:Participant){
     return issue.reporterId===viewer.participantId||issue.targetParticipantId===viewer.participantId||canSeeOthersFindings(this.snapshot(sessionId));
   }
-  inbox(participant:Participant){
-    const items=this.store.listInbox(participant.participantId);
-    this.store.markDelivered(items.map(item=>item.itemId));
-    return items;
-  }
-  /**
-   * Long poll: returns immediately when the inbox is not empty, otherwise parks for up to `waitSeconds`
-   * (capped at 60) until a task arrives. An external agent can therefore idle without hammering the server.
-   */
-  async inboxWait(participant:Participant,waitSeconds=0):Promise<InboxItem[]>{
-    const seconds=Math.min(60,Math.max(0,Math.trunc(Number(waitSeconds)||0)));
-    const immediate=this.inbox(participant);
-    if(immediate.length||seconds<=0||this.closed)return immediate;
-    await new Promise<void>(resolve=>{
-      let settled=false;
-      const finish=()=>{if(settled)return;settled=true;clearTimeout(timer);const set=this.waiters.get(participant.participantId);set?.delete(finish);if(set&&!set.size)this.waiters.delete(participant.participantId);resolve()};
-      const timer=setTimeout(finish,seconds*1000);
-      timer.unref?.();
-      const set=this.waiters.get(participant.participantId)??new Set<()=>void>();
-      set.add(finish);this.waiters.set(participant.participantId,set);
-    });
-    return this.inbox(participant);
-  }
-  ackInbox(participant:Participant,itemIds:string[]){this.store.ackInbox(participant.participantId,itemIds);return {acknowledged:itemIds.length}}
 
   // ---------------------------------------------------------------- scoring session operations
   /** Blind nomination: a participant only sees its own proposals until the panel finishes. */
@@ -863,33 +831,30 @@ export class CollabHub {
   }
   /** Marks a stall for humans and dashboards. It deliberately does not change the phase. */
   /**
-   * A task that nobody has even fetched is a different failure from "the agent is thinking about it": it means the
-   * seat is external and no poller exists (or its token was never handed over). Waiting the full overdue window for
-   * that is pointless, so it gets its own, much shorter alarm.
+   * A task the hub could not hand over is a different failure from "the agent is thinking about it": the bound
+   * agent is gone, wedged, or was never started. Waiting the full overdue window for that is pointless, so it
+   * gets its own, much shorter alarm.
    */
-  private unclaimedTaskOwners(sessionId:string,overdueWarningSec:number,pending:string[]):string[]{
+  private undeliveredTaskOwners(sessionId:string,overdueWarningSec:number,pending:string[]):string[]{
     if(!pending.length)return [];
-    const cutoff=this.now()-Math.min(UNCLAIMED_TASK_WARNING_MS,overdueWarningSec*1000);
+    const cutoff=this.now()-Math.min(UNDELIVERED_TASK_WARNING_MS,overdueWarningSec*1000);
     const ids:string[]=[];
     for(const participant of this.store.listParticipants(sessionId)){
-      // Only someone who still owes work *and* never even fetched the task: anyone else is simply thinking.
-      if(participant.binding.type!=='external'||participant.state!=='active'||!pending.includes(participant.participantId))continue;
-      if(this.store.listInbox(participant.participantId).some(item=>!item.deliveredAt&&Date.parse(item.createdAt)<=cutoff))ids.push(participant.participantId);
+      // Only someone who still owes work *and* was never even told about it: anyone else is simply thinking.
+      if(participant.state!=='active'||!pending.includes(participant.participantId))continue;
+      if(this.store.listInbox(participant.participantId).some(item=>Date.parse(item.createdAt)<=cutoff))ids.push(participant.participantId);
     }
     return ids;
   }
-  /** Participants plus the two facts a human needs when a session looks frozen: what is queued, and what was never fetched. */
+  /** Participants plus the fact a human needs when a session looks frozen: what is still queued undelivered. */
   participantsForHuman(sessionId:string){
-    return this.store.listParticipants(sessionId).map(participant=>{
-      const inbox=this.store.listInbox(participant.participantId);
-      return {...participant,pendingTasks:inbox.length,uncollectedTasks:inbox.filter(item=>!item.deliveredAt).length};
-    });
+    return this.store.listParticipants(sessionId).map(participant=>({...participant,pendingTasks:this.store.listInbox(participant.participantId).length}));
   }
   checkStalls(){
     const changed:CollabSession[]=[];
     for(const session of this.store.listSessions({status:'active'})){
       const snapshot=this.snapshot(session.sessionId),pending=waitingOn(snapshot);
-      const unclaimed=this.unclaimedTaskOwners(session.sessionId,session.policy.overdueWarningSec,pending);
+      const unclaimed=this.undeliveredTaskOwners(session.sessionId,session.policy.overdueWarningSec,pending);
       if(session.stalled){
         /*
          * Do NOT re-run the timer here: writing the stall flag bumps updatedAt, so a fresh stallCheck would
@@ -903,7 +868,7 @@ export class CollabHub {
       }
       if(unclaimed.length){
         const updated=this.store.updateSession(session.sessionId,{stalled:{since:new Date(this.now()).toISOString(),waitingOn:unclaimed}});
-        this.record(session.sessionId,'participant_overdue',{waitingOn:unclaimed,overdueBySec:0,phase:session.phase,reason:'task_never_collected'});
+        this.record(session.sessionId,'participant_overdue',{waitingOn:unclaimed,overdueBySec:0,phase:session.phase,reason:'task_never_delivered'});
         changed.push(updated);
         continue;
       }
@@ -926,7 +891,7 @@ export class CollabHub {
       this.push(session.sessionId,participant.participantId,'session_result',{phase:session.phase,round:session.round,outcome:session.outcome??{}});
       this.record(session.sessionId,'task_assigned',{participantId:participant.participantId,task:'session_result',phase:session.phase,round:session.round});
     }
-    if(!participants.some(participant=>participant.binding.type==='managed'&&participant.binding.agentId))this.retireDispatchTokens(session.sessionId);
+    if(!participants.length)this.retireDispatchTokens(session.sessionId);
   }
   private outcome(sessionId:string){
     const issues=this.store.listIssues(sessionId),byStatus:Record<string,number>={};
@@ -964,7 +929,7 @@ export class CollabHub {
     this.store.saveIdempotent(`${participant.participantId}:${clientRequestId}`,participant.sessionId,participant.participantId,response);
     this.chargeUsage(participant,body,usage);
   }
-  /** Managed agents report real usage; external agents that stay silent are charged a byte-based estimate. */
+  /** An agent that reports real usage is charged that; one that stays silent is charged a byte-based estimate. */
   private chargeUsage(participant:Participant,body:unknown,usage?:{inputTokens?:number,outputTokens?:number,totalTokens?:number}){
     const reported=usage?.totalTokens??((usage?.inputTokens??0)+(usage?.outputTokens??0));
     const estimated=!reported;

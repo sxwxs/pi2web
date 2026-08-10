@@ -28,7 +28,6 @@ export const CAPABILITIES:Record<Role,Capability[]>={
 export const can=(role:Role,capability:Capability)=>CAPABILITIES[role]?.includes(capability)??false;
 
 export type ParticipantState='active'|'left'|'budget_exhausted';
-export type BindingType='managed'|'external';
 
 export type Severity='blocker'|'critical'|'major'|'minor'|'nit';
 export const SEVERITIES:Severity[]=['blocker','critical','major','minor','nit'];
@@ -93,7 +92,8 @@ export type CollabSession={
 };
 export type Participant={
   participantId:string;sessionId:string;role:Role;displayName:string;model?:string;
-  binding:{type:BindingType;agentId?:string};state:ParticipantState;
+  /** Every seat is a local pi2web agent that the hub wakes itself; there is no self-service participation. */
+  agentId:string;state:ParticipantState;
   tokenBudget:number;tokensUsed:number;tokensEstimated:boolean;
   createdAt:string;lastSeenAt?:string;
 };
@@ -120,7 +120,8 @@ export type Vote={voteId:string;sessionId:string;criterionId:string;participantI
 export type Score={scoreId:string;sessionId:string;criterionId:string;participantId:string;round:number;score:number;rationale:string;evidence:unknown[];confidence?:number;changeReason?:string;createdAt:string};
 export type DebateArgument={argumentId:string;debateId:string;participantId:string;stance:DebateStance;argument:string;evidence:unknown[];respondingTo?:string;createdAt:string};
 export type Debate={debateId:string;sessionId:string;criterionId:string;round:number;status:'open'|'closed';arguments:DebateArgument[];createdAt:string};
-export type InboxItem={itemId:string;sessionId:string;participantId:string;type:string;payload:Record<string,unknown>;createdAt:string;deliveredAt?:string;ackedAt?:string};
+/** A queued wake-up. It is acked as soon as the hub has told the agent about it. */
+export type InboxItem={itemId:string;sessionId:string;participantId:string;type:string;payload:Record<string,unknown>;createdAt:string;ackedAt?:string};
 
 /** Error codes returned to agents. Keep them stable: agents branch on these strings. */
 export const COLLAB_ERRORS={

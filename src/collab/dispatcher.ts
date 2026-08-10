@@ -2,8 +2,8 @@ import type {CollabHub} from './hub.js';
 import type {CollabEvent,CollabSession,Participant} from './types.js';
 
 /**
- * Wakes *managed* participants. An external agent polls `/inbox`; a managed agent is a pi2web agent that
- * cannot poll anything, so the hub has to push the task into its conversation via AgentManager.command().
+ * Wakes the agent behind a seat. Every participant is a local pi2web agent that cannot poll anything, so the
+ * hub pushes the task into its conversation via AgentManager.command(). This is the only delivery path.
  *
  * The wake-up message is a briefing, never a decision: the agent still has to talk to the HTTP API,
  * and every rule (baseline, evidence, phase) is enforced there.
@@ -50,7 +50,7 @@ export class CollabDispatcher {
       for(const session of [...this.hub.store.listSessions({status:'active',limit:200}),...finished]){
         const stale=session.status!=='active'&&Date.parse(session.updatedAt)<cutoff;
         for(const participant of this.hub.store.listParticipants(session.sessionId)){
-          if(participant.binding.type!=='managed'||!participant.binding.agentId||participant.state!=='active')continue;
+          if(!participant.agentId||participant.state!=='active')continue;
           const pending=this.hub.store.listInbox(participant.participantId);
           const last=pending[pending.length-1];
           // A finished session only ever has one deliverable left: its closing note.
@@ -103,8 +103,11 @@ export class CollabDispatcher {
   private async wake(sessionId:string,participantId:string,task:string){
     let participant:Participant;
     try{participant=this.hub.store.getParticipant(participantId)}catch{return}
-    const agentId=participant.binding.agentId;
-    if(participant.binding.type!=='managed'||!agentId)return;            // external agents poll the inbox themselves
+    const agentId=participant.agentId;
+    if(!agentId){                                                        // only a pre-managed-only row can get here
+      this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,task,reason:'NO_AGENT_BOUND'});
+      return;
+    }
     if(participant.state!=='active')return;                              // left or out of budget: a human has to act
     const session=this.hub.store.findSession(sessionId);
     // `session_result` is the closing note, so it is the one task that may still be delivered after the session ended.
@@ -113,7 +116,9 @@ export class CollabDispatcher {
     // The bound agent is part of the identity of a delivery: after a rebind the *new* agent has received
     // nothing, so a key without it matches the old delivery and leaves the replacement agent idle.
     const key=`${agentId}:${task}:${session.phase}:${session.round}:${session.debateRound}`;
-    if(this.delivered.get(participantId)===key)return;
+    // Already told this agent about exactly this task: the queue entry is redundant, so retire it instead of
+    // leaving it pending forever (a pending entry is what the "never delivered" alarm and the restart resume read).
+    if(this.delivered.get(participantId)===key){this.hub.completeDelivery(participantId,task);return}
     const token=this.hub.store.getDispatchToken(participantId);
     if(!token){
       this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,agentId,task,reason:'NO_DISPATCH_TOKEN'});
@@ -128,9 +133,10 @@ export class CollabDispatcher {
       await this.deps.command(agentId,kind,briefing({baseUrl:this.deps.baseUrl(),session,participant,task,token,digest}));
       this.delivered.set(participantId,key);
       this.hub.logDispatch(sessionId,'agent_dispatched',{participantId,agentId,task,kind,phase:session.phase,round:session.round});
-      // The closing note reached the agent: ack the item (a managed agent cannot ack for itself, and an
-      // unacked item would be re-scheduled on every restart) and only then drop the credential it used.
-      if(terminal){this.delivered.delete(participantId);this.hub.completeDelivery(participantId,'session_result');this.hub.retireDispatchToken(participantId)}
+      // The task reached the agent: retire the queue entry (nobody acks for itself) so a restart does not re-send
+      // it, and drop the closing note's credential now that it has served its only purpose.
+      this.hub.completeDelivery(participantId,task);
+      if(terminal){this.delivered.delete(participantId);this.hub.retireDispatchToken(participantId)}
     }catch(error){
       this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,agentId,task,reason:(error as Error).message});
       this.deps.log?.(`Collab dispatch to agent ${agentId} failed: ${(error as Error).message}`);
@@ -229,7 +235,6 @@ function protocolBriefing(input:{baseUrl:string,session:CollabSession,participan
     '',
     'Endpoints:',
     `  GET  ${api}/digest                 what you owe right now (authoritative)`,
-    `  POST ${api}/inbox/ack              {"itemIds":["..."]} once you have handled an item`,
     `  ${submit}`,
     `  POST ${api}/escalations            hand a deadlock to a human`,
     '',
