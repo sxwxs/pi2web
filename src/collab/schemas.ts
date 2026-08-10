@@ -1,5 +1,5 @@
-import {CATEGORIES,DEBATE_STANCES,ESCALATION_KINDS,REQUIRED_ACTIONS,RESPONSE_TYPES,SEVERITIES,VERDICT_TYPES,VOTE_STANCES,ROLES} from './types.js';
-import {anyJson,arr,bool,num,obj,oneOf,optional,str,withDefault,type Validator} from './validate.js';
+import {CATEGORIES,DEBATE_STANCES,ESCALATION_KINDS,REGISTRABLE_ROLES,REQUIRED_ACTIONS,RESPONSE_TYPES,SEVERITIES,VERDICT_TYPES,VOTE_STANCES} from './types.js';
+import {anyJson,arr,bool,num,obj,oneOf,optional,refine,str,withDefault,type FieldError,type Validator} from './validate.js';
 
 /**
  * Request schemas for every collaboration endpoint. They are deliberately strict:
@@ -67,16 +67,29 @@ export const escalationRequest=obj({
   usage:usage()
 });
 
-const scoringPolicyPatch=obj({
+/**
+ * A scale is only usable as a whole: `{min:10,max:1,step:1}` passes every per-field range check and then
+ * produces a session in which every possible score fails validation. The span must be positive and
+ * at least one step wide.
+ */
+const scoringScale=refine(obj({min:num({min:0,max:1000}),max:num({min:1,max:1000}),step:num({min:0.01,max:100})}),scale=>{
+  const errors:FieldError[]=[];
+  if(scale.max<=scale.min)errors.push({path:'max',code:'OUT_OF_ORDER',message:`Expected max (${scale.max}) to be greater than min (${scale.min})`,expected:`> ${scale.min}`});
+  else if(scale.step>scale.max-scale.min)errors.push({path:'step',code:'TOO_LARGE',message:`Expected a step that fits inside the ${scale.min}-${scale.max} range`,expected:`<= ${scale.max-scale.min}`});
+  return errors;
+});
+const scoringPolicyPatch=refine(obj({
   minCriteria:optional(num({integer:true,min:1,max:20})),
   maxCriteria:optional(num({integer:true,min:1,max:20})),
   approvalThreshold:optional(num({min:0.5,max:1})),
   maxVotingRounds:optional(num({integer:true,min:1,max:10})),
-  scale:optional(obj({min:num({min:0,max:1000}),max:num({min:1,max:1000}),step:num({min:0.01,max:100})})),
+  scale:optional(scoringScale),
   convergenceRange:optional(num({min:0,max:1000})),
   maxDebateRounds:optional(num({integer:true,min:0,max:10})),
   blindScoring:optional(bool())
-});
+}),patch=>patch.minCriteria!==undefined&&patch.maxCriteria!==undefined&&patch.minCriteria>patch.maxCriteria
+  ?[{path:'maxCriteria',code:'OUT_OF_ORDER',message:`Expected maxCriteria (${patch.maxCriteria}) to be at least minCriteria (${patch.minCriteria})`,expected:`>= ${patch.minCriteria}`}]
+  :undefined);
 export const policyPatch=obj({
   maxIssueRounds:optional(num({integer:true,min:1,max:20})),
   maxTotalRounds:optional(num({integer:true,min:1,max:50})),
@@ -108,7 +121,8 @@ export const createSessionRequest=obj({
 });
 
 export const createParticipantRequest=obj({
-  role:oneOf(ROLES),
+  /** `human` is not registrable: a human uses the pairing code, not a seat the panel never waits for. */
+  role:oneOf(REGISTRABLE_ROLES),
   displayName:str({min:1,max:100}),
   model:optional(str({max:200})),
   binding:obj({type:oneOf(['managed','external'] as const),agentId:optional(str({max:200}))}),

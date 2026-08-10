@@ -110,7 +110,9 @@ export class CollabDispatcher {
     // `session_result` is the closing note, so it is the one task that may still be delivered after the session ended.
     const terminal=task==='session_result';
     if(!session||(session.status!=='active'&&!terminal))return;
-    const key=`${task}:${session.phase}:${session.round}:${session.debateRound}`;
+    // The bound agent is part of the identity of a delivery: after a rebind the *new* agent has received
+    // nothing, so a key without it matches the old delivery and leaves the replacement agent idle.
+    const key=`${agentId}:${task}:${session.phase}:${session.round}:${session.debateRound}`;
     if(this.delivered.get(participantId)===key)return;
     const token=this.hub.store.getDispatchToken(participantId);
     if(!token){

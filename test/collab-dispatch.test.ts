@@ -212,6 +212,24 @@ describe('collab dispatcher',()=>{
     expect(store.findParticipantByToken(impl.token)).toBeUndefined();
   });
 
+  it('delivers to the replacement agent when a managed seat is rebound to another agent',async()=>{
+    const created=await session();
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-security',binding:{type:'managed',agentId:'agent-1'}});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    await hub.openRound(created.sessionId);
+    await dispatcher.drain();
+    expect(sent).toHaveLength(1);
+
+    // Same seat, same task, different agent: a delivery guard keyed only on the task skipped this and left
+    // the replacement agent idle with an assignment nobody had told it about.
+    const rebound=hub.rebindParticipant(created.sessionId,reviewer.participant.participantId,{agentId:'agent-2'});
+    await dispatcher.drain();
+    expect(sent).toHaveLength(2);
+    expect(sent[1].agentId).toBe('agent-2');
+    expect(sent[1].message).toContain('task now due: file_findings');
+    expect(sent[1].message).toContain(rebound.token);
+  });
+
   it('refuses an external binding that carries an agentId instead of silently ignoring it',async()=>{
     const created=await session();
     expect(()=>hub.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',binding:{type:'external',agentId:'agent-1'}}))

@@ -73,7 +73,11 @@
         // A silently swallowed agent list used to leave the participant form with nothing but the external option.
         api('/api/v1/agents').catch(error => {toast(`本机 Agent 列表加载失败：${error.message}`); return []})
       ]);
-      if (state.sessionId) state.detail = await loadDetail(state.sessionId).catch(() => null);
+      if (state.sessionId) {
+        const wanted = state.sessionId, detail = await loadDetail(wanted).catch(() => null);
+        // A slower response for a session the user already left must not overwrite the current one.
+        if (state.sessionId === wanted) state.detail = detail;
+      }
       renderSessions(); renderWorkspaces(); renderDetail();
     } catch (error) {
       $('status').className = 'bad'; $('status').textContent = error.message;
@@ -93,7 +97,10 @@
   const select = async sessionId => {
     state.sessionId = sessionId; state.lastToken = null;
     history.replaceState({}, '', `?session=${encodeURIComponent(sessionId)}`);
-    state.detail = await loadDetail(sessionId).catch(error => {toast(error.message); return null});
+    const detail = await loadDetail(sessionId).catch(error => {toast(error.message); return null});
+    // Selecting A then B must not end up showing A while every action button targets B.
+    if (state.sessionId !== sessionId) return;
+    state.detail = detail;
     renderSessions(); renderDetail();
   };
 

@@ -248,6 +248,9 @@ export class CollabHub {
       const pendingPanel=scoringWaitingOn(this.scoringSnapshot(sessionId));
       if(pendingPanel.length&&!input.force)throw flowError(COLLAB_ERRORS.wrongPhase,`Still waiting on ${pendingPanel.length} panelist(s): ${pendingPanel.join(', ')}. Pass force=true to override.`);
       if(pendingPanel.length&&!input.reason.trim())throw new ValidationError([fieldError('reason','REQUIRED','A forced advance must state why the pending panelists are being skipped')]);
+      // Anything else that blocks the panel (no reviewer registered, a question still on the human's desk) has to
+      // be reported too: settleScoring() returns quietly, so the operator would get 200 and an unchanged session.
+      if(!input.force)nextScoringPhase(this.scoringSnapshot(sessionId));
       await this.settleScoring(sessionId,input.force,input.reason);
       return this.store.getSession(sessionId);
     }
@@ -452,7 +455,10 @@ export class CollabHub {
       summary:input.summary,positions:input.positions,question:input.question,options:input.options,urgency:input.urgency});
     this.finish(participant,input.clientRequestId,body,input.usage,escalation);
     this.record(session.sessionId,'escalation_raised',{escalationId:escalation.escalationId,kind:escalation.kind,refId:escalation.refId,question:escalation.question,urgency:escalation.urgency},participant.participantId);
-    await this.settle(session.sessionId);
+    // Settling with the wrong machine is not a no-op: the review flow throws `Phase nominating cannot advance`
+    // on a scoring session, so the escalation was persisted and the request still failed.
+    if(session.kind==='scoring')await this.settleScoring(session.sessionId);
+    else await this.settle(session.sessionId);
     return escalation;
   }
 

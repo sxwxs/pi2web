@@ -213,4 +213,42 @@ describe('panel scoring over HTTP',()=>{
     // A score nobody agreed on is reported as forced, never as "converged".
     expect(finished.outcome.criteria.every((criterion:any)=>criterion.method==='forced')).toBe(true);
   });
+
+  it('accepts an escalation from a panelist, parks the panel, and resumes on the ruling',async()=>{
+    const {call,sessionId,seat}=await boot({scoring:{minCriteria:1,maxCriteria:2}});
+    const a=await seat('reviewer','reviewer-a'),b=await seat('reviewer','reviewer-b');
+    // This used to persist the escalation and then fail with "Phase nominating cannot advance", because the
+    // review state machine was run on a scoring session.
+    const raised=await call('POST',`/api/v1/collab/sessions/${sessionId}/escalations`,{clientRequestId:rid(),kind:'other',
+      summary:'The subject range contains generated files that nobody on the panel can judge.',
+      question:'Should the generated bundle be excluded from the scored range?'},a.participantToken);
+    expect(raised.status).toBe(202);
+
+    for(const token of [a.participantToken,b.participantToken])
+      await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security')],nominationsComplete:true},token);
+    // A pending question to a human parks the panel instead of being overtaken by the next phase.
+    expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.phase).toBe('nominating');
+    const blocked=await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
+    expect(blocked.status).toBe(409);
+    expect(blocked.error.message).toMatch(/await a human ruling/);
+
+    await call('POST',`/api/v1/collab/escalations/${raised.data.escalationId}/resolve`,{decision:'exclude the bundle',rationale:'The generated bundle is not part of the reviewed work.'});
+    expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.phase).toBe('voting');
+  });
+
+  it('refuses a human seat and a scale that no score could satisfy',async()=>{
+    const {call,sessionId}=await boot();
+    // A `human` seat would hold a participant token with nominate/vote/score rights the panel never waits for.
+    const seatAsHuman=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'human',displayName:'operator',binding:{type:'external'}});
+    expect(seatAsHuman.status).toBe(422);
+    expect(seatAsHuman.error.fieldErrors[0]).toMatchObject({path:'role',code:'NOT_ALLOWED'});
+
+    const inverted=await call('POST',`/api/v1/collab/sessions/${sessionId}/policy`,{scoring:{scale:{min:10,max:1,step:1}}});
+    expect(inverted.status).toBe(422);
+    expect(inverted.error.fieldErrors[0]).toMatchObject({path:'scoring.scale.max',code:'OUT_OF_ORDER'});
+    const unusableStep=await call('POST',`/api/v1/collab/sessions/${sessionId}/policy`,{scoring:{scale:{min:0,max:5,step:9}}});
+    expect(unusableStep.error.fieldErrors[0]).toMatchObject({path:'scoring.scale.step',code:'TOO_LARGE'});
+    const invertedCriteria=await call('POST',`/api/v1/collab/sessions/${sessionId}/policy`,{scoring:{minCriteria:5,maxCriteria:2}});
+    expect(invertedCriteria.error.fieldErrors[0]).toMatchObject({path:'scoring.maxCriteria',code:'OUT_OF_ORDER'});
+  });
 });

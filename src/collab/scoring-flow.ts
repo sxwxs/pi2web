@@ -73,11 +73,18 @@ export function scoringWaitingOn(snapshot:ScoringSnapshot):string[]{
   }
 }
 
+/**
+ * Ready means "the panel has finished this step", which presupposes a panel: with no reviewer every
+ * "everyone submitted" check is vacuously true, so /advance could walk nomination->voting->rubric with
+ * nobody in the room. A pending escalation parks the flow too - a human question that finalization
+ * overtakes is a question nobody ever answers. Both gates are bypassed only by an explicit forced advance.
+ */
 export function isScoringReadyToAdvance(snapshot:ScoringSnapshot):boolean{
   if(snapshot.status!=='active')return false;
-  if(['consolidating','rubric_locked','analysis'].includes(snapshot.phase))return true;
-  if(snapshot.phase==='awaiting_human')return snapshot.pendingEscalations===0;
   if(snapshot.phase==='finalized')return false;
+  if(!scoringPanel(snapshot).length)return false;
+  if(snapshot.pendingEscalations>0)return false;
+  if(['consolidating','rubric_locked','analysis','awaiting_human'].includes(snapshot.phase))return true;
   if(snapshot.phase==='nominating'&&!candidateCriteria(snapshot).length&&!scoringWaitingOn(snapshot).length)return true;
   return scoringWaitingOn(snapshot).length===0;
 }
@@ -155,7 +162,8 @@ export function nextScoringPhase(snapshot:ScoringSnapshot,options:{forced?:boole
   if(snapshot.status!=='active')throw flowError(COLLAB_ERRORS.wrongPhase,`Session is ${snapshot.status}`);
   const pending=scoringWaitingOn(snapshot);
   if(!isScoringReadyToAdvance(snapshot)&&!options.forced){
-    if(snapshot.phase==='awaiting_human')throw flowError(COLLAB_ERRORS.wrongPhase,`${snapshot.pendingEscalations} escalation(s) still await a human ruling`);
+    if(!scoringPanel(snapshot).length)throw flowError(COLLAB_ERRORS.wrongPhase,'This scoring session has no reviewer on the panel yet; register one before advancing');
+    if(snapshot.pendingEscalations>0)throw flowError(COLLAB_ERRORS.wrongPhase,`${snapshot.pendingEscalations} escalation(s) still await a human ruling`);
     throw flowError(COLLAB_ERRORS.wrongPhase,`Still waiting on ${pending.length} participant(s): ${pending.join(', ')}`);
   }
   const base={round:snapshot.round,debateRound:snapshot.debateRound,...(options.forced&&pending.length?{skipped:pending}:{})};

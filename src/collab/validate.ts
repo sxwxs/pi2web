@@ -73,6 +73,18 @@ export const obj=<S extends Shape>(shape:S,options:ObjectOptions={}):Validator<I
   return result as Infer<S>;
 }});
 
+/**
+ * Cross-field rule on top of a structurally valid value. Field-by-field checks cannot catch
+ * `{min:10,max:1}`: every field is in range, yet the combination is unusable.
+ * The check only runs when the inner validator produced no errors, so it never reports on garbage.
+ */
+export const refine=<T>(inner:Validator<T>,check:(value:T)=>FieldError[]|undefined):Validator<T>=>({parse(value,ctx){
+  const before=ctx.errors.length,result=inner.parse(value,ctx);
+  if(ctx.errors.length>before)return result;
+  for(const error of check(result)??[])ctx.errors.push({...error,path:ctx.path?`${ctx.path}.${error.path}`:error.path});
+  return result;
+}});
+
 export const optional=<T>(inner:Validator<T>):Validator<T|undefined>=>({parse:(value,ctx)=>inner.parse(value,ctx),optional:true});
 export const withDefault=<T>(inner:Validator<T>,fallback:()=>T):Validator<T>=>({parse:(value,ctx)=>inner.parse(value,ctx),optional:true,fallback});
 /** Accepts any JSON value. Used for opaque payloads the hub stores but never interprets. */

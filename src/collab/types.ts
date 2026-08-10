@@ -11,6 +11,12 @@ export const SCORING_PHASES:ScoringPhase[]=['nominating','consolidating','voting
 
 export type Role='implementer'|'reviewer'|'moderator'|'human';
 export const ROLES:Role[]=['implementer','reviewer','moderator','human'];
+/**
+ * Roles a *seat* may be registered with. `human` is deliberately excluded: a human acts with the pairing
+ * code, and a `human`-role participant token would hold nominate/vote/score capabilities while
+ * `scoringPanel()` never waits for it — its submissions would move a tally nobody is waiting on.
+ */
+export const REGISTRABLE_ROLES:Role[]=['implementer','reviewer','moderator'];
 /** Permissions are capability-based so symmetric (reverse) review needs no second code path. */
 export type Capability='file_finding'|'respond'|'verdict'|'withdraw'|'nominate'|'vote'|'score'|'debate'|'clarify'|'merge'|'escalate';
 export const CAPABILITIES:Record<Role,Capability[]>={
