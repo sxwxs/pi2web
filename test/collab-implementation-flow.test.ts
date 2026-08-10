@@ -40,9 +40,9 @@ describe('build-then-review loop',()=>{
     const sessionId=created.data.sessionId;
     expect(created.data.policy).toMatchObject({implementationFirst:true,autoReviewOnAgentIdle:true});
 
-    const dev=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'dev',binding:{type:'external'}})).data;
-    const reviewerA=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-a',binding:{type:'external'}})).data;
-    const reviewerB=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-b',binding:{type:'external'}})).data;
+    const dev=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:'agent-dev'})).data;
+    const reviewerA=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-a',agentId:'agent-reviewer-a'})).data;
+    const reviewerB=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-b',agentId:'agent-reviewer-b'})).data;
 
     // Opening the session starts the *implementation*, not the review.
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
@@ -60,7 +60,8 @@ describe('build-then-review loop',()=>{
     const digestA=(await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,reviewerA.participantToken)).data;
     expect(digestA).toMatchObject({task:'file_findings',phase:'collecting',round:1});
     expect(digestA.baseline.baselineId).toBeTruthy();
-    expect((await call('GET',`/api/v1/collab/sessions/${sessionId}/inbox`,undefined,reviewerB.participantToken)).data.map((item:any)=>item.type)).toContain('file_findings');
+    // Every reviewer is called by the hub, not just the one that happened to ask.
+    expect((await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,reviewerB.participantToken)).data).toMatchObject({task:'file_findings'});
 
     // Reviewer A files an issue, reviewer B approves by finishing with nothing to report.
     const issueId=(await call('POST',`/api/v1/collab/sessions/${sessionId}/findings`,{clientRequestId:rid(),baselineId:digestA.baseline.baselineId,
@@ -101,8 +102,8 @@ describe('build-then-review loop',()=>{
     const {call,workspace}=await boot();
     const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Deadlock',workspaceId:workspace.id,
       subject:{type:'free',value:'x'},policy:{implementationFirst:true,maxIssueRounds:1}})).data.sessionId;
-    const dev=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'dev',binding:{type:'external'}})).data;
-    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer',binding:{type:'external'}})).data;
+    const dev=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:'agent-dev'})).data;
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer',agentId:'agent-reviewer'})).data;
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
     await call('POST',`/api/v1/collab/sessions/${sessionId}/ready`,{clientRequestId:rid(),summary:'First implementation is complete.'},dev.participantToken);
 
@@ -136,8 +137,8 @@ describe('build-then-review loop',()=>{
     const agent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id})).data;
     const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Auto hand-off',workspaceId:workspace.id,
       subject:{type:'free',value:'x'},policy:{implementationFirst:true}})).data.sessionId;
-    const dev=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'dev',binding:{type:'managed',agentId:agent.agentId}})).data;
-    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer',binding:{type:'external'}})).data;
+    const dev=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:agent.agentId})).data;
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer',agentId:'agent-reviewer'})).data;
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
     expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.phase).toBe('implementing');
 

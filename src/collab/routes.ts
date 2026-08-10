@@ -1,7 +1,5 @@
 import {CollabHub} from './hub.js';
 import {ValidationError} from './validate.js';
-import {ackInboxRequest} from './schemas.js';
-import {parse} from './validate.js';
 import {COLLAB_ERRORS,type Participant} from './types.js';
 
 export type CollabRouteResult={status:number,payload:unknown,authFailed?:boolean};
@@ -62,7 +60,7 @@ export class CollabRouter {
     const tail=parts[5],sub=parts[6];
     // Only these tails have sub-resources. Without this, `POST .../advance/anything` would be treated as an
     // advance, and any future sub-path would be silently answered by the flat handler above it.
-    if(sub&&!['participants','issues','debates','inbox'].includes(tail??''))return undefined;
+    if(sub&&!['participants','issues','debates'].includes(tail??''))return undefined;
 
     if(method==='GET'&&!tail)return ok({...this.hub.getSession(sessionId),progress:this.hub.progress(sessionId),participants:isHuman?this.hub.participantsForHuman(sessionId):this.hub.store.listParticipants(sessionId)});
     if(tail==='participants'){
@@ -72,7 +70,7 @@ export class CollabRouter {
       if(method==='POST'&&sub&&parts[7]==='binding'){
         human('Rebinding a participant');
         const {participant:bound,token}=this.hub.rebindParticipant(sessionId,sub,await ctx.body());
-        return ok({participant:bound,participantToken:bound.binding.type==='external'?token:undefined});
+        return ok({participant:bound,participantToken:token});
       }
       // .../participants/{participantId}/budget — un-blocks a seat that spent its budget, at any time.
       if(method==='POST'&&sub&&parts[7]==='budget'){
@@ -113,8 +111,6 @@ export class CollabRouter {
     if(method==='POST'&&tail==='responses')return ok(await this.hub.submitResponses(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='verdicts')return ok(await this.hub.submitVerdicts(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='escalations')return ok(await this.hub.raiseEscalation(asParticipant(),await ctx.body()),202);
-    if(method==='GET'&&tail==='inbox')return ok(await this.hub.inboxWait(asParticipant(),number('wait',0)));
-    if(method==='POST'&&tail==='inbox'&&sub==='ack')return ok(this.hub.ackInbox(asParticipant(),parse(ackInboxRequest,await ctx.body()).itemIds));
     // The report is the human close-out view: it lists every issue and escalation, which would defeat blind
     // collection if a participant token could read it while the round is still open.
     if(method==='GET'&&tail==='report'){human('Reading the session report');return ok({session:this.hub.getSession(sessionId),progress:this.hub.progress(sessionId),issues:this.hub.store.listIssues(sessionId),escalations:this.hub.listEscalations({sessionId})})}

@@ -37,21 +37,23 @@ describe('collab dispatcher',()=>{
 
   const session=async()=>hub.createSession({kind:'review',title:'Payment callback review',workspaceId:'ws-1',subject:{type:'commit_range',value:'HEAD~1..HEAD'}},async()=>dir);
 
-  it('wakes a managed agent with its own token and skips repeats of the same task',async()=>{
+  it('wakes the seat with its own token and skips repeats of the same task',async()=>{
     const created=await session();
-    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-security',binding:{type:'managed',agentId:'agent-1'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-security',agentId:'agent-1'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
     await dispatcher.drain();
 
-    expect(sent).toHaveLength(1);
+    // Every seat is a local agent, so every seat that owes work is prompted.
+    expect(sent.map(entry=>entry.agentId).sort()).toEqual(['agent-1','agent-impl']);
+    sent.splice(1);
     expect(sent[0]).toMatchObject({agentId:'agent-1',kind:'prompt'});
     expect(sent[0].message).toContain(reviewer.token);
     expect(sent[0].message).toContain('task now due: file_findings');
     expect(sent[0].message).toContain(created.sessionId);
-    // Managed agents are pushed to, so the briefing must not invite them to poll the inbox.
+    // Agents are pushed to, so the briefing must not invite them to poll anything.
     expect(sent[0].message).toContain('END YOUR TURN');
-    expect(sent[0].message).not.toContain('inbox?wait');
+    expect(sent[0].message).not.toContain('inbox');
     expect(hub.events(created.sessionId).some(event=>event.type==='agent_dispatched')).toBe(true);
 
     // Re-emitting the very same assignment (same task, phase and round) must not prompt the agent twice.
@@ -62,8 +64,8 @@ describe('collab dispatcher',()=>{
 
   it('tells a managed agent that the session is over instead of leaving it waiting',async()=>{
     const created=await session();
-    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'managed',agentId:'agent-1'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-1'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
     await dispatcher.drain();
 
@@ -78,25 +80,25 @@ describe('collab dispatcher',()=>{
     expect(store.getDispatchToken(reviewer.participant.participantId)).toBeUndefined();
   });
 
-  it('queues a busy agent with follow-up and never touches external participants',async()=>{
+  it('queues a busy agent with follow-up instead of interrupting it with a fresh prompt',async()=>{
     const created=await session();
     statuses.set('agent-busy','streaming');
-    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-busy',binding:{type:'managed',agentId:'agent-busy'}});
-    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-external',binding:{type:'external'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-busy',agentId:'agent-busy'});
+    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-idle',agentId:'agent-idle'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
     await dispatcher.drain();
 
-    expect(sent.map(entry=>entry.agentId)).toEqual(['agent-busy']);
-    expect(sent[0].kind).toBe('follow-up');
+    expect(sent.find(entry=>entry.agentId==='agent-busy')?.kind).toBe('follow-up');
+    expect(sent.find(entry=>entry.agentId==='agent-idle')?.kind).toBe('prompt');
   });
 
   it('records a failure instead of dropping the task when the agent cannot be reached',async()=>{
     const created=await session();
     dispatcher=new CollabDispatcher(hub,{command:async()=>{throw Error('Agent is not running')},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
     dispatcher.start();
-    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'managed',agentId:'agent-dead'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-dead'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
     await dispatcher.drain();
 
@@ -106,8 +108,8 @@ describe('collab dispatcher',()=>{
 
   it('re-wakes a managed agent whose task was queued before a restart',async()=>{
     const created=await session();
-    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'managed',agentId:'agent-1'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-1'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await dispatcher.stop();                              // the task is queued while nobody is dispatching
     await hub.openRound(created.sessionId);
     expect(sent).toHaveLength(0);
@@ -116,14 +118,14 @@ describe('collab dispatcher',()=>{
     restarted.start();
     await restarted.drain();
     await restarted.stop();
-    expect(sent.map(entry=>entry.agentId)).toEqual(['agent-1']);
+    expect(sent.map(entry=>entry.agentId).sort()).toEqual(['agent-1','agent-impl']);
   });
 
   it('delivers the closing note to every managed seat and only retires the credential it used',async()=>{
     const created=await session();
-    const first=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-a',binding:{type:'managed',agentId:'agent-1'}});
-    const second=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-b',binding:{type:'managed',agentId:'agent-2'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    const first=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-a',agentId:'agent-1'});
+    const second=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-b',agentId:'agent-2'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
     await dispatcher.drain();
     for(const seat of [first,second])
@@ -133,15 +135,15 @@ describe('collab dispatcher',()=>{
     // Both agents must be told the session is over: retiring the whole session's tokens on the first delivery
     // used to leave the second one without a credential, so its closing note was silently dropped.
     const closing=sent.filter(entry=>entry.message.includes('is finished'));
-    expect(closing.map(entry=>entry.agentId).sort()).toEqual(['agent-1','agent-2']);
+    expect(closing.map(entry=>entry.agentId).sort()).toEqual(['agent-1','agent-2','agent-impl']);
     expect(store.getDispatchToken(first.participant.participantId)).toBeUndefined();
     expect(store.getDispatchToken(second.participant.participantId)).toBeUndefined();
   });
 
   it('delivers a closing note that was queued but never dispatched before a restart',async()=>{
     const created=await session();
-    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'managed',agentId:'agent-1'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-1'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
     await dispatcher.drain();
     sent.length=0;
@@ -173,8 +175,8 @@ describe('collab dispatcher',()=>{
     const flaky=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{if(failing)throw Error('Agent is not running');sent.push({agentId,kind,message})},
       agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
     flaky.start();
-    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'managed',agentId:'agent-1'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-1'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
     await flaky.drain();
     await hub.submitFindings(reviewer.participant,{clientRequestId:rid(),baselineId:(hub.digest(reviewer.participant) as any).baseline.baselineId,findings:[],reviewComplete:true});
@@ -193,18 +195,24 @@ describe('collab dispatcher',()=>{
     expect(store.getDispatchToken(reviewer.participant.participantId)).toBeUndefined();
   });
 
-  it('rebinds a seat that was registered as external and delivers the task it already had',async()=>{
+  it('rebinds a seat whose agent never answered and re-delivers the task it already had',async()=>{
     const created=await hub.createSession({kind:'review',title:'Payment callback review',workspaceId:'ws-1',subject:{type:'commit_range',value:'HEAD~1..HEAD'},policy:{implementationFirst:true}},async()=>dir);
-    // The trap this fixes: an implementer registered as `external` looks assigned in the log but nobody wakes it.
-    const impl=hub.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',binding:{type:'external'}});
-    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'external'}});
+    const failing=new CollabDispatcher(hub,{command:async()=>{throw Error('Agent is not running')},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    await dispatcher.stop();
+    failing.start();
+    const impl=hub.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',agentId:'agent-dead'});
+    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-reviewer'});
     await hub.openRound(created.sessionId);
-    await dispatcher.drain();
+    await failing.drain();
+    await failing.stop();
     expect(sent).toHaveLength(0);
 
+    // The queued task survives the failed delivery, so handing the seat to a live agent hands over the work too.
+    dispatcher=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    dispatcher.start();
     const rebound=hub.rebindParticipant(created.sessionId,impl.participant.participantId,{agentId:'agent-dev'});
     await dispatcher.drain();
-    expect(rebound.participant.binding).toEqual({type:'managed',agentId:'agent-dev'});
+    expect(rebound.participant.agentId).toBe('agent-dev');
     expect(sent).toHaveLength(1);
     expect(sent[0].agentId).toBe('agent-dev');
     expect(sent[0].message).toContain('task now due: implement');
@@ -214,63 +222,54 @@ describe('collab dispatcher',()=>{
 
   it('delivers to the replacement agent when a managed seat is rebound to another agent',async()=>{
     const created=await session();
-    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-security',binding:{type:'managed',agentId:'agent-1'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-security',agentId:'agent-1'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
     await dispatcher.drain();
-    expect(sent).toHaveLength(1);
+    expect(sent.filter(entry=>entry.agentId==='agent-1')).toHaveLength(1);
 
     // Same seat, same task, different agent: a delivery guard keyed only on the task skipped this and left
     // the replacement agent idle with an assignment nobody had told it about.
     const rebound=hub.rebindParticipant(created.sessionId,reviewer.participant.participantId,{agentId:'agent-2'});
     await dispatcher.drain();
-    expect(sent).toHaveLength(2);
-    expect(sent[1].agentId).toBe('agent-2');
-    expect(sent[1].message).toContain('task now due: file_findings');
-    expect(sent[1].message).toContain(rebound.token);
+    const replacement=sent.filter(entry=>entry.agentId==='agent-2');
+    expect(replacement).toHaveLength(1);
+    expect(replacement[0].message).toContain('task now due: file_findings');
+    expect(replacement[0].message).toContain(rebound.token);
   });
 
-  it('refuses an external binding that carries an agentId instead of silently ignoring it',async()=>{
-    const created=await session();
-    expect(()=>hub.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',binding:{type:'external',agentId:'agent-1'}}))
-      .toThrow(/binding\.agentId/);
-  });
-
-  it('raises the alarm quickly when a queued task is never even collected',async()=>{
+  it('raises the alarm quickly when a queued task never reaches its agent',async()=>{
     let clock=Date.now();
     const timed=new CollabHub(store,{resolveBaseline:baseline,now:()=>clock});timed.init();
     const created=await timed.createSession({kind:'review',title:'Uncollected task',workspaceId:'ws-1',subject:{type:'commit_range',value:'HEAD~1..HEAD'},policy:{implementationFirst:true}},async()=>dir);
-    const dev=timed.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',binding:{type:'external'}}).participant;
-    timed.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'external'}});
+    const dev=timed.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',agentId:'agent-dev'}).participant;
+    timed.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-reviewer'});
     await timed.openRound(created.sessionId);
 
     expect(timed.checkStalls()).toHaveLength(0);           // a task queued seconds ago is not yet suspicious
-    clock+=3*60_000;                                       // …but two minutes without anyone fetching it is
+    clock+=3*60_000;                                       // …but two minutes without the agent being told is
     const stalled=timed.checkStalls();
     expect(stalled[0]?.stalled?.waitingOn).toEqual([dev.participantId]);
     expect(timed.events(created.sessionId).find(event=>event.type==='participant_overdue')?.payload)
-      .toMatchObject({reason:'task_never_collected',waitingOn:[dev.participantId]});
-    // The board must be able to show "queued but never fetched" without digging through the event log.
+      .toMatchObject({reason:'task_never_delivered',waitingOn:[dev.participantId]});
+    // The board must be able to show "queued but never delivered" without digging through the event log.
     expect(timed.participantsForHuman(created.sessionId).find(entry=>entry.displayName==='dev'))
-      .toMatchObject({pendingTasks:1,uncollectedTasks:1});
+      .toMatchObject({pendingTasks:1});
 
     // The flag stays put while nothing changes, instead of flapping once a minute.
     expect(timed.checkStalls()).toHaveLength(0);
   });
 
-  it('releases a long-polling inbox as soon as a task arrives',async()=>{
+  it('retires the queue entry once the agent has been told, so a restart does not repeat itself',async()=>{
     const created=await session();
-    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'external'}});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
-    const waiting=hub.inboxWait(reviewer.participant,30);
-    const started=Date.now();
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-reviewer'});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
-    const items=await waiting;
-    expect(Date.now()-started).toBeLessThan(5000);
-    expect(items.map(item=>item.type)).toContain('file_findings');
-    // An empty inbox with wait=0 still returns immediately.
-    await hub.ackInbox(reviewer.participant,items.map(item=>item.itemId));
-    expect(await hub.inboxWait(reviewer.participant,0)).toEqual([]);
+    await dispatcher.drain();
+    expect(sent).toHaveLength(2);
+    // Nobody acks for itself any more, so an item that stays pending means "the wake-up never landed".
+    expect(store.listInbox(reviewer.participant.participantId)).toHaveLength(0);
+    expect(hub.participantsForHuman(created.sessionId).every(entry=>entry.pendingTasks===0)).toBe(true);
   });
 });
 
@@ -296,9 +295,9 @@ describe('collaboration wiring over HTTP',()=>{
     const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
     const agent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id})).data;
     const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Managed dispatch review',workspaceId:workspace.id,subject:{type:'free',value:'everything'}})).data.sessionId;
-    const managed=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-managed',binding:{type:'managed',agentId:agent.agentId}})).data;
+    const managed=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-managed',agentId:agent.agentId})).data;
     expect(managed.participantToken).toMatch(/^cpt_/);
-    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',binding:{type:'external'}})).data;
+    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:'agent-impl'})).data;
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
 
     // The managed reviewer must have been prompted by the hub, with a usable participant token.
@@ -309,10 +308,6 @@ describe('collaboration wiring over HTTP',()=>{
     expect(prompt).toContain(managed.participantToken);
     expect(prompt).toContain('task now due: file_findings');
     expect(prompt).toContain(`${base}/api/v1/collab/sessions/${sessionId}`);
-
-    // A long poll returns the queued task for an external participant.
-    const inbox=(await call('GET',`/api/v1/collab/sessions/${sessionId}/inbox?wait=5`,undefined,implementer.participantToken));
-    expect(inbox.status).toBe(200);
 
     const escalation=await call('POST',`/api/v1/collab/sessions/${sessionId}/escalations`,{clientRequestId:rid(),kind:'other',
       summary:'The reviewer and the implementer cannot agree on the callback verification requirement.',

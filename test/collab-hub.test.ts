@@ -27,7 +27,7 @@ describe('collab hub',()=>{
 
   const resolveCwd=async()=>dir;
   const newSession=async(policy?:Record<string,unknown>)=>hub.createSession({kind:'review',title:'Payment callback review',workspaceId:'ws-1',subject:{type:'commit_range',value:'HEAD~3..HEAD'},...(policy?{policy}:{})},resolveCwd);
-  const addParticipant=(sessionId:string,role:string,displayName:string,extra:Record<string,unknown>={})=>hub.addParticipant(sessionId,{role,displayName,binding:{type:'external'},...extra});
+  const addParticipant=(sessionId:string,role:string,displayName:string,extra:Record<string,unknown>={})=>hub.addParticipant(sessionId,{role,displayName,agentId:`agent-${displayName}`,...extra});
   const finding=(overrides:Record<string,unknown>={})=>({title:'Callback signature is never verified',severity:'critical',category:'security',
     location:{path:'src/pay/callback.ts',startLine:42,endLine:58},evidence:'handleCallback() parses the body and marks the order paid without checking the HMAC.',
     suggestion:'Verify the merchant HMAC and reject stale timestamps.',...overrides});
@@ -39,7 +39,7 @@ describe('collab hub',()=>{
     const session=await newSession();
     const r1=addParticipant(session.sessionId,'reviewer','reviewer-security');
     const r2=addParticipant(session.sessionId,'reviewer','reviewer-correctness');
-    const impl=addParticipant(session.sessionId,'implementer','implementer',{binding:{type:'managed',agentId:'agent-1'}});
+    const impl=addParticipant(session.sessionId,'implementer','implementer',{agentId:'agent-1'});
     await hub.openRound(session.sessionId);
     return {session,r1:r1.participant,r2:r2.participant,impl:impl.participant,tokens:{r1:r1.token,r2:r2.token,impl:impl.token}};
   };
@@ -233,8 +233,8 @@ describe('collab hub',()=>{
 
   it('refuses to seat the same agent twice and requires an agentId for managed participants',async()=>{
     const session=await newSession();
-    hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r1',binding:{type:'managed',agentId:'agent-1'}});
-    expect(()=>hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r2',binding:{type:'managed',agentId:'agent-1'}})).toThrow(/already registered/);
+    hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r1',agentId:'agent-1'});
+    expect(()=>hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r2',agentId:'agent-1'})).toThrow(/already registered/);
     expect(()=>hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r3',binding:{type:'managed'}})).toThrow(ValidationError);
   });
 

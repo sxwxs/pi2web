@@ -10,7 +10,7 @@ export const hashToken=(token:string)=>createHash('sha256').update(token).digest
 const notFound=(code:string,message:string)=>Object.assign(new Error(message),{code});
 
 export type CreateSessionInput={kind:CollabSession['kind'],title:string,workspaceId:string,cwd:string,subject:CollabSubject,policy?:Partial<CollabPolicy>};
-export type CreateParticipantInput={sessionId:string,role:Role,displayName:string,model?:string,bindingType:'managed'|'external',agentId?:string,tokenBudget?:number};
+export type CreateParticipantInput={sessionId:string,role:Role,displayName:string,model?:string,agentId:string,tokenBudget?:number};
 export type CreateIssueInput=Omit<Issue,'issueId'|'status'|'version'|'createdAt'|'updatedAt'|'mergedInto'>&{status?:IssueStatus};
 export type CreateEscalationInput={sessionId:string,kind:EscalationKind,refId?:string,raisedBy:string,summary:string,positions:Escalation['positions'],question:string,options:string[],urgency:Urgency};
 
@@ -18,6 +18,20 @@ export type CreateEscalationInput={sessionId:string,kind:EscalationKind,refId?:s
  * SQLite persistence for the collaboration hub. Shares the Remote Pi metadata database so a single
  * backup covers agents, sessions, and collaboration state. All tables are additive; existing tables are untouched.
  */
+/**
+ * Seats live in their own DDL constant so the "binding_type is gone" migration rebuilds the table from the same
+ * definition a fresh install uses; two copies of a CREATE TABLE drift apart the first time somebody edits one.
+ */
+const PARTICIPANTS_DDL=`
+      CREATE TABLE IF NOT EXISTS collab_participants (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, display_name TEXT NOT NULL,
+        model TEXT, agent_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL, token_budget INTEGER NOT NULL, tokens_used INTEGER NOT NULL DEFAULT 0,
+        tokens_estimated INTEGER NOT NULL DEFAULT 0, token_baseline INTEGER, dispatch_token TEXT,
+        created_at INTEGER NOT NULL, last_seen_at INTEGER,
+        FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE
+      );`;
+
 export class CollabStore {
   /** Takes an accessor, not a handle: the shared database is only opened when the server starts. */
   constructor(private readonly connection:()=>Database.Database){}
@@ -31,14 +45,7 @@ export class CollabStore {
         policy_json TEXT NOT NULL, status TEXT NOT NULL, stalled_json TEXT, outcome_json TEXT,
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS collab_participants (
-        id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, display_name TEXT NOT NULL,
-        model TEXT, binding_type TEXT NOT NULL, agent_id TEXT, token_hash TEXT NOT NULL UNIQUE,
-        state TEXT NOT NULL, token_budget INTEGER NOT NULL, tokens_used INTEGER NOT NULL DEFAULT 0,
-        tokens_estimated INTEGER NOT NULL DEFAULT 0, token_baseline INTEGER,
-        created_at INTEGER NOT NULL, last_seen_at INTEGER,
-        FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE
-      );
+      ${PARTICIPANTS_DDL}
       CREATE TABLE IF NOT EXISTS collab_events (
         session_id TEXT NOT NULL, sequence INTEGER NOT NULL, id TEXT NOT NULL, type TEXT NOT NULL,
         actor_id TEXT, payload_json TEXT NOT NULL, created_at INTEGER NOT NULL,
@@ -102,7 +109,7 @@ export class CollabStore {
       );
       CREATE TABLE IF NOT EXISTS collab_inbox (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL, participant_id TEXT NOT NULL, type TEXT NOT NULL,
-        payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, delivered_at INTEGER, acked_at INTEGER,
+        payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, acked_at INTEGER,
         FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE
       );
       CREATE TABLE IF NOT EXISTS collab_phase_completions (
@@ -129,7 +136,20 @@ export class CollabStore {
     // Additive migration: a managed participant keeps its token in clear text so the hub can hand it to the agent it wakes.
     const participantColumns=this.db.prepare('PRAGMA table_info(collab_participants)').all() as {name:string}[];
     if(!participantColumns.some(column=>column.name==='dispatch_token'))this.db.exec('ALTER TABLE collab_participants ADD COLUMN dispatch_token TEXT');
-    if(Number(this.db.pragma('user_version',{simple:true}))<3)this.db.pragma('user_version = 3');
+    // Rebuild migration: `binding_type` is gone (every seat is a local agent now) and it was NOT NULL, so an
+    // insert against the new column list would fail on a database created before that decision. A legacy
+    // self-service seat keeps its row with an empty agent_id; the dispatcher reports it instead of guessing.
+    if(participantColumns.some(column=>column.name==='binding_type')){
+      this.db.exec(`
+        ALTER TABLE collab_participants RENAME TO collab_participants_legacy;
+        ${PARTICIPANTS_DDL}
+        INSERT INTO collab_participants(id,session_id,role,display_name,model,agent_id,token_hash,state,token_budget,tokens_used,tokens_estimated,token_baseline,created_at,last_seen_at,dispatch_token)
+          SELECT id,session_id,role,display_name,model,COALESCE(agent_id,''),token_hash,state,token_budget,tokens_used,tokens_estimated,token_baseline,created_at,last_seen_at,dispatch_token FROM collab_participants_legacy;
+        DROP TABLE collab_participants_legacy;
+        CREATE INDEX IF NOT EXISTS collab_participants_session ON collab_participants(session_id);
+      `);
+    }
+    if(Number(this.db.pragma('user_version',{simple:true}))<4)this.db.pragma('user_version = 4');
   }
 
   transaction<T>(work:()=>T):T{return this.db.transaction(work)()}
@@ -172,8 +192,8 @@ export class CollabStore {
   createParticipant(input:CreateParticipantInput):{participant:Participant,token:string}{
     const participantId=`p-${randomUUID()}`,token=`cpt_${randomUUID().replace(/-/g,'')}${randomUUID().replace(/-/g,'')}`,timestamp=now();
     const session=this.getSession(input.sessionId);
-    this.db.prepare(`INSERT INTO collab_participants(id,session_id,role,display_name,model,binding_type,agent_id,token_hash,state,token_budget,tokens_used,tokens_estimated,created_at) VALUES(?,?,?,?,?,?,?,?,'active',?,0,0,?)`)
-      .run(participantId,input.sessionId,input.role,input.displayName,input.model??null,input.bindingType,input.agentId??null,hashToken(token),input.tokenBudget??session.policy.tokenBudgetPerParticipant,timestamp);
+    this.db.prepare(`INSERT INTO collab_participants(id,session_id,role,display_name,model,agent_id,token_hash,state,token_budget,tokens_used,tokens_estimated,created_at) VALUES(?,?,?,?,?,?,?,'active',?,0,0,?)`)
+      .run(participantId,input.sessionId,input.role,input.displayName,input.model??null,input.agentId,hashToken(token),input.tokenBudget??session.policy.tokenBudgetPerParticipant,timestamp);
     return {participant:this.getParticipant(participantId),token};
   }
   getParticipant(participantId:string):Participant{
@@ -187,13 +207,13 @@ export class CollabStore {
   }
   listParticipants(sessionId:string):Participant[]{return (this.db.prepare('SELECT * FROM collab_participants WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[]).map(participantFrom)}
   /**
-   * Moves a seat between `managed` and `external`. The token is rotated because the old one may already be in the
-   * hands of whoever used to hold the seat, and a managed seat needs a plaintext token the hub can hand over.
+   * Hands the seat to another local agent. The token is rotated because the old one is already in the old
+   * agent's conversation, and the hub keeps the new plaintext copy: it is what the next wake-up carries.
    */
-  rebindParticipant(participantId:string,agentId?:string):{participant:Participant,token:string}{
+  rebindParticipant(participantId:string,agentId:string):{participant:Participant,token:string}{
     const token=`cpt_${randomUUID().replace(/-/g,'')}${randomUUID().replace(/-/g,'')}`;
-    this.db.prepare('UPDATE collab_participants SET binding_type=?,agent_id=?,token_hash=?,dispatch_token=? WHERE id=?')
-      .run(agentId?'managed':'external',agentId??null,hashToken(token),agentId?token:null,participantId);
+    this.db.prepare('UPDATE collab_participants SET agent_id=?,token_hash=?,dispatch_token=? WHERE id=?')
+      .run(agentId,hashToken(token),token,participantId);
     return {participant:this.getParticipant(participantId),token};
   }
   updateParticipant(participantId:string,patch:Partial<Pick<Participant,'state'|'tokensUsed'|'tokenBudget'|'tokensEstimated'|'lastSeenAt'|'model'>>):Participant{
@@ -322,7 +342,7 @@ export class CollabStore {
     return this.getEscalation(escalationId);
   }
 
-  // ---- inbox (external agents poll this; managed agents are woken directly) ----
+  // ---- inbox: the durable wake-up queue (acked once the hub has told the agent) ----
   pushInbox(sessionId:string,participantId:string,type:string,payload:Record<string,unknown>):InboxItem{
     const itemId=`in-${randomUUID()}`,timestamp=now();
     this.db.prepare('INSERT INTO collab_inbox(id,session_id,participant_id,type,payload_json,created_at) VALUES(?,?,?,?,?,?)').run(itemId,sessionId,participantId,type,JSON.stringify(payload),timestamp);
@@ -330,9 +350,8 @@ export class CollabStore {
   }
   listInbox(participantId:string,includeAcked=false,limit=50):InboxItem[]{
     const rows=this.db.prepare(`SELECT * FROM collab_inbox WHERE participant_id=?${includeAcked?'':' AND acked_at IS NULL'} ORDER BY created_at, rowid LIMIT ?`).all(participantId,Math.min(200,Math.max(1,limit))) as any[];
-    return rows.map(row=>({itemId:row.id,sessionId:row.session_id,participantId:row.participant_id,type:row.type,payload:json(row.payload_json,{}),createdAt:iso(row.created_at),deliveredAt:row.delivered_at?iso(row.delivered_at):undefined,ackedAt:row.acked_at?iso(row.acked_at):undefined}));
+    return rows.map(row=>({itemId:row.id,sessionId:row.session_id,participantId:row.participant_id,type:row.type,payload:json(row.payload_json,{}),createdAt:iso(row.created_at),ackedAt:row.acked_at?iso(row.acked_at):undefined}));
   }
-  markDelivered(itemIds:string[]){if(!itemIds.length)return;const timestamp=now(),update=this.db.prepare('UPDATE collab_inbox SET delivered_at=COALESCE(delivered_at,?) WHERE id=?');this.db.transaction(()=>{for(const id of itemIds)update.run(timestamp,id)})()}
   ackInbox(participantId:string,itemIds:string[]){if(!itemIds.length)return;const timestamp=now(),update=this.db.prepare('UPDATE collab_inbox SET acked_at=? WHERE id=? AND participant_id=?');this.db.transaction(()=>{for(const id of itemIds)update.run(timestamp,id,participantId)})()}
 
   // ---- scoring: criteria, votes, scores, debates ----
@@ -427,7 +446,7 @@ const sessionFrom=(row:any):CollabSession=>({
 });
 const participantFrom=(row:any):Participant=>({
   participantId:row.id,sessionId:row.session_id,role:row.role,displayName:row.display_name,model:row.model??undefined,
-  binding:{type:row.binding_type,agentId:row.agent_id??undefined},state:row.state,
+  agentId:row.agent_id??'',state:row.state,
   tokenBudget:row.token_budget,tokensUsed:row.tokens_used,tokensEstimated:!!row.tokens_estimated,
   createdAt:iso(row.created_at),lastSeenAt:row.last_seen_at?iso(row.last_seen_at):undefined
 });

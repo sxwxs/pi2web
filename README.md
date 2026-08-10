@@ -175,23 +175,23 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 两种凭证：**配对码**代表人，可以建会话、登记参与者、强制推进、裁定升级；**participantToken** 代表一个 Agent，只能操作自己所在的会话。会话和参与者只能由人创建，Agent 无法自助加入。
 
-参与者有两种绑定方式（登记只在 `draft` / `implementing` / `collecting`——scoring 会话则是 `nominating`——阶段开放，中枢会当场把当前任务派给新座位；其它阶段新增人只会把阶段卡死，因此被拒绝）。`role` 只能是 `implementer` / `reviewer` / `moderator`：`human` 不是可登记的席位——人用配对码操作，给人发一个能提名/投票/打分、面板却从不等它的 token，只会让它的提交在无人等待的情况下改变结果：
+参与者登记只在 `draft` / `implementing` / `collecting`——scoring 会话则是 `nominating`——阶段开放，中枢会当场把当前任务派给新座位；其它阶段新增人只会把阶段卡死，因此被拒绝。`role` 只能是 `implementer` / `reviewer` / `moderator`：`human` 不是可登记的席位——人用配对码操作，给人发一个能提名/投票/打分、面板却从不等它的 token，只会让它的提交在无人等待的情况下改变结果。
 
-- `binding:{"type":"managed","agentId":"agent-..."}`：绑定本机 pi2web Agent。轮到它干活时中枢直接把任务包 prompt 给该 Agent（忙碌时用 follow-up 排队），无需轮询；participantToken 由中枢保管并写进唤醒消息，会话结束后清除保管的明文副本。
-- `binding:{"type":"external"}`：外部 Agent（Claude Code / Codex / CI）。用 `GET .../inbox?wait=30` 长轮询领任务（最长 60 秒），`POST .../inbox/ack` 确认。**中枢不会主动唤醒 external 参与者**：如果没有人拿着它的 participantToken 去轮询，事件日志里会出现 `task_assigned` 但没有任何 Agent 开工。登错了可以改绑：
-  `POST /sessions/{sessionId}/participants/{participantId}/binding -d '{"agentId":"agent-..."}'`（传空体 `{}` 则改回 external）——改绑会轮换 participantToken，并把已在 inbox 里的任务立即推给新绑定的 Agent。
+每个座位都绑定一个**本机 pi2web Agent**（`agentId` 必填；同一个 Agent 在一个会话里只能占一个座位，否则同一个模型能投两票）。轮到它干活时，中枢直接把任务包 prompt 给该 Agent（忙碌时用 follow-up 排队）。**没有自助参与，也没有任何轮询接口**：Agent 不需要（也无法）盯着中枢等活儿；participantToken 由中枢保管并写进唤醒消息，会话结束后清除保管的明文副本。
 
-**中枢是推送式的**：任何一方交完自己的活就应当结束回合，绝不要 sleep 轮询等别人。评审方提交完 findings、开发方要回应时，中枢会主动把任务推给开发 Agent；会话结束时也会推一条 `session_result` 收尾消息，所以没有人需要守着等结果。托管 Agent 的唤醒消息里明确写了这条规则。
+绑错了 Agent（或该 Agent 被删了、卡死了）就改绑：`POST /sessions/{sessionId}/participants/{participantId}/binding -d '{"agentId":"agent-..."}'`——改绑会轮换 participantToken，并把这个座位当前欠的任务重新推给新 Agent（即使旧 Agent 已经收到过）。任务队列在中枢侧持久化，且只有“已告知对应 Agent”的条目才会销掉；所以看板上的“N 未送达”就是“唤醒没成功”，超过两分钟会直接报警。
 
-> 安全提示：托管参与者的 participantToken 会以明文存在 `remote-pi.db`（0600）并出现在被唤醒 Agent 的会话记录里；它的权限仅限该协作会话，但会话结束后 token 本身仍然有效（只是没有任何待办），需要更严的隔离时请用 `external` 绑定自行分发凭证。
+**中枢是推送式的**：任何一方交完自己的活就应当结束回合，绝不要 sleep 轮询等别人。评审方提交完 findings、开发方要回应时，中枢会主动把任务推给开发 Agent；会话结束时也会推一条 `session_result` 收尾消息，所以没有人需要守着等结果。唤醒消息里明确写了这条规则。
+
+> 安全提示：座位的 participantToken 会以明文存在 `remote-pi.db`（0600）并出现在被唤醒 Agent 的会话记录里；它的权限仅限该协作会话，会话结束后中枢会丢弃自己保管的副本。
 
 最小流程（review）：
 
 ```bash
 H="Authorization: Bearer $PAIRING_CODE"; B=http://127.0.0.1:11318/api/v1/collab
 curl -H "$H" -X POST $B/sessions -d '{"kind":"review","title":"支付回调评审","workspaceId":"ws-...","subject":{"type":"commit_range","value":"HEAD~1..HEAD"}}'
-curl -H "$H" -X POST $B/sessions/$SID/participants -d '{"role":"reviewer","displayName":"reviewer-security","binding":{"type":"external"}}'   # 返回一次性 participantToken
-curl -H "$H" -X POST $B/sessions/$SID/participants -d '{"role":"implementer","displayName":"impl","binding":{"type":"managed","agentId":"agent-..."}}'
+curl -H "$H" -X POST $B/sessions/$SID/participants -d '{"role":"reviewer","displayName":"reviewer-security","agentId":"agent-..."}'   # 返回一次性 participantToken
+curl -H "$H" -X POST $B/sessions/$SID/participants -d '{"role":"implementer","displayName":"impl","agentId":"agent-..."}'
 curl -H "$H" -X POST $B/sessions/$SID/advance -d '{}'                                   # 开闸，中枢开始派活
 curl -H "Authorization: Bearer $PTOKEN" $B/sessions/$SID/digest                          # Agent 侧：我现在该干什么
 ```
@@ -207,7 +207,7 @@ draft ──advance──▶ implementing ──POST /ready 或托管 Agent 空�
                                        └── verdict=reject → issue 回到 open，下一轮重新钉基线复审
 ```
 
-- 开发 Agent 拿到的任务是 `implement`。它收到的是一份**只讲活儿的工单**（目标、工作目录、完工后 `POST /ready`），不含评审协议细节——因为这一步还用不上，而且知道得越多越容易自己 sleep 轮询评审意见。绑定为 `managed` 时，pi2web 收到该 Agent 的 `agent_settled` 且它确实持有本轮 `implement` 任务，就自动视为完工（`policy.autoReviewOnAgentIdle`，默认 true），无需任何人点按钮。
+- 开发 Agent 拿到的任务是 `implement`。它收到的是一份**只讲活儿的工单**（目标、工作目录、完工后 `POST /ready`），不含评审协议细节——因为这一步还用不上，而且知道得越多越容易自己 sleep 轮询评审意见。pi2web 收到该 Agent 的 `agent_settled` 且它确实持有本轮 `implement` 任务，就自动视为完工（`policy.autoReviewOnAgentIdle`，默认 true），无需任何人点按钮。
 - 中枢在切到 `collecting` 的瞬间钉基线，并给**每个**评审 Agent 派任务；所有评审 Agent 都提交 `reviewComplete=true` 后才推进——这就是"需要所有评审 agent 达成一致"。零 issue 即通过。
 - 评审方交完之后，**中枢主动回头叫开发 Agent**：`respond_to_issues` 任务连同 issue 原文一起 prompt 过去。开发方不需要（也不应该）轮询评审结果。
 - 有问题时：评审方 `POST /findings` → 中枢转给开发方 → 开发方 `POST /responses`（`fixed` / `partially_fixed` 必须附 changes 和新的 codeRef；不认可就用 `rejected` + rationale）→ **只有提出者**能 `POST /verdicts` 裁定：`accept` 关闭、`reject` 把 issue 打回下一轮（重新钉基线复审）、`escalate` 交人。
@@ -233,7 +233,7 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET /api/v1/sessions`
 - `GET/POST /api/v1/agents`
 - `GET/DELETE /api/v1/agents/:id`
-- `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/responses`、`/verdicts`、`/escalations`、`/inbox`（支持 `?wait=` 长轮询）、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
+- `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/responses`、`/verdicts`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
 - `GET /api/v1/collab/escalations`、`POST /api/v1/collab/escalations/:id/resolve`
 - `GET/POST /api/v1/terminals`
 - `GET/DELETE /api/v1/terminals/:id`

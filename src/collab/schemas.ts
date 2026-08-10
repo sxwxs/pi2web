@@ -125,13 +125,14 @@ export const createParticipantRequest=obj({
   role:oneOf(REGISTRABLE_ROLES),
   displayName:str({min:1,max:100}),
   model:optional(str({max:200})),
-  binding:obj({type:oneOf(['managed','external'] as const),agentId:optional(str({max:200}))}),
+  /** The local pi2web agent that fills this seat. The hub wakes it; nothing polls the hub. */
+  agentId:str({min:1,max:200}),
   tokenBudget:optional(num({integer:true,min:100,max:100_000_000}))
 });
 
 export const rebindParticipantRequest=obj({
-  /** Empty/absent means "make this seat external again"; a local agentId means "the hub wakes this agent". */
-  agentId:optional(str({max:200}))
+  /** Hands the seat to another local agent: the bound one died, or was picked by mistake. */
+  agentId:str({min:1,max:200})
 });
 
 /** Raising a spent budget is its own operation: an escalation ruling can only be used once. */
@@ -151,8 +152,6 @@ export const resolveEscalationRequest=obj({
   issueDecision:optional(oneOf(['resolved','wontfix','closed','reopen'] as const)),
   extra:optional(anyJson(16*1024))
 });
-
-export const ackInboxRequest=obj({itemIds:arr(str({min:1,max:100}),{min:1,max:100})});
 
 export type Schema<T>=Validator<T>;
 

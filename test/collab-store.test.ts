@@ -100,12 +100,12 @@ describe('collab store',()=>{
     expect(session.policy.scoring.convergenceRange).toBe(1.5);
     expect(session.policy.scoring.maxDebateRounds).toBe(DEFAULT_POLICY.scoring.maxDebateRounds);
     expect(store.createSession({kind:'scoring',title:'y',workspaceId:'ws-1',cwd:dir,subject:{type:'free',value:'y'}}).phase).toBe('nominating');
-    expect(Number(metadata.connection.pragma('user_version',{simple:true}))).toBe(3);
+    expect(Number(metadata.connection.pragma('user_version',{simple:true}))).toBe(4);
   });
 
   it('stores only the hash of a participant token and resolves it back',()=>{
     const session=newSession();
-    const {participant,token}=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'reviewer-security',bindingType:'external'});
+    const {participant,token}=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'reviewer-security',agentId:'agent-reviewer-security'});
     expect(participant.tokenBudget).toBe(600_000);
     expect(store.findParticipantByToken(token)?.participantId).toBe(participant.participantId);
     expect(store.findParticipantByToken('cpt_wrong')).toBeUndefined();
@@ -116,7 +116,7 @@ describe('collab store',()=>{
 
   it('locks writes once the token budget is spent but keeps the record readable',()=>{
     const session=newSession();
-    const {participant}=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',bindingType:'external',tokenBudget:1000});
+    const {participant}=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',agentId:'agent-r1',tokenBudget:1000});
     expect(store.addTokenUsage(participant.participantId,400,false).state).toBe('active');
     const exhausted=store.addTokenUsage(participant.participantId,700,true);
     expect(exhausted.state).toBe('budget_exhausted');
@@ -139,8 +139,8 @@ describe('collab store',()=>{
 
   it('tracks issues with optimistic locking and an append-only message trail',()=>{
     const session=newSession();
-    const reporter=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',bindingType:'external'}).participant;
-    const target=store.createParticipant({sessionId:session.sessionId,role:'implementer',displayName:'impl',bindingType:'managed',agentId:'agent-1'}).participant;
+    const reporter=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',agentId:'agent-r1'}).participant;
+    const target=store.createParticipant({sessionId:session.sessionId,role:'implementer',displayName:'impl',agentId:'agent-1'}).participant;
     const baseline=store.saveBaseline({sessionId:session.sessionId,round:1,vcs:'git',commit:'9f2c1ab',paths:['src/pay']});
     const issue=newIssue(session.sessionId,reporter.participantId,target.participantId,baseline.baselineId);
     expect(issue.status).toBe('open');
@@ -171,7 +171,7 @@ describe('collab store',()=>{
 
   it('queues escalations for humans and records the final ruling',()=>{
     const session=newSession();
-    const raiser=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',bindingType:'external'}).participant;
+    const raiser=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',agentId:'agent-r1'}).participant;
     const escalation=store.createEscalation({sessionId:session.sessionId,kind:'issue_dispute',refId:'i-7',raisedBy:raiser.participantId,
       summary:'Signature check disagreement',positions:[{participantId:raiser.participantId,stance:'must_fix',rationale:'Forgeable callback'}],
       question:'Must the signature check land this round?',options:['fix now','defer'],urgency:'high'});
@@ -184,14 +184,13 @@ describe('collab store',()=>{
     expect(store.listEscalations({status:'pending'})).toHaveLength(0);
   });
 
-  it('delivers inbox items until they are acknowledged',()=>{
+  it('keeps queued wake-ups pending until they are acknowledged',()=>{
     const session=newSession();
-    const participant=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',bindingType:'external'}).participant;
+    const participant=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',agentId:'agent-r1'}).participant;
     const first=store.pushInbox(session.sessionId,participant.participantId,'review_task',{round:1});
     store.pushInbox(session.sessionId,participant.participantId,'verdict_task',{round:1});
     expect(store.listInbox(participant.participantId)).toHaveLength(2);
-    store.markDelivered([first.itemId]);
-    expect(store.listInbox(participant.participantId)[0].deliveredAt).toBeTruthy();
+    // The dispatcher acks an item once the agent has been told about it; a pending item means "not delivered yet".
     store.ackInbox(participant.participantId,[first.itemId]);
     expect(store.listInbox(participant.participantId).map(item=>item.type)).toEqual(['verdict_task']);
     expect(store.listInbox(participant.participantId,true)).toHaveLength(2);
@@ -199,7 +198,7 @@ describe('collab store',()=>{
 
   it('replays an idempotent response instead of duplicating work',()=>{
     const session=newSession();
-    const participant=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',bindingType:'external'}).participant;
+    const participant=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',agentId:'agent-r1'}).participant;
     expect(store.getIdempotent('key-1')).toBeUndefined();
     store.saveIdempotent('key-1',session.sessionId,participant.participantId,{accepted:[{issueId:'i-1'}]});
     expect(store.getIdempotent<{accepted:{issueId:string}[]}>('key-1')?.accepted[0].issueId).toBe('i-1');

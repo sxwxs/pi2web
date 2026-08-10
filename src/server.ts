@@ -36,7 +36,7 @@ export class RemotePiServer {
     const neverCollected=event.payload.reason==='task_never_collected';
     this.mailNotifier.notifyCollab({subject:`[Remote Pi] 协作会话停滞：${session.title}`,
      text:[`协作会话：${session.title}（${session.kind}，phase=${session.phase}，round=${session.round}）`,
-      neverCollected?'任务已派发但从未被领取：这些参与者是 external 绑定，中枢不会唤醒它们，必须有人拿着 participantToken 去轮询 /inbox；或在看板上把它们改绑到本机 Agent。':`已等待：${Math.round(Number(event.payload.overdueBySec??0))} 秒`,
+      neverCollected?'任务已派发但从未送达：绑定的本机 Agent 可能已被删除或卡住，请在看板上把这个座位改绑到另一个 Agent。':`已等待：${Math.round(Number(event.payload.overdueBySec??0))} 秒`,
       `未提交的参与者：${waiting.join(', ')||'（未知）'}`,'','中枢不会自动跳过任何人；如需推进请强制推进并说明理由。',`处理入口：${this.publicBaseUrl()}/collab.html?session=${session.sessionId}`].join('\n')});
    }
   }catch(error){console.error(`Collaboration mail notification failed: ${(error as Error).message}`)}

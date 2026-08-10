@@ -23,7 +23,7 @@ async function boot(policy?:Record<string,unknown>){
   const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
   const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'scoring',title:'Panel scoring of the payment refactor',workspaceId:workspace.id,
     subject:{type:'commit_range',value:'HEAD~3..HEAD'},...(policy?{policy}:{})})).data.sessionId;
-  const seat=async(role:string,displayName:string)=>(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role,displayName,binding:{type:'external'}})).data;
+  const seat=async(role:string,displayName:string)=>(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role,displayName,agentId:`agent-${displayName}`})).data;
   return {call,sessionId,seat};
 }
 
@@ -239,7 +239,7 @@ describe('panel scoring over HTTP',()=>{
   it('refuses a human seat and a scale that no score could satisfy',async()=>{
     const {call,sessionId}=await boot();
     // A `human` seat would hold a participant token with nominate/vote/score rights the panel never waits for.
-    const seatAsHuman=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'human',displayName:'operator',binding:{type:'external'}});
+    const seatAsHuman=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'human',displayName:'operator',agentId:'agent-operator'});
     expect(seatAsHuman.status).toBe(422);
     expect(seatAsHuman.error.fieldErrors[0]).toMatchObject({path:'role',code:'NOT_ALLOWED'});
 
