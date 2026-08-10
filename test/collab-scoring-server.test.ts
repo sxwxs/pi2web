@@ -139,9 +139,53 @@ describe('panel scoring over HTTP',()=>{
     expect(pending[0]).toMatchObject({kind:'score_dispute'});
     expect(pending[0].positions).toHaveLength(4); // two panelists x two contested criteria
 
-    const report=(await call('POST',`/api/v1/collab/sessions/${sessionId}/finalize`,{rulings:[{criterionId,score:5,rationale:'The risk is real but mitigated in production.'}]})).data;
+    // A score dispute is only settled through /finalize, which needs one on-scale ruling per contested criterion.
+    const viaEscalation=await call('POST',`/api/v1/collab/escalations/${pending[0].escalationId}/resolve`,{decision:'take the median',rationale:'Splitting the difference between the two panelists.'});
+    expect(viaEscalation.status).toBe(409);
+    const incomplete=await call('POST',`/api/v1/collab/sessions/${sessionId}/finalize`,{rulings:[{criterionId,score:5,rationale:'The risk is real but mitigated in production.'}]});
+    expect(incomplete.status).toBe(422);
+    expect(incomplete.error.fieldErrors[0]).toMatchObject({path:'rulings',code:'REQUIRED'});
+    const offScale=await call('POST',`/api/v1/collab/sessions/${sessionId}/finalize`,{rulings:rubric.map((criterion:any)=>({criterionId:criterion.criterionId,score:99,rationale:'Out of the configured scale on purpose.'}))});
+    expect(offScale.error.fieldErrors[0]).toMatchObject({path:'rulings[0].score',code:'OUT_OF_RANGE'});
+
+    const report=(await call('POST',`/api/v1/collab/sessions/${sessionId}/finalize`,{rulings:rubric.map((criterion:any)=>({criterionId:criterion.criterionId,score:5,rationale:'The risk is real but mitigated in production.'}))})).data;
     expect(report.criteria.find((criterion:any)=>criterion.criterionId===criterionId)).toMatchObject({finalScore:5,method:'human_ruled'});
     expect(report.dissents.length).toBeGreaterThan(0);
+    // The ruling and the dispute are one act: nothing may stay pending on the human's board afterwards.
+    expect((await call('GET','/api/v1/collab/escalations?status=pending')).data).toHaveLength(0);
     expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data).toMatchObject({phase:'finalized',status:'finished'});
+  });
+
+  it('carries an untouched criterion forward through a rescore instead of finalizing it at zero',async()=>{
+    const {call,sessionId,seat}=await boot({scoring:{minCriteria:2,maxCriteria:2,convergenceRange:1,maxDebateRounds:1}});
+    const a=await seat('reviewer','reviewer-a'),b=await seat('reviewer','reviewer-b');
+    for(const token of [a.participantToken,b.participantToken])
+      await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security')],nominationsComplete:true},token);
+    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data;
+    for(const token of [a.participantToken,b.participantToken])
+      await call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),votes:candidates.map((criterion:any)=>({criterionId:criterion.criterionId,stance:'approve',weight:0.5}))},token);
+    const rubric=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.filter((criterion:any)=>criterion.state==='approved');
+    expect(rubric).toHaveLength(2);
+    const score=(token:string,values:number[],extra:Record<string,unknown>={})=>call('POST',`/api/v1/collab/sessions/${sessionId}/scores`,{clientRequestId:rid(),
+      scores:rubric.map((criterion:any,index:number)=>({criterionId:criterion.criterionId,score:values[index],rationale:'Anchored on the callback handler and its tests.',evidence,...extra}))},token);
+    // Only the first criterion is contested; the second one is agreed at 8 and is never rescored.
+    await score(a.participantToken,[3,8]);
+    await score(b.participantToken,[9,8]);
+    const debates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/debates`)).data;
+    expect(debates).toHaveLength(1);
+    const argue=(token:string,stance:string)=>call('POST',`/api/v1/collab/sessions/${sessionId}/debates/${debates[0].debateId}/arguments`,
+      {clientRequestId:rid(),stance,argument:'The unauthenticated retry path is reachable, which is why I scored this low.',evidence},token);
+    await argue(a.participantToken,'hold');
+    await argue(b.participantToken,'lower');
+    const rescore=(token:string,value:number)=>call('POST',`/api/v1/collab/sessions/${sessionId}/scores`,{clientRequestId:rid(),
+      scores:[{criterionId:rubric[0].criterionId,score:value,rationale:'Anchored on the callback handler and its tests.',evidence,
+        changeReason:'The debate moved me: the retry path is guarded in staging.'}]},token);
+    await rescore(a.participantToken,5);
+    await rescore(b.participantToken,5);
+
+    const finished=(await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data;
+    expect(finished).toMatchObject({phase:'finalized',status:'finished'});
+    const untouched=finished.outcome.criteria.find((criterion:any)=>criterion.criterionId===rubric[1].criterionId);
+    expect(untouched).toMatchObject({finalScore:8,spread:0});
   });
 });

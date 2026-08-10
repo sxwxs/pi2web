@@ -71,6 +71,11 @@ export class CollabHub {
   retireDispatchTokens(sessionId:string){
     for(const participant of this.store.listParticipants(sessionId))if(participant.binding.type==='managed')this.store.clearDispatchToken(participant.participantId);
   }
+  /**
+   * Retires one seat's credential. Each delivery must retire its own: dropping the whole session's tokens after
+   * the first closing note would leave every later `session_result` delivery without a credential.
+   */
+  retireDispatchToken(participantId:string){this.store.clearDispatchToken(participantId)}
   /** Public so the dispatcher can log a wake-up attempt on the session timeline without reaching into internals. */
   logDispatch(sessionId:string,type:'agent_dispatched'|'dispatch_failed',payload:Record<string,unknown>){
     try{this.record(sessionId,type,payload)}catch{/* the session may have been removed while a wake-up was in flight */}
@@ -93,8 +98,15 @@ export class CollabHub {
     this.record(sessionId,'policy_updated',{policy:updated.policy});
     return updated;
   }
+  /** Phases in which a new seat can still be given a well-defined task; anywhere else it would only deadlock. */
+  private registrationPhases(session:CollabSession){return session.kind==='scoring'?['nominating']:['draft','implementing','collecting']}
   addParticipant(sessionId:string,body:unknown){
     const input=parse(createParticipantRequest,body),session=this.store.getSession(sessionId);
+    // A reviewer registered mid-flight is counted by requiredActors() immediately but has no assignment, which
+    // freezes the phase. Registration is therefore limited to the phases where the current task can be handed over.
+    if(session.status!=='active')throw flowError(COLLAB_ERRORS.wrongPhase,`Session is ${session.status}; no new participant can be registered`);
+    if(!this.registrationPhases(session).includes(session.phase))
+      throw flowError(COLLAB_ERRORS.wrongPhase,`A participant can only be registered in phase ${this.registrationPhases(session).join('/')}, but the session is in ${session.phase}. Wait for the next round, or rebind an existing seat.`);
     if(input.binding.type==='managed'&&!input.binding.agentId)throw new ValidationError([fieldError('binding.agentId','REQUIRED','A managed participant must reference an agentId')]);
     // Silently dropping the agentId is how a session ends up with participants nobody ever wakes: reject it instead.
     if(input.binding.type==='external'&&input.binding.agentId)throw new ValidationError([fieldError('binding.agentId','UNEXPECTED','An external participant polls the inbox itself; use binding.type=managed to have the hub wake that agent')]);
@@ -105,11 +117,20 @@ export class CollabHub {
     // A managed agent is woken by the hub itself, so the hub has to keep the credential it will hand over.
     if(participant.binding.type==='managed')this.store.setDispatchToken(participant.participantId,token);
     this.record(sessionId,'participant_added',{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,binding:participant.binding,model:participant.model});
-    if(session.kind==='scoring'&&session.phase==='nominating'&&participant.role==='reviewer'){
-      this.push(sessionId,participant.participantId,'nominate_criteria',{phase:session.phase,round:session.round});
-      this.record(sessionId,'task_assigned',{participantId:participant.participantId,task:'nominate_criteria',phase:session.phase,round:session.round});
-    }
+    this.assignCurrentTask(session,participant);
     return {participant,token,session};
+  }
+  /** Hands a late arrival the task the session is currently waiting for, so it never joins without an assignment. */
+  private assignCurrentTask(session:CollabSession,participant:Participant){
+    const task=session.kind==='scoring'
+      ? (session.phase==='nominating'&&participant.role==='reviewer'?'nominate_criteria':undefined)
+      : session.phase==='implementing'&&participant.role==='implementer'?'implement'
+      : session.phase==='collecting'&&participant.role!=='moderator'&&!(session.policy.implementationFirst&&participant.role==='implementer')
+        ?(participant.role==='reviewer'?'file_findings':'file_findings_optional')
+      : undefined;
+    if(!task)return;
+    this.push(session.sessionId,participant.participantId,task,{phase:session.phase,round:session.round});
+    this.record(session.sessionId,'task_assigned',{participantId:participant.participantId,task,phase:session.phase,round:session.round});
   }
   /**
    * Repairs a mis-registered seat: `external` <-> `managed`. Without it, the only way out of "the hub never wakes
@@ -209,19 +230,43 @@ export class CollabHub {
   }
   listEscalations(filter:{sessionId?:string,status?:'pending'|'resolved'|'dismissed',limit?:number}={}){return this.store.listEscalations(filter)}
   getEscalation(escalationId:string){return this.store.getEscalation(escalationId)}
-  /** A human ruling is terminal: the issue moves to a status no agent may change. */
+  /**
+   * A human ruling is terminal. Every escalation kind carries its own structured action:
+   * an issue dispute rules on the issue, an exhausted budget can be raised, a deadlock can raise the round cap,
+   * and a score dispute is settled by /finalize (which needs one validated ruling per contested criterion).
+   */
   async resolveEscalation(escalationId:string,body:unknown,resolvedBy='human'){
     const input=parse(resolveEscalationRequest,body),escalation=this.store.getEscalation(escalationId);
     if(escalation.status!=='pending')throw flowError(COLLAB_ERRORS.conflict,`Escalation is already ${escalation.status}`);
+    const session=this.store.getSession(escalation.sessionId);
+    if(escalation.kind==='score_dispute')
+      throw flowError(COLLAB_ERRORS.wrongPhase,`A score dispute is settled by POST /api/v1/collab/sessions/${escalation.sessionId}/finalize with one ruling per contested criterion; that call resolves this escalation.`);
+    const extra=(input.extra??{}) as Record<string,unknown>;
     const resolved=this.store.resolveEscalation(escalationId,{decision:input.decision,rationale:input.rationale,issueDecision:input.issueDecision,extra:input.extra},resolvedBy);
-    if(escalation.refId&&input.issueDecision){
+    if(escalation.kind==='issue_dispute'&&escalation.refId&&input.issueDecision){
       const issue=this.store.getIssue(escalation.refId),outcome=applyHumanRuling(this.toFlowIssue(issue),input.issueDecision);
       this.store.updateIssue(issue.issueId,{status:outcome.status,round:outcome.round});
       this.store.addIssueMessage(issue.issueId,outcome.round,resolvedBy,'ruling',{decision:input.decision,rationale:input.rationale,issueDecision:input.issueDecision});
       this.record(escalation.sessionId,'issue_ruled',{issueId:issue.issueId,status:outcome.status,decision:input.issueDecision},resolvedBy);
     }
-    this.record(escalation.sessionId,'escalation_resolved',{escalationId,decision:input.decision,rationale:input.rationale},resolvedBy);
-    await this.settle(escalation.sessionId);
+    // "raise budget": without applying it the participant stays blocked and the phase never moves.
+    if(escalation.kind==='budget_exhausted'&&escalation.refId&&typeof extra.tokenBudget==='number'){
+      const participant=this.store.getParticipant(escalation.refId);
+      const tokenBudget=Math.max(participant.tokensUsed+1,Math.round(extra.tokenBudget));
+      const updated=this.store.updateParticipant(participant.participantId,{tokenBudget,state:participant.state==='budget_exhausted'?'active':participant.state});
+      this.record(escalation.sessionId,'budget_raised',{participantId:updated.participantId,tokenBudget:updated.tokenBudget,tokensUsed:updated.tokensUsed},resolvedBy);
+    }
+    // "raise the round cap": the deadlock escalation is only useful if the new cap actually takes effect.
+    if(escalation.kind==='other'&&typeof extra.maxTotalRounds==='number'&&extra.maxTotalRounds>session.policy.maxTotalRounds){
+      const policy={...session.policy,maxTotalRounds:Math.min(50,Math.round(extra.maxTotalRounds))};
+      this.store.updateSession(session.sessionId,{policy});
+      this.record(escalation.sessionId,'policy_updated',{policy},resolvedBy);
+    }
+    this.record(escalation.sessionId,'escalation_resolved',{escalationId,kind:escalation.kind,decision:input.decision,rationale:input.rationale},resolvedBy);
+    // A scoring session must be settled by the scoring machine; running the review machine on it moves
+    // `awaiting_human` into the review-only `adjudicating` phase.
+    if(session.kind==='scoring')await this.settleScoring(escalation.sessionId);
+    else await this.settle(escalation.sessionId);
     return resolved;
   }
 
@@ -394,7 +439,31 @@ export class CollabHub {
     if(canSeeOthersFindings(snapshot))return issues;
     return issues.filter(issue=>issue.reporterId===participant.participantId||issue.targetParticipantId===participant.participantId);
   }
-  events(sessionId:string,since=0,limit=500){return this.store.listEvents(sessionId,since,limit)}
+  /**
+   * Event history. A participant token may read the timeline, but not through it: while a phase is sealed the
+   * payload of somebody else's submission is withheld, otherwise `blindFindings` could be defeated by
+   * reading `issue_opened` (title, severity, target) out of the log.
+   */
+  events(sessionId:string,since=0,limit=500,viewer?:Participant){return this.redactEvents(sessionId,this.store.listEvents(sessionId,since,limit),viewer)}
+  /** Tail of the timeline. The board needs the *latest* events; paging from sequence 0 stops showing new ones. */
+  recentEvents(sessionId:string,limit=200,viewer?:Participant){return this.redactEvents(sessionId,this.store.listRecentEvents(sessionId,limit),viewer)}
+  private redactEvents(sessionId:string,events:CollabEvent[],viewer?:Participant):CollabEvent[]{
+    if(!viewer)return events;
+    const session=this.store.getSession(sessionId);
+    const sealed=new Set<string>();
+    if(session.kind==='review'){
+      if(!canSeeOthersFindings(this.snapshot(sessionId)))for(const type of ['issue_opened','findings_submitted'])sealed.add(type);
+    }else{
+      const snapshot=this.scoringSnapshot(sessionId);
+      if(nominationsSealed(snapshot))sealed.add('criteria_nominated');
+      if(votesSealed(snapshot))sealed.add('criteria_voted');
+      if(scoresSealed(snapshot))sealed.add('scores_submitted');
+    }
+    if(!sealed.size)return events;
+    // The event itself stays visible so sequence numbers remain a usable cursor; only its content is withheld.
+    return events.map(event=>sealed.has(event.type)&&event.actorId!==viewer.participantId
+      ?{...event,payload:{redacted:true,reason:'sealed_until_the_phase_closes'}}:event);
+  }
   progress(sessionId:string){return this.store.getSession(sessionId).kind==='scoring'?scoringProgress(this.scoringSnapshot(sessionId)):sessionProgress(this.snapshot(sessionId))}
   issueDetail(sessionId:string,issueId:string){
     const issue=this.store.findIssueInSession(sessionId,issueId);
@@ -534,13 +603,38 @@ export class CollabHub {
     const snapshot=this.scoringSnapshot(sessionId),all=this.store.listVotes(sessionId);
     return viewer&&votesSealed(snapshot)?all.filter(vote=>vote.participantId===viewer.participantId):all;
   }
-  /** Human ruling on the criteria a panel could not settle; it also closes the session. */
+  /**
+   * Human ruling on the criteria a panel could not settle; it also closes the session. It is only accepted in
+   * `awaiting_human`, and it demands exactly one on-scale ruling per contested criterion: a finalize with an
+   * empty rulings array used to be able to close a live session with an all-zero report.
+   */
   async finalizeScoring(sessionId:string,body:unknown,resolvedBy='human'){
     const input=parse(finalizeRequest,body),session=this.store.getSession(sessionId);
     if(session.kind!=='scoring')throw flowError(COLLAB_ERRORS.wrongPhase,'Only scoring sessions can be finalized');
+    if(session.phase!=='awaiting_human'||session.status!=='active')
+      throw flowError(COLLAB_ERRORS.wrongPhase,`Finalizing is only accepted in phase awaiting_human, but the session is in ${session.phase} (${session.status})`);
     const snapshot=this.scoringSnapshot(sessionId);
+    const contested=contestedCriteria(snapshot).map(entry=>entry.criterionId);
+    const {scale}=session.policy.scoring,errors:FieldError[]=[],seen=new Set<string>();
+    input.rulings.forEach((ruling,index)=>{
+      if(!contested.includes(ruling.criterionId))errors.push(fieldError(`rulings[${index}].criterionId`,'UNKNOWN_CRITERION',`${ruling.criterionId} is not one of the contested criteria (${contested.join(', ')||'none'})`));
+      if(seen.has(ruling.criterionId))errors.push(fieldError(`rulings[${index}].criterionId`,'DUPLICATE',`Criterion ${ruling.criterionId} already has a ruling`));
+      seen.add(ruling.criterionId);
+      if(ruling.score<scale.min||ruling.score>scale.max)errors.push(fieldError(`rulings[${index}].score`,'OUT_OF_RANGE',`Score must be between ${scale.min} and ${scale.max}`));
+      const quotient=(ruling.score-scale.min)/scale.step;
+      if(Math.abs(quotient-Math.round(quotient))>1e-9)errors.push(fieldError(`rulings[${index}].score`,'NOT_A_MULTIPLE',`Score must be a multiple of ${scale.step}`));
+    });
+    for(const criterionId of contested)if(!seen.has(criterionId))
+      errors.push(fieldError('rulings','REQUIRED',`Contested criterion "${this.store.getCriterion(criterionId).name}" (${criterionId}) needs a ruling`));
+    if(errors.length)throw new ValidationError(errors);
     const rulings=Object.fromEntries(input.rulings.map(ruling=>[ruling.criterionId,ruling.score]));
     const report=finalizeScores(snapshot,rulings);
+    // The dispute and the ruling are the same act: leaving the escalation pending would keep the board red forever.
+    const pending=this.store.findPendingEscalation(sessionId,'score_dispute');
+    if(pending){
+      this.store.resolveEscalation(pending.escalationId,{decision:'scores_ruled',rationale:'Final scores were set by a human via /finalize',rulings:input.rulings},resolvedBy);
+      this.record(sessionId,'escalation_resolved',{escalationId:pending.escalationId,kind:'score_dispute',decision:'scores_ruled'},resolvedBy);
+    }
     this.store.updateSession(sessionId,{phase:'finalized',status:'finished',outcome:{...report,rulings:input.rulings,resolvedBy}});
     this.record(sessionId,'session_finished',{outcome:report},resolvedBy);
     this.announceFinish(this.store.getSession(sessionId));

@@ -37,15 +37,21 @@ export class CollabDispatcher {
   }
   /**
    * Wake-ups are triggered by events, and events are not replayed after a restart. Without this,
-   * a managed agent whose task was queued before the restart would wait forever.
+   * a managed agent whose task was queued before the restart would wait forever. Finished sessions are
+   * scanned too: a crash between `announceFinish()` and the delayed dispatch would otherwise leave the
+   * closing note undelivered, and a managed agent waiting for a result that never comes.
    */
   private resumePending(){
     try{
-      for(const session of this.hub.store.listSessions({status:'active',limit:200})){
+      const sessions=[...this.hub.store.listSessions({status:'active',limit:200}),...this.hub.store.listSessions({status:'finished',limit:50})];
+      for(const session of sessions){
         for(const participant of this.hub.store.listParticipants(session.sessionId)){
           if(participant.binding.type!=='managed'||!participant.binding.agentId||participant.state!=='active')continue;
           const pending=this.hub.store.listInbox(participant.participantId);
-          if(pending.length)this.schedule(session.sessionId,participant.participantId,pending[pending.length-1].type);
+          const last=pending[pending.length-1];
+          // A finished session only ever has one deliverable left: its closing note.
+          if(!last||(session.status!=='active'&&last.type!=='session_result'))continue;
+          this.schedule(session.sessionId,participant.participantId,last.type);
         }
       }
     }catch(error){this.deps.log?.(`Collab dispatch resume failed: ${(error as Error).message}`)}
@@ -114,13 +120,14 @@ export class CollabDispatcher {
       await this.deps.command(agentId,kind,briefing({baseUrl:this.deps.baseUrl(),session,participant,task,token,digest}));
       this.delivered.set(participantId,key);
       this.hub.logDispatch(sessionId,'agent_dispatched',{participantId,agentId,task,kind,phase:session.phase,round:session.round});
-      // The session is over: forget this participant and drop the credential the hub was holding for it.
-      if(terminal){this.delivered.delete(participantId);this.hub.retireDispatchTokens(sessionId)}
+      // The session is over for this seat: forget it and drop only the credential the hub held for it.
+      // Clearing the whole session's tokens here would strip the seats whose closing note is still queued.
+      if(terminal){this.delivered.delete(participantId);this.hub.retireDispatchToken(participantId)}
     }catch(error){
       this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,agentId,task,reason:(error as Error).message});
       this.deps.log?.(`Collab dispatch to agent ${agentId} failed: ${(error as Error).message}`);
-      // Nobody will retry a closing note, so the credential must not be left behind either.
-      if(terminal)this.hub.retireDispatchTokens(sessionId);
+      // Nobody will retry a closing note, so this seat's credential must not be left behind either.
+      if(terminal)this.hub.retireDispatchToken(participantId);
     }
   }
 }

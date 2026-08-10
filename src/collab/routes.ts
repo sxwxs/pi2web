@@ -80,7 +80,9 @@ export class CollabRouter {
     if(method==='POST'&&tail==='advance'){human('Advancing a phase');return ok(await this.hub.advance(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='policy'){human('Changing the policy');return ok(this.hub.updatePolicy(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='open-round'){human('Opening a round');return ok(await this.hub.openRound(sessionId))}
-    if(method==='GET'&&tail==='events')return ok(this.hub.events(sessionId,number('since',0),number('limit',500)));
+    if(method==='GET'&&tail==='events')return ok(url.searchParams.has('tail')
+      ? this.hub.recentEvents(sessionId,number('tail',200),participant)
+      : this.hub.events(sessionId,number('since',0),number('limit',500),participant));
     if(method==='GET'&&tail==='digest')return ok(this.hub.digest(asParticipant()));
     if(method==='GET'&&tail==='issues'&&!sub)return ok(isHuman?this.hub.store.listIssues(sessionId):this.hub.listIssues(asParticipant()));
     if(method==='GET'&&tail==='issues'&&sub)return ok(this.hub.issueDetail(sessionId,sub));
@@ -101,7 +103,9 @@ export class CollabRouter {
     if(method==='POST'&&tail==='escalations')return ok(await this.hub.raiseEscalation(asParticipant(),await ctx.body()),202);
     if(method==='GET'&&tail==='inbox')return ok(await this.hub.inboxWait(asParticipant(),number('wait',0)));
     if(method==='POST'&&tail==='inbox'&&sub==='ack')return ok(this.hub.ackInbox(asParticipant(),parse(ackInboxRequest,await ctx.body()).itemIds));
-    if(method==='GET'&&tail==='report')return ok({session:this.hub.getSession(sessionId),progress:this.hub.progress(sessionId),issues:this.hub.store.listIssues(sessionId),escalations:this.hub.listEscalations({sessionId})});
+    // The report is the human close-out view: it lists every issue and escalation, which would defeat blind
+    // collection if a participant token could read it while the round is still open.
+    if(method==='GET'&&tail==='report'){human('Reading the session report');return ok({session:this.hub.getSession(sessionId),progress:this.hub.progress(sessionId),issues:this.hub.store.listIssues(sessionId),escalations:this.hub.listEscalations({sessionId})})}
     return undefined;
   }
 

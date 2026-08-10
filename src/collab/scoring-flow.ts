@@ -123,10 +123,24 @@ export function normalizeWeights(tallies:{criterionId:string,weight:number}[]){
 }
 
 export type CriterionAnalysis={criterionId:string,scores:{participantId:string,score:number}[],min:number,max:number,mean:number,median:number,stdev:number,range:number,contested:boolean};
+/**
+ * The scores that count for a criterion at `round`: each participant's latest submission at or before it.
+ * A rescore only covers the *contested* criteria, so an exact-round filter would drop every untouched
+ * criterion and finalize it at 0. Carrying the last score forward is what keeps the rubric intact.
+ */
+export function effectiveScores(snapshot:ScoringSnapshot,criterionId:string,round:number):FlowScore[]{
+  const latest=new Map<string,FlowScore>();
+  for(const score of snapshot.scores){
+    if(score.criterionId!==criterionId||score.round>round)continue;
+    const current=latest.get(score.participantId);
+    if(!current||score.round>=current.round)latest.set(score.participantId,score);
+  }
+  return [...latest.values()];
+}
 /** Measures disagreement per criterion for the current scoring round. */
 export function analyse(snapshot:ScoringSnapshot,round=snapshot.debateRound):CriterionAnalysis[]{
   return approvedCriteria(snapshot).map(criterion=>{
-    const entries=snapshot.scores.filter(score=>score.criterionId===criterion.criterionId&&score.round===round);
+    const entries=effectiveScores(snapshot,criterion.criterionId,round);
     const values=entries.map(entry=>entry.score);
     if(!values.length)return {criterionId:criterion.criterionId,scores:[],min:0,max:0,mean:0,median:0,stdev:0,range:0,contested:false};
     const min=Math.min(...values),max=Math.max(...values);

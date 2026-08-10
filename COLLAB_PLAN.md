@@ -437,9 +437,9 @@ POST /api/v1/collab/escalations
 |---|---|---|---|
 | POST | `/sessions` | 创建协作会话 | **仅人**（pairing code） |
 | GET | `/sessions` `/sessions/{id}` | 列表 / 详情 | 人 + 参与者 |
-| POST | `/sessions/{id}/participants` | **仅人**登记参与者，返回 participantToken + briefing | 人（pairing code） |
+| POST | `/sessions/{id}/participants` | **仅人**登记参与者，返回 participantToken + briefing；只在 `draft`/`implementing`/`collecting`（scoring 为 `nominating`）阶段开放，登记时立即派发当前任务 | 人（pairing code） |
 | POST | `/sessions/{id}/advance` | 僵局时**人工强推**（记入报告） | **仅人**（pairing code） |
-| GET | `/sessions/{id}/events?since=` | 事件回放 | 全体 |
+| GET | `/sessions/{id}/events?since=` `?tail=` | 事件回放（`tail=` 取最新 N 条）；盲评/封盘期间他人提交的 payload 对参与者按条打码 | 全体 |
 | GET | `/sessions/{id}/inbox?wait=` | 外部 Agent 长轮询任务 | 参与者本人 |
 | GET | `/sessions/{id}/digest?for=` | 角色定制的当前任务包 | 参与者本人 |
 | POST | `/sessions/{id}/findings` | 提交评审发现（批量、幂等） | 任何参与者（对称评审） |
@@ -456,7 +456,7 @@ POST /api/v1/collab/escalations
 | POST | `/escalations` | 申请人工介入 | 任何参与者 |
 | GET | `/escalations` | 待裁决队列 | 人 |
 | POST | `/escalations/{id}/resolve` | 人工裁决 | 人（pairing code） |
-| GET | `/sessions/{id}/report` | 最终报告（Markdown + JSON） | 全体 |
+| GET | `/sessions/{id}/report` | 最终报告（Markdown + JSON），含全部 issue 与升级项 | **仅人**（pairing code） |
 
 鉴权：`Authorization: Bearer <pairing code>` = 人/管理员全权；`Bearer <participantToken>` = 仅该 session 内该参与者的权限。全部写接口带 `clientRequestId` 幂等键；对象更新带 `version` 乐观锁，冲突返回 `409 CONFLICT` 与最新版本。
 
