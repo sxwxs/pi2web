@@ -253,13 +253,38 @@ describe('collab hub',()=>{
     expect(()=>hub.authenticate('cpt_nope')).toThrow(expect.objectContaining({code:'COLLAB_FORBIDDEN',httpStatus:401}));
   });
 
-  it('flags likely duplicates without merging them',async()=>{
+  it('flags likely duplicates without merging them, and never across the blind seal',async()=>{
     const {session,r1,r2}=await setup();
     await fileFindings(r1,[finding()],false);
     const second=await hub.submitFindings(r2,{clientRequestId:rid(),baselineId:store.getBaselineForRound(session.sessionId,1)!.baselineId,
       findings:[finding({title:'Callback signature is never verified in handler'})],reviewComplete:false});
-    expect(second.possibleDuplicates[0]).toMatchObject({score:expect.any(Number)});
+    // Blind collection: pointing at the rival's issueId would hand over the id needed to read the sealed finding.
+    expect(second.possibleDuplicates).toEqual([]);
     expect(store.listIssues(session.sessionId)).toHaveLength(2);
+
+    // With blind collection switched off the hint is back, because there is nothing left to protect.
+    const open=await hub.createSession({kind:'review',title:'Open review',workspaceId:'ws-1',subject:{type:'free',value:'x'},policy:{blindFindings:false}},resolveCwd);
+    const a=addParticipant(open.sessionId,'reviewer','reviewer-a').participant;
+    const b=addParticipant(open.sessionId,'reviewer','reviewer-b').participant;
+    addParticipant(open.sessionId,'implementer','impl');
+    await hub.openRound(open.sessionId);
+    await fileFindings(a,[finding()],false);
+    const echo=await hub.submitFindings(b,{clientRequestId:rid(),baselineId:store.getBaselineForRound(open.sessionId,1)!.baselineId,
+      findings:[finding({title:'Callback signature is never verified in handler'})],reviewComplete:false});
+    expect(echo.possibleDuplicates[0]).toMatchObject({score:expect.any(Number)});
+  });
+
+  it('keeps a sealed finding unreadable even when its id is known',async()=>{
+    const {session,r1,r2}=await setup();
+    const {accepted}=await fileFindings(r1,[finding()],false);
+    const issueId=accepted[0].issueId;
+    // The rival may hold the id (from an earlier round, a duplicate hint, or a guess): the read must still 404.
+    expect(()=>hub.issueDetail(session.sessionId,issueId,r2)).toThrow(expect.objectContaining({code:'COLLAB_ISSUE_NOT_FOUND',httpStatus:404}));
+    expect(hub.issueDetail(session.sessionId,issueId,r1)).toMatchObject({issueId});
+    expect(hub.issueDetail(session.sessionId,issueId)).toMatchObject({issueId});    // the human sees everything
+    await fileFindings(r1,[],true);
+    await fileFindings(r2,[],true);
+    expect(hub.issueDetail(session.sessionId,issueId,r2)).toMatchObject({issueId}); // the seal lifted with the phase
   });
 
   it('keeps a replayable event log for reconnecting clients',async()=>{
@@ -307,11 +332,37 @@ describe('collab hub',()=>{
     await hub.openRound(session.sessionId);
     await fileFindings(reviewer,[finding()],false);
     const escalation=hub.listEscalations({status:'pending'})[0];
+    // A ruling is one-shot, so a payload that would apply nothing must be refused instead of consuming it.
+    await expect(hub.resolveEscalation(escalation.escalationId,{decision:'raise budget',rationale:'Give it more room to work.',extra:{tokenBudget:'50000'}})).rejects.toBeInstanceOf(ValidationError);
+    await expect(hub.resolveEscalation(escalation.escalationId,{decision:'raise budget',rationale:'Give it more room to work.',extra:{tokenBudget:50}})).rejects.toBeInstanceOf(ValidationError);
+    expect(hub.getEscalation(escalation.escalationId).status).toBe('pending');
+
     await hub.resolveEscalation(escalation.escalationId,{decision:'raise budget',rationale:'The review is worth another 50k tokens.',extra:{tokenBudget:50_000}});
     const restored=store.getParticipant(reviewer.participantId);
     expect(restored).toMatchObject({state:'active',tokenBudget:50_000});
     expect(typeOf('budget_raised')).toHaveLength(1);
+    expect(typeOf('escalation_resolved')[0].payload.applied).toEqual(['tokenBudget:50000']);
     await expect(fileFindings(restored,[finding()],true)).resolves.toMatchObject({round:1});
+  });
+
+  it('raises a spent budget outside the one-shot ruling and re-announces the pending task',async()=>{
+    const session=await newSession();
+    const reviewer=addParticipant(session.sessionId,'reviewer','reviewer-security',{tokenBudget:100}).participant;
+    addParticipant(session.sessionId,'implementer','implementer');
+    await hub.openRound(session.sessionId);
+    await fileFindings(reviewer,[finding()],false);
+    const escalation=hub.listEscalations({status:'pending'})[0];
+    // The human first chose "replace the agent", which consumes the escalation without raising anything.
+    await hub.resolveEscalation(escalation.escalationId,{decision:'replace participant',rationale:'I will hand the seat to another agent.'});
+    expect(store.getParticipant(reviewer.participantId).state).toBe('budget_exhausted');
+    await expect(hub.resolveEscalation(escalation.escalationId,{decision:'raise budget',rationale:'Changed my mind about the budget.',extra:{tokenBudget:50_000}})).rejects.toMatchObject({code:'COLLAB_CONFLICT'});
+
+    // The seat is still recoverable: raising the budget is its own endpoint, usable at any time.
+    expect(()=>hub.raiseParticipantBudget(session.sessionId,reviewer.participantId,{tokenBudget:100})).toThrow(ValidationError);
+    const raised=hub.raiseParticipantBudget(session.sessionId,reviewer.participantId,{tokenBudget:50_000});
+    expect(raised).toMatchObject({state:'active',tokenBudget:50_000});
+    expect(typeOf('task_assigned').filter(event=>event.payload.reason==='budget_raised').length).toBeGreaterThan(0);
+    await expect(fileFindings(raised,[finding()],true)).resolves.toMatchObject({round:1});
   });
 });
 

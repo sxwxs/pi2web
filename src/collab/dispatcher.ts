@@ -20,6 +20,8 @@ export type DispatchDeps={
 
 const BUSY_STATES=['starting','streaming','waiting_for_user','stopping'];
 const MAX_DIGEST_CHARS=8000;
+/** How long after a session finished a still-undelivered closing note is worth retrying. */
+const CLOSING_NOTE_RETRY_WINDOW_MS=24*3600_000;
 
 export class CollabDispatcher {
   private unsubscribe?:()=>void;
@@ -37,20 +39,24 @@ export class CollabDispatcher {
   }
   /**
    * Wake-ups are triggered by events, and events are not replayed after a restart. Without this,
-   * a managed agent whose task was queued before the restart would wait forever. Finished sessions are
-   * scanned too: a crash between `announceFinish()` and the delayed dispatch would otherwise leave the
-   * closing note undelivered, and a managed agent waiting for a result that never comes.
+   * a managed agent whose task was queued before the restart would wait forever. Recently finished sessions are
+   * scanned too: a crash between `announceFinish()` and the delayed dispatch would otherwise leave the closing
+   * note undelivered. A delivered note is acked, so this never re-fires for a note that did arrive.
    */
   private resumePending(){
     try{
-      const sessions=[...this.hub.store.listSessions({status:'active',limit:200}),...this.hub.store.listSessions({status:'finished',limit:50})];
-      for(const session of sessions){
+      const cutoff=Date.now()-CLOSING_NOTE_RETRY_WINDOW_MS;
+      const finished=this.hub.store.listSessions({status:'finished',limit:50});
+      for(const session of [...this.hub.store.listSessions({status:'active',limit:200}),...finished]){
+        const stale=session.status!=='active'&&Date.parse(session.updatedAt)<cutoff;
         for(const participant of this.hub.store.listParticipants(session.sessionId)){
           if(participant.binding.type!=='managed'||!participant.binding.agentId||participant.state!=='active')continue;
           const pending=this.hub.store.listInbox(participant.participantId);
           const last=pending[pending.length-1];
           // A finished session only ever has one deliverable left: its closing note.
           if(!last||(session.status!=='active'&&last.type!=='session_result'))continue;
+          // Past the retry window nobody is waiting any more: stop re-trying and stop holding the credential.
+          if(stale){this.hub.completeDelivery(participant.participantId,'session_result');this.hub.retireDispatchToken(participant.participantId);continue}
           this.schedule(session.sessionId,participant.participantId,last.type);
         }
       }
@@ -120,14 +126,14 @@ export class CollabDispatcher {
       await this.deps.command(agentId,kind,briefing({baseUrl:this.deps.baseUrl(),session,participant,task,token,digest}));
       this.delivered.set(participantId,key);
       this.hub.logDispatch(sessionId,'agent_dispatched',{participantId,agentId,task,kind,phase:session.phase,round:session.round});
-      // The session is over for this seat: forget it and drop only the credential the hub held for it.
-      // Clearing the whole session's tokens here would strip the seats whose closing note is still queued.
-      if(terminal){this.delivered.delete(participantId);this.hub.retireDispatchToken(participantId)}
+      // The closing note reached the agent: ack the item (a managed agent cannot ack for itself, and an
+      // unacked item would be re-scheduled on every restart) and only then drop the credential it used.
+      if(terminal){this.delivered.delete(participantId);this.hub.completeDelivery(participantId,'session_result');this.hub.retireDispatchToken(participantId)}
     }catch(error){
       this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,agentId,task,reason:(error as Error).message});
       this.deps.log?.(`Collab dispatch to agent ${agentId} failed: ${(error as Error).message}`);
-      // Nobody will retry a closing note, so this seat's credential must not be left behind either.
-      if(terminal)this.hub.retireDispatchToken(participantId);
+      // The note did NOT arrive, so the item stays unacked and the credential stays: a restart retries it
+      // inside CLOSING_NOTE_RETRY_WINDOW_MS. Retiring the token here is what used to make that retry impossible.
     }
   }
 }

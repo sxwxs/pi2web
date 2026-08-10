@@ -445,7 +445,7 @@ POST /api/v1/collab/escalations
 | POST | `/sessions/{id}/findings` | 提交评审发现（批量、幂等） | 任何参与者（对称评审） |
 | POST | `/sessions/{id}/responses` | 被指向方回应（批量、幂等） | issue 的 `targetParticipantId` |
 | POST | `/sessions/{id}/verdicts` | 提出者裁定 | issue 的 `reporterId` |
-| GET | `/sessions/{id}/issues` | issue 看板 | 全体 |
+| GET | `/sessions/{id}/issues` | issue 看板（盲评期间参与者只能看到自己提的和指向自己的，单条 `…/issues/{iid}` 同规则） | 全体 |
 | POST | `/sessions/{id}/issues/{iid}/merge-into` | 合并重复 | moderator / 人 |
 | POST | `/sessions/{id}/criteria/nominations` | 提名评分类目 | reviewer |
 | GET | `/sessions/{id}/criteria` | 候选集 / 已锁定 rubric | 全体 |
@@ -455,7 +455,8 @@ POST /api/v1/collab/escalations
 | POST | `/sessions/{id}/debates/{did}/arguments` | 辩论发言 | reviewer |
 | POST | `/escalations` | 申请人工介入 | 任何参与者 |
 | GET | `/escalations` | 待裁决队列 | 人 |
-| POST | `/escalations/{id}/resolve` | 人工裁决 | 人（pairing code） |
+| POST | `/escalations/{id}/resolve` | 人工裁决（带结构化补救：`extra.tokenBudget` / `extra.maxTotalRounds`；参数不合法直接 422，不会默默用掉唯一一次裁定机会） | 人（pairing code） |
+| POST | `/sessions/{id}/participants/{pid}/budget` | 单独提高某个座位的 token 预算并解封 `budget_exhausted`（随时可用，不受裁定一次性限制） | 人（pairing code） |
 | GET | `/sessions/{id}/report` | 最终报告（Markdown + JSON），含全部 issue 与升级项 | **仅人**（pairing code） |
 
 鉴权：`Authorization: Bearer <pairing code>` = 人/管理员全权；`Bearer <participantToken>` = 仅该 session 内该参与者的权限。全部写接口带 `clientRequestId` 幂等键；对象更新带 `version` 乐观锁，冲突返回 `409 CONFLICT` 与最新版本。

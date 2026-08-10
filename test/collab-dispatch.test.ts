@@ -155,6 +155,42 @@ describe('collab dispatcher',()=>{
     await restarted.drain();
     await restarted.stop();
     expect(sent.at(-1)?.message).toContain('is finished');
+
+    // A delivered note is acked, so a later restart must not re-fire it (and must not log NO_DISPATCH_TOKEN).
+    sent.length=0;
+    const again=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    again.start();
+    await again.drain();
+    await again.stop();
+    expect(sent).toHaveLength(0);
+    expect(hub.events(created.sessionId).filter(event=>event.type==='dispatch_failed')).toHaveLength(0);
+  });
+
+  it('keeps a failed closing note retryable instead of burning its credential',async()=>{
+    const created=await session();
+    await dispatcher.stop();
+    let failing=true;
+    const flaky=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{if(failing)throw Error('Agent is not running');sent.push({agentId,kind,message})},
+      agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    flaky.start();
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',binding:{type:'managed',agentId:'agent-1'}});
+    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',binding:{type:'external'}});
+    await hub.openRound(created.sessionId);
+    await flaky.drain();
+    await hub.submitFindings(reviewer.participant,{clientRequestId:rid(),baselineId:(hub.digest(reviewer.participant) as any).baseline.baselineId,findings:[],reviewComplete:true});
+    await flaky.drain();
+    await flaky.stop();
+    expect(sent).toHaveLength(0);
+    // The credential must survive a failed delivery, otherwise the retry the resume exists for is impossible.
+    expect(store.getDispatchToken(reviewer.participant.participantId)).toBeTruthy();
+
+    failing=false;
+    const restarted=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    restarted.start();
+    await restarted.drain();
+    await restarted.stop();
+    expect(sent.at(-1)?.message).toContain('is finished');
+    expect(store.getDispatchToken(reviewer.participant.participantId)).toBeUndefined();
   });
 
   it('rebinds a seat that was registered as external and delivers the task it already had',async()=>{

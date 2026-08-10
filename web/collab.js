@@ -166,6 +166,24 @@
       </form>
     </div>`;
   };
+  /**
+   * 裁定只能用一次（再次提交返回 409），所以带结构化补救措施的升级必须把参数直接放在表单里：
+   * 只填 decision/rationale 的话什么都不会发生，而且那一次机会就用掉了。
+   */
+  const escalationRemedy = (session, entry) => {
+    if (entry.kind === 'budget_exhausted') {
+      const seat = (session.participants || []).find(participant => participant.participantId === entry.refId);
+      const used = seat ? seat.tokensUsed : 0;
+      return `<label>新预算（须 > 已用 ${used}）<input name="tokenBudget" type="number" min="${used + 1}" step="1" value="${Math.max(used * 2, used + 1000)}" style="width:120px"></label>
+        <span class="muted">留空 = 不提额（换人 / 强推）；提额也可事后单独调 POST /participants/{id}/budget。</span>`;
+    }
+    if (entry.kind === 'other') {
+      const cap = session.policy?.maxTotalRounds ?? 0;
+      return `<label>新的最大轮数（须 > ${cap}）<input name="maxTotalRounds" type="number" min="${cap + 1}" max="50" step="1" style="width:110px"></label>
+        <span class="muted">留空 = 不抬轮次上限。</span>`;
+    }
+    return '';
+  };
   function renderDetail() {
     if (!state.detail) {$('detail').innerHTML = '<p class="muted">选择左侧的协作会话，或先创建一个。</p>'; return}
     const draft = readParticipantDraft();
@@ -197,7 +215,7 @@
               <br><button type="button" class="rebind" data-participant="${esc(participant.participantId)}">改绑…</button></td>
             <td>${esc(participant.model || '-')}</td>
             <td>${participant.tokensUsed}/${participant.tokenBudget}${participant.tokensEstimated ? ' <small class="muted">(估算)</small>' : ''}</td>
-            <td>${esc(participant.state)}</td>
+            <td>${esc(participant.state)}${participant.state === 'budget_exhausted' ? `<br><button type="button" class="raise-budget" data-participant="${esc(participant.participantId)}" data-used="${participant.tokensUsed}">提额…</button>` : ''}</td>
             <td>${participant.pendingTasks ? `${participant.pendingTasks}${participant.uncollectedTasks ? ` <span class="pill red">${participant.uncollectedTasks} 未领取</span>` : ''}` : '<span class="muted">-</span>'}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">还没有参与者</td></tr>'}
         </tbody></table>
         ${externalHint(session)}
@@ -224,7 +242,8 @@
             : `<form class="row resolve-form" data-escalation="${esc(entry.escalationId)}" style="margin-top:8px">
             <label>裁定<input name="decision" required placeholder="fix in this round"></label>
             <label style="flex:1">理由（≥10 字符）<input name="rationale" required></label>
-            ${entry.refId && entry.kind === 'issue_dispute' ? `<label>Issue 处理<select name="issueDecision"><option value="">不改状态</option><option value="resolved">resolved</option><option value="wontfix">wontfix</option><option value="closed">closed</option><option value="reopen">reopen</option></select></label>` : ''}
+            ${entry.refId && entry.kind === 'issue_dispute' ? `<label>Issue 处理<select name="issueDecision" required><option value="" disabled selected>选一个</option><option value="resolved">resolved</option><option value="wontfix">wontfix</option><option value="closed">closed</option><option value="reopen">reopen</option></select></label>` : ''}
+            ${escalationRemedy(session, entry)}
             <button type="submit">提交裁定</button>
           </form>`}
         </div>`).join('')}
@@ -313,12 +332,26 @@
       state.lastToken = result.participantToken || null;
       toast(picked ? '已改为 managed，待办任务会立即推送给该 Agent' : '已改为 external，旧 token 已失效，请复制新的 participantToken');
     });
+    for (const button of $('detail').querySelectorAll('.raise-budget')) button.onclick = guard(async () => {
+      const used = Number(button.dataset.used || 0);
+      const answer = prompt(`新的 token 预算（必须大于已用 ${used}）：`, String(Math.max(used * 2, used + 1000)));
+      if (answer === null) return;
+      await post(`/api/v1/collab/sessions/${sessionId}/participants/${button.dataset.participant}/budget`, {tokenBudget: Number(answer)});
+      toast('已提额，该座位可以继续提交');
+    });
     for (const form of $('detail').querySelectorAll('.resolve-form')) form.onsubmit = guard(async () => {
       const data = new FormData(form), issueDecision = String(data.get('issueDecision') || '');
+      // 空字符串不能当数字发出去：中枢会把非法的 extra 直接 422，而不是默默什么都不做。
+      const extra = {};
+      const budget = String(data.get('tokenBudget') || '').trim();
+      if (budget) extra.tokenBudget = Number(budget);
+      const rounds = String(data.get('maxTotalRounds') || '').trim();
+      if (rounds) extra.maxTotalRounds = Number(rounds);
       await post(`/api/v1/collab/escalations/${form.dataset.escalation}/resolve`, {
-        decision: String(data.get('decision')), rationale: String(data.get('rationale')), ...(issueDecision ? {issueDecision} : {})
+        decision: String(data.get('decision')), rationale: String(data.get('rationale')),
+        ...(issueDecision ? {issueDecision} : {}), ...(Object.keys(extra).length ? {extra} : {})
       });
-      toast('裁定已生效');
+      toast(Object.keys(extra).length ? '裁定已生效，并已应用到会话' : '裁定已生效');
     });
   }
 

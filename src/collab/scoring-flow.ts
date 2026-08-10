@@ -187,13 +187,15 @@ export function nextScoringPhase(snapshot:ScoringSnapshot,options:{forced?:boole
 }
 
 export type FinalReport={
-  criteria:{criterionId:string,name:string,weight:number,finalScore:number,method:'converged'|'debated'|'human_ruled',spread:number,perReviewer:Record<string,number>}[],
+  criteria:{criterionId:string,name:string,weight:number,finalScore:number,method:'converged'|'debated'|'human_ruled'|'forced',spread:number,perReviewer:Record<string,number>}[],
   totalScore:number,scale:{min:number,max:number},agreement:number,
   dissents:{participantId:string,criterionId:string,score:number,distanceFromFinal:number}[]
 };
 /**
  * Produces the final rubric-weighted score. Rulings win over measurement; otherwise the median is
  * used because it resists a single outlier. Dissenting scores are reported, never averaged away.
+ * A criterion that is still contested and got no ruling is reported as `forced`: calling that "converged"
+ * would let a forced advance close a session with a number the panel never agreed on.
  */
 export function finalizeScores(snapshot:ScoringSnapshot,rulings:Record<string,number>={}):FinalReport{
   const analyses=analyse(snapshot),scale=snapshot.policy.scoring.scale,span=Math.max(1,scale.max-scale.min);
@@ -202,7 +204,8 @@ export function finalizeScores(snapshot:ScoringSnapshot,rulings:Record<string,nu
     const ruled=rulings[criterion.criterionId];
     const finalScore=ruled!==undefined?ruled:analysis?.scores.length?analysis.median:0;
     return {criterionId:criterion.criterionId,name:criterion.name,weight:criterion.weight??round2(1/Math.max(1,approvedCriteria(snapshot).length)),
-      finalScore:round2(finalScore),method:(ruled!==undefined?'human_ruled':snapshot.debateRound>0?'debated':'converged') as 'converged'|'debated'|'human_ruled',
+      finalScore:round2(finalScore),
+      method:(ruled!==undefined?'human_ruled':analysis?.contested?'forced':snapshot.debateRound>0?'debated':'converged') as 'converged'|'debated'|'human_ruled'|'forced',
       spread:analysis?.range??0,perReviewer:Object.fromEntries((analysis?.scores??[]).map(entry=>[entry.participantId,entry.score]))};
   });
   const weightTotal=criteria.reduce((sum,criterion)=>sum+criterion.weight,0)||1;

@@ -188,4 +188,29 @@ describe('panel scoring over HTTP',()=>{
     const untouched=finished.outcome.criteria.find((criterion:any)=>criterion.criterionId===rubric[1].criterionId);
     expect(untouched).toMatchObject({finalScore:8,spread:0});
   });
+
+  it('closes the score dispute when a human forces the session past awaiting_human',async()=>{
+    const {call,sessionId,seat}=await boot({scoring:{minCriteria:1,maxCriteria:2,convergenceRange:1,maxDebateRounds:0}});
+    const a=await seat('reviewer','reviewer-a'),b=await seat('reviewer','reviewer-b');
+    for(const token of [a.participantToken,b.participantToken])
+      await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security')],nominationsComplete:true},token);
+    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data;
+    for(const token of [a.participantToken,b.participantToken])
+      await call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),votes:candidates.map((criterion:any)=>({criterionId:criterion.criterionId,stance:'approve',weight:0.5}))},token);
+    const rubric=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.filter((criterion:any)=>criterion.state==='approved');
+    const score=(token:string,value:number)=>call('POST',`/api/v1/collab/sessions/${sessionId}/scores`,{clientRequestId:rid(),
+      scores:rubric.map((criterion:any)=>({criterionId:criterion.criterionId,score:value,rationale:'Anchored on the callback handler and its tests.',evidence}))},token);
+    await score(a.participantToken,2);
+    await score(b.participantToken,9);
+    expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.phase).toBe('awaiting_human');
+
+    // The board's force button must not strand the dispute: /finalize refuses a finished session, so the
+    // escalation used to stay pending with no endpoint able to close it.
+    await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{force:true,reason:'The panel is out of time and the release is blocked.'});
+    const finished=(await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data;
+    expect(finished).toMatchObject({phase:'finalized',status:'finished'});
+    expect((await call('GET','/api/v1/collab/escalations?status=pending')).data).toHaveLength(0);
+    // A score nobody agreed on is reported as forced, never as "converged".
+    expect(finished.outcome.criteria.every((criterion:any)=>criterion.method==='forced')).toBe(true);
+  });
 });
