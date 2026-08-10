@@ -10,6 +10,9 @@ import {applyEscalation,applyHumanRuling,applyResponse,applyVerdict,applyWithdra
 
 const run=promisify(execFile);
 
+/** How long a queued task may stay *uncollected* before the human is told that nobody is listening. */
+const UNCLAIMED_TASK_WARNING_MS=120_000;
+
 export type BaselineSnapshot={vcs:string,commit?:string,range?:string,dirtyHash?:string,paths:string[]};
 export type BaselineResolver=(input:{cwd:string,subject:CollabSubject,round:number})=>Promise<BaselineSnapshot>;
 export type HubOptions={resolveBaseline?:BaselineResolver,now?:()=>number,agentTokenUsage?:(agentId:string)=>Promise<number|undefined>};
@@ -690,18 +693,49 @@ export class CollabHub {
     this.record(session.sessionId,'escalation_raised',{escalationId:escalation.escalationId,kind:'other',reason:'max_total_rounds_reached'});
   }
   /** Marks a stall for humans and dashboards. It deliberately does not change the phase. */
+  /**
+   * A task that nobody has even fetched is a different failure from "the agent is thinking about it": it means the
+   * seat is external and no poller exists (or its token was never handed over). Waiting the full overdue window for
+   * that is pointless, so it gets its own, much shorter alarm.
+   */
+  private unclaimedTaskOwners(sessionId:string,overdueWarningSec:number,pending:string[]):string[]{
+    if(!pending.length)return [];
+    const cutoff=this.now()-Math.min(UNCLAIMED_TASK_WARNING_MS,overdueWarningSec*1000);
+    const ids:string[]=[];
+    for(const participant of this.store.listParticipants(sessionId)){
+      // Only someone who still owes work *and* never even fetched the task: anyone else is simply thinking.
+      if(participant.binding.type!=='external'||participant.state!=='active'||!pending.includes(participant.participantId))continue;
+      if(this.store.listInbox(participant.participantId).some(item=>!item.deliveredAt&&Date.parse(item.createdAt)<=cutoff))ids.push(participant.participantId);
+    }
+    return ids;
+  }
+  /** Participants plus the two facts a human needs when a session looks frozen: what is queued, and what was never fetched. */
+  participantsForHuman(sessionId:string){
+    return this.store.listParticipants(sessionId).map(participant=>{
+      const inbox=this.store.listInbox(participant.participantId);
+      return {...participant,pendingTasks:inbox.length,uncollectedTasks:inbox.filter(item=>!item.deliveredAt).length};
+    });
+  }
   checkStalls(){
     const changed:CollabSession[]=[];
     for(const session of this.store.listSessions({status:'active'})){
       const snapshot=this.snapshot(session.sessionId),pending=waitingOn(snapshot);
+      const unclaimed=this.unclaimedTaskOwners(session.sessionId,session.policy.overdueWarningSec,pending);
       if(session.stalled){
         /*
          * Do NOT re-run the timer here: writing the stall flag bumps updatedAt, so a fresh stallCheck would
          * always report "not overdue" and clear the flag a minute later, then alert again every window.
          * The flag only goes away when the situation actually changed.
          */
-        if(!pending.length||pending.join('|')!==session.stalled.waitingOn.join('|'))
+        const current=unclaimed.length?unclaimed:pending;
+        if(!current.length||current.join('|')!==session.stalled.waitingOn.join('|'))
           changed.push(this.store.updateSession(session.sessionId,{stalled:undefined}));
+        continue;
+      }
+      if(unclaimed.length){
+        const updated=this.store.updateSession(session.sessionId,{stalled:{since:new Date(this.now()).toISOString(),waitingOn:unclaimed}});
+        this.record(session.sessionId,'participant_overdue',{waitingOn:unclaimed,overdueBySec:0,phase:session.phase,reason:'task_never_collected'});
+        changed.push(updated);
         continue;
       }
       const check=stallCheck(snapshot,Date.parse(session.updatedAt),this.now());

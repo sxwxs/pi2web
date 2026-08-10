@@ -69,7 +69,8 @@
         api(`/api/v1/collab/sessions?limit=100${status ? `&status=${status}` : ''}`),
         api('/api/v1/collab/escalations?status=pending'),
         api('/api/v1/workspaces').catch(() => []),
-        api('/api/v1/agents').catch(() => [])
+        // A silently swallowed agent list used to leave the participant form with nothing but the external option.
+        api('/api/v1/agents').catch(error => {toast(`本机 Agent 列表加载失败：${error.message}`); return []})
       ]);
       if (state.sessionId) state.detail = await loadDetail(state.sessionId).catch(() => null);
       renderSessions(); renderWorkspaces(); renderDetail();
@@ -112,6 +113,9 @@
   function renderWorkspaces() {
     $('newWorkspace').innerHTML = state.workspaces.map(workspace => `<option value="${esc(workspace.id)}">${esc(workspace.label)}</option>`).join('');
   }
+  /** The hub reports participantIds; a human reading the board wants the names it typed in. */
+  const participantName = (session, participantId) =>
+    (session.participants || []).find(entry => entry.participantId === participantId)?.displayName || participantId;
   /** Local agents that may still take a seat: the hub rejects the same agentId twice in one session. */
   const availableAgents = session => {
     const taken = new Set((session.participants || []).map(participant => participant.binding.agentId).filter(Boolean));
@@ -148,7 +152,7 @@
         <h3><span class="grow">${esc(session.title)}</span>${phasePill(session)}<span class="pill">round ${session.round}</span><span class="pill">${esc(session.status)}</span></h3>
         <div class="muted">${esc(session.sessionId)} · ${esc(session.kind)} · ${esc(session.cwd)}</div>
         <div class="muted">对象：${esc(session.subject.type)} = ${esc(session.subject.value)}${session.subject.notes ? ` · ${esc(session.subject.notes)}` : ''}</div>
-        ${session.stalled ? `<p class="pill red">停滞自 ${esc(session.stalled.since)}，等待：${esc((session.stalled.waitingOn || []).join(', '))}</p>` : ''}
+        ${session.stalled ? `<p class="pill red" style="display:block">停滞自 ${esc(session.stalled.since)}，等待：${esc((session.stalled.waitingOn || []).map(id => participantName(session, id)).join('、'))}</p>` : ''}
         <p class="muted">进度：${esc(JSON.stringify(progress))}</p>
         ${session.policy?.implementationFirst ? '<p class="muted">模式：先开发后评审（implementing → collecting 自动切换）</p>' : ''}
         ${session.outcome?.verdict ? `<p><span class="pill ${session.outcome.verdict === 'approved' ? 'green' : 'yellow'}">结论：${esc(session.outcome.verdict)}</span>${session.outcome.approval?.unanimous ? ' <span class="pill green">评审全票通过</span>' : ''}</p>` : ''}
@@ -161,7 +165,7 @@
 
       <div class="card">
         <h3>参与者 <span class="grow"></span></h3>
-        <table><thead><tr><th>名称</th><th>角色</th><th>绑定</th><th>模型</th><th>Token</th><th>状态</th></tr></thead><tbody>
+        <table><thead><tr><th>名称</th><th>角色</th><th>绑定</th><th>模型</th><th>Token</th><th>状态</th><th>待办</th></tr></thead><tbody>
           ${(session.participants || []).map(participant => `<tr>
             <td>${esc(participant.displayName)}<br><small class="muted">${esc(participant.participantId)}</small></td>
             <td>${esc(participant.role)}</td>
@@ -169,13 +173,15 @@
               <br><button type="button" class="rebind" data-participant="${esc(participant.participantId)}">改绑…</button></td>
             <td>${esc(participant.model || '-')}</td>
             <td>${participant.tokensUsed}/${participant.tokenBudget}${participant.tokensEstimated ? ' <small class="muted">(估算)</small>' : ''}</td>
-            <td>${esc(participant.state)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">还没有参与者</td></tr>'}
+            <td>${esc(participant.state)}</td>
+            <td>${participant.pendingTasks ? `${participant.pendingTasks}${participant.uncollectedTasks ? ` <span class="pill red">${participant.uncollectedTasks} 未领取</span>` : ''}` : '<span class="muted">-</span>'}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">还没有参与者</td></tr>'}
         </tbody></table>
         ${externalHint(session)}
         <form id="participantForm" class="row" style="margin-top:10px">
           <label>角色<select id="pRole"><option value="reviewer">reviewer</option><option value="implementer">implementer</option><option value="moderator">moderator</option></select></label>
           <label>名称<input id="pName" required placeholder="reviewer-security"></label>
           <label>绑定 Agent<select id="pAgent"><option value="">external —— 自建 Agent，自行轮询 /inbox</option>${availableAgents(session).map(agent => `<option value="${esc(agent.agentId)}">managed —— ${esc(agent.sessionName || agent.agentId)}${agent.status ? ` (${esc(agent.status)})` : ''}</option>`).join('')}</select></label>
+          ${availableAgents(session).length ? '' : '<span class="pill red">没有可绑定的本机 Agent，只能登记 external</span>'}
           <label>模型标注<input id="pModel" placeholder="anthropic/claude-sonnet-4" size="18"></label>
           <button type="submit">登记参与者</button>
         </form>

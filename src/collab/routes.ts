@@ -61,7 +61,7 @@ export class CollabRouter {
     scoped(sessionId);
     const tail=parts[5],sub=parts[6];
 
-    if(method==='GET'&&!tail)return ok({...this.hub.getSession(sessionId),progress:this.hub.progress(sessionId),participants:this.hub.store.listParticipants(sessionId)});
+    if(method==='GET'&&!tail)return ok({...this.hub.getSession(sessionId),progress:this.hub.progress(sessionId),participants:isHuman?this.hub.participantsForHuman(sessionId):this.hub.store.listParticipants(sessionId)});
     if(tail==='participants'){
       if(method==='POST'){
         human('Registering a participant');
@@ -69,7 +69,7 @@ export class CollabRouter {
         // The plaintext token is returned exactly once; only its hash is stored.
         return ok({participant:created,participantToken:token,briefing:this.hub.digest(created)},201);
       }
-      if(method==='GET')return ok(this.hub.store.listParticipants(sessionId).map(entry=>({...entry})));
+      if(method==='GET')return ok(isHuman?this.hub.participantsForHuman(sessionId):this.hub.store.listParticipants(sessionId).map(entry=>({...entry})));
       // .../participants/{participantId}/binding — repairs a seat that was registered with the wrong binding.
       if(method==='POST'&&sub&&parts[7]==='binding'){
         human('Rebinding a participant');
