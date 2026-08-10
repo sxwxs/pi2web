@@ -164,6 +164,61 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 浏览器安全模型与 Android 不同：配对码默认仅保存在当前页面的 JS 内存中；连接成功后会询问是否保存，只有用户确认才写入 localStorage。服务地址、当前 Workspace/Agent 和事件 sequence cursor 会保存在 localStorage。浏览器通知要求 HTTPS 安全上下文（`localhost` 可使用 HTTP）；通过局域网 IP 的 HTTP 地址访问时无法启用。自定义 Pi TUI Component 无法在浏览器通用渲染。
 
+## 多 Agent 协作中枢（Collab Hub）
+
+在"人 ↔ 单个 Agent"之上叠加一层协作中枢：多个 Agent 只通过结构化 HTTP API 交互，中枢负责身份、状态机推进、盲评、去重、僵局告警和人工升级。设计文档见 [`COLLAB_PLAN.md`](COLLAB_PLAN.md)。
+
+两个场景：
+
+- **Review Loop**（`kind:"review"`）：提 issue → 回应 → 裁定 → 关闭或升级人工。可选**先开发后评审**（`policy.implementationFirst:true`）：会话先进入 `implementing`，开发 Agent 完工后中枢自动召集全部评审 Agent。
+- **Panel Scoring**（`kind:"scoring"`）：提名维度 → 投票锁 rubric → 盲打分 → 辩论收敛 → 出分。
+
+两种凭证：**配对码**代表人，可以建会话、登记参与者、强制推进、裁定升级；**participantToken** 代表一个 Agent，只能操作自己所在的会话。会话和参与者只能由人创建，Agent 无法自助加入。
+
+参与者有两种绑定方式：
+
+- `binding:{"type":"managed","agentId":"agent-..."}`：绑定本机 pi2web Agent。轮到它干活时中枢直接把任务包 prompt 给该 Agent（忙碌时用 follow-up 排队），无需轮询；participantToken 由中枢保管并写进唤醒消息，会话结束后清除保管的明文副本。
+- `binding:{"type":"external"}`：外部 Agent（Claude Code / Codex / CI）。用 `GET .../inbox?wait=30` 长轮询领任务（最长 60 秒），`POST .../inbox/ack` 确认。
+
+**中枢是推送式的**：任何一方交完自己的活就应当结束回合，绝不要 sleep 轮询等别人。评审方提交完 findings、开发方要回应时，中枢会主动把任务推给开发 Agent；会话结束时也会推一条 `session_result` 收尾消息，所以没有人需要守着等结果。托管 Agent 的唤醒消息里明确写了这条规则。
+
+> 安全提示：托管参与者的 participantToken 会以明文存在 `remote-pi.db`（0600）并出现在被唤醒 Agent 的会话记录里；它的权限仅限该协作会话，但会话结束后 token 本身仍然有效（只是没有任何待办），需要更严的隔离时请用 `external` 绑定自行分发凭证。
+
+最小流程（review）：
+
+```bash
+H="Authorization: Bearer $PAIRING_CODE"; B=http://127.0.0.1:11318/api/v1/collab
+curl -H "$H" -X POST $B/sessions -d '{"kind":"review","title":"支付回调评审","workspaceId":"ws-...","subject":{"type":"commit_range","value":"HEAD~1..HEAD"}}'
+curl -H "$H" -X POST $B/sessions/$SID/participants -d '{"role":"reviewer","displayName":"reviewer-security","binding":{"type":"external"}}'   # 返回一次性 participantToken
+curl -H "$H" -X POST $B/sessions/$SID/participants -d '{"role":"implementer","displayName":"impl","binding":{"type":"managed","agentId":"agent-..."}}'
+curl -H "$H" -X POST $B/sessions/$SID/advance -d '{}'                                   # 开闸，中枢开始派活
+curl -H "Authorization: Bearer $PTOKEN" $B/sessions/$SID/digest                          # Agent 侧：我现在该干什么
+```
+
+### 开发 + 评审闭环（implementationFirst）
+
+```
+draft ──advance──▶ implementing ──POST /ready 或托管 Agent 空闲──▶ collecting ──全部评审提交──▶ consolidating
+                                                                          │
+   finished ◀── 所有 issue 关闭 ── adjudicating ◀── responding ◀───────────┘
+      ▲                              │                    ▲
+      └─ 人工裁定 ◀── awaiting_human ─┘（拒绝超过 maxIssueRounds / 主动 escalate / 超过 maxTotalRounds）
+                                       └── verdict=reject → issue 回到 open，下一轮重新钉基线复审
+```
+
+- 开发 Agent 拿到的任务是 `implement`。它收到的是一份**只讲活儿的工单**（目标、工作目录、完工后 `POST /ready`），不含评审协议细节——因为这一步还用不上，而且知道得越多越容易自己 sleep 轮询评审意见。绑定为 `managed` 时，pi2web 收到该 Agent 的 `agent_settled` 且它确实持有本轮 `implement` 任务，就自动视为完工（`policy.autoReviewOnAgentIdle`，默认 true），无需任何人点按钮。
+- 中枢在切到 `collecting` 的瞬间钉基线，并给**每个**评审 Agent 派任务；所有评审 Agent 都提交 `reviewComplete=true` 后才推进——这就是"需要所有评审 agent 达成一致"。零 issue 即通过。
+- 评审方交完之后，**中枢主动回头叫开发 Agent**：`respond_to_issues` 任务连同 issue 原文一起 prompt 过去。开发方不需要（也不应该）轮询评审结果。
+- 有问题时：评审方 `POST /findings` → 中枢转给开发方 → 开发方 `POST /responses`（`fixed` / `partially_fixed` 必须附 changes 和新的 codeRef；不认可就用 `rejected` + rationale）→ **只有提出者**能 `POST /verdicts` 裁定：`accept` 关闭、`reject` 把 issue 打回下一轮（重新钉基线复审）、`escalate` 交人。
+- 谈不拢时：单个 issue 被拒超过 `maxIssueRounds`（默认 3）或会话超过 `maxTotalRounds`（默认 6）自动生成 escalation，会话进入 `awaiting_human`，同时发邮件。人裁定后是终局，Agent 不能再改。
+- 结束时 `outcome.verdict` 为 `approved` / `closed_after_human_ruling` / `closed_with_open_issues`，`outcome.approval` 记录每个评审 Agent 提了几条、还剩几条未结；同时中枢给所有参与者推一条 `session_result`，托管 Agent 会收到一句"会话结束、无需再等"的收尾消息。
+
+之后评审方 `POST /findings`、实现方 `POST /responses`、评审方 `POST /verdicts`，人用 `GET /report` 收口。校验失败返回 `422` 且带 `fieldErrors`，基线过期返回 `409 STALE_BASELINE`，预算耗尽返回 `429`；所有提交都需要 `clientRequestId` 做幂等。
+
+人工升级（escalation）进入 `GET /api/v1/collab/escalations`，用 `POST /api/v1/collab/escalations/:id/resolve` 裁定。配置了 MailDispatch 时，升级和会话停滞会立即发信（不参与聚合，可在配置对话框关闭；同一会话 5 分钟内最多一封，避免 Agent 连续升级刷爆邮箱）。
+
+Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与创建、参与者登记与一次性 token、issue/维度、待裁定队列与裁定表单、事件时间线，并通过 WebSocket `subscribe_collab` 实时刷新。
+
 ## API
 
 除 Web 静态资源、`/health` 和 `/api/v1/auth/login` 外，请求均需 `Authorization: Bearer <token>`。响应为 `{ data }` 或 `{ error: { code, message, requestId } }`。
@@ -177,11 +232,13 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 - `GET /api/v1/sessions`
 - `GET/POST /api/v1/agents`
 - `GET/DELETE /api/v1/agents/:id`
+- `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`、`/advance`、`/ready`、`/policy`、`/events`、`/digest`、`/issues`、`/findings`、`/responses`、`/verdicts`、`/escalations`、`/inbox`（支持 `?wait=` 长轮询）、`/report`，以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`
+- `GET /api/v1/collab/escalations`、`POST /api/v1/collab/escalations/:id/resolve`
 - `GET/POST /api/v1/terminals`
 - `GET/DELETE /api/v1/terminals/:id`
 - Terminal WebSocket `/api/v1/terminals/:id/ws` 支持输入、窗口 resize、输出快照和退出事件。
 - Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork`、`archive` 和 `extension-response` 接口。
-- WebSocket `/api/v1/ws` 支持 sequence、replay、snapshot、`fromNow` 和 Agent command。
+- WebSocket `/api/v1/ws` 支持 sequence、replay、snapshot、`fromNow` 和 Agent command；`subscribe_collab` 推送协作事件。
 
 ## Android App
 

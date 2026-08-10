@@ -1,6 +1,12 @@
 # pi2web 多 Agent 协作中枢（Collaboration Hub）方案 v0.3
 
-> 状态：**已定稿，进入实现**。决策记录见 §10。
+> 状态：**已实现**（M0–M7；M8 的 openapi.yaml 与 Pi 扩展工具仍未做）。决策记录见 §10。
+>
+> 实现补记：新增 **build-then-review**（`policy.implementationFirst`）——会话可先进入 `implementing` 阶段由开发 Agent 施工，`POST /sessions/{id}/ready` 或托管开发 Agent 的 `agent_settled`（`policy.autoReviewOnAgentIdle`）触发中枢自动召集全部评审 Agent；结束时 `outcome.verdict/approval` 显式记录是否全票通过。
+>
+> 实现补记：托管参与者的 participantToken 以**明文**存在 `collab_participants.dispatch_token`——中枢必须把凭证交给它唤醒的 Agent，而这一步没有人在场输入。外部参与者仍然只存 sha256；会话结束后中枢丢弃明文副本（注意：这是清除保管，不是吐销——token 本身仍能只读访问已结束的会话，且它会留在被唤醒 Agent 的会话记录里）。
+>
+> 实现补记：中枢**全程推送**。托管 Agent 的唤醒消息分三种：`implement` 只给工单（不告诉它评审协议，避免它 sleep 轮询评审意见）、其余任务给完整协议包、会话结束时给一条 `session_result` 收尾消息；每类消息都写明"无事就结束回合，中枢会再叫你"。
 >
 > v0.3 相对 v0.2 的变更（全部来自决策）：超时改为**阻塞不推进**、评审改为**对称**（允许反向评审）、evidence **强制且不可关**、session/participant **仅人可创建**、新增**每参与者 600K token 预算**、邮件**永远只是通知**。
 >
@@ -456,7 +462,7 @@ POST /api/v1/collab/escalations
 
 ---
 
-## 8. 数据模型（SQLite，与 `remote-pi.db` 同库，`user_version` 升到 2）
+## 8. 数据模型（SQLite，与 `remote-pi.db` 同库，`user_version` 升到 3）
 
 ```sql
 collab_sessions(id PK, kind, title, workspace_id, cwd, subject_json, phase, round,
@@ -500,10 +506,10 @@ collab_idempotency(key PK, session_id, participant_id, response_json, created_at
 | **M1** | `types.ts` + `validate.ts` + `store.ts` + schema 迁移 | 单测：校验器错误路径、迁移幂等 |
 | **M2** | `review-flow.ts` 纯状态机 | 单测覆盖 issue/session 全部状态迁移、僵局不推进、非提出者关闭被拒 |
 | **M3** | `hub.ts` + `routes.ts` + 鉴权 + 幂等 + WS 事件 | 端到端测试：2 reviewer + 1 implementer 走完一轮闭环 |
-| **M4** | escalation + 人工裁决 + Web UI 待裁决队列 + 邮件复用 | 测试：升级→裁决→终局不可改 |
+| **M4** | escalation + 人工裁决 + Web UI 待裁决队列 + 邮件复用 | ✅ 升级→裁决→终局不可改；`MailNotifier.notifyCollab()` 立即发信（`collabEscalations` 开关） |
 | **M5** | `scoring-flow.ts` 全阶段（提名/归并/投票/锁定/打分/辩论/收敛） | 单测：收敛判定、权重归一化、强制锁定兜底 |
-| **M6** | Dispatcher：托管 Agent 自动唤醒 + 外部长轮询 inbox + briefing 模板 | 测试：MockBackend 收到结构化任务包 |
-| **M7** | Web UI 协作看板（issue 看板 / rubric 进度 / 评分热力图 / 最终报告） | 手测 + 截图 |
+| **M6** | Dispatcher：托管 Agent 自动唤醒 + 外部长轮询 inbox + briefing 模板 | ✅ `src/collab/dispatcher.ts`；`GET /inbox?wait=` 长轮询；`test/collab-dispatch.test.ts` |
+| **M7** | Web UI 协作看板（issue 看板 / rubric 进度 / 待裁定队列 / 最终报告） | ✅ `web/collab.html` + `web/collab.js`，WS `subscribe_collab` 实时刷新；评分热力图仍待做 |
 | **M8** | 文档（README + `COLLAB.md` + openapi.yaml）+ Pi 扩展工具（方式 B） | `npm run check && npm test` 全绿 |
 
 ---
