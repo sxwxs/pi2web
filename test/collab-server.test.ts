@@ -162,6 +162,33 @@ describe('collaboration HTTP API',()=>{
     expect(events.map((event:any)=>event.sequence)).toEqual(events.map((_:unknown,index:number)=>index+1));
   });
 
+  it('routes the participant sub-resources over HTTP instead of swallowing them into registration',async()=>{
+    const {call,workspace}=await boot();
+    const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Repair paths',workspaceId:workspace.id,subject:{type:'free',value:'a'}})).data.sessionId;
+    const seat=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',binding:{type:'external'},tokenBudget:1000})).data;
+    const participantId=seat.participant.participantId;
+
+    // These two are the documented repair paths for a stuck seat. They used to answer
+    // "role REQUIRED, displayName REQUIRED, binding REQUIRED" because the register branch matched first.
+    const budget=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/budget`,{tokenBudget:900_000});
+    expect(budget.status).toBe(200);
+    expect(budget.data).toMatchObject({participantId,tokenBudget:900_000});
+    const rebound=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/binding`,{});
+    expect(rebound.status).toBe(200);
+    expect(rebound.data.participant.binding).toMatchObject({type:'external'});
+    expect(rebound.data.participantToken).toMatch(/^cpt_/);
+
+    const seats=(await call('GET',`/api/v1/collab/sessions/${sessionId}/participants`)).data;
+    expect(seats).toHaveLength(1);                                   // no stray participant was registered
+    expect(seats[0]).toMatchObject({tokenBudget:900_000});
+    // Registration itself still works, and an unknown sub-resource is a 404, not a registration.
+    expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',binding:{type:'external'}})).status).toBe(201);
+    expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/nonsense`,{})).status).toBe(404);
+    expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/advance/nonsense`,{})).status).toBe(404);
+    // A participant token must not be able to use the human repair paths (the rebind rotated it, so use the new one).
+    expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/budget`,{tokenBudget:950_000},rebound.data.participantToken)).status).toBe(403);
+  });
+
   it('keeps collaboration state across a restart',async()=>{
     const dataDir=await temp('remote-pi-collab-restart-'),root=await temp('collab-workspace-');
     server=new RemotePiServer({port:0,dataDir});

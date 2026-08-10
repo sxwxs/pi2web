@@ -60,16 +60,14 @@ export class CollabRouter {
     if(!sessionId)return undefined;
     scoped(sessionId);
     const tail=parts[5],sub=parts[6];
+    // Only these tails have sub-resources. Without this, `POST .../advance/anything` would be treated as an
+    // advance, and any future sub-path would be silently answered by the flat handler above it.
+    if(sub&&!['participants','issues','debates','inbox'].includes(tail??''))return undefined;
 
     if(method==='GET'&&!tail)return ok({...this.hub.getSession(sessionId),progress:this.hub.progress(sessionId),participants:isHuman?this.hub.participantsForHuman(sessionId):this.hub.store.listParticipants(sessionId)});
     if(tail==='participants'){
-      if(method==='POST'){
-        human('Registering a participant');
-        const {participant:created,token}=this.hub.addParticipant(sessionId,await ctx.body());
-        // The plaintext token is returned exactly once; only its hash is stored.
-        return ok({participant:created,participantToken:token,briefing:this.hub.digest(created)},201);
-      }
-      if(method==='GET')return ok(isHuman?this.hub.participantsForHuman(sessionId):this.hub.store.listParticipants(sessionId).map(entry=>({...entry})));
+      // Sub-resources first: an unguarded register branch would swallow .../participants/{id}/binding and /budget
+      // and answer them with "role is required", which is how both repair paths became unreachable over HTTP.
       // .../participants/{participantId}/binding — repairs a seat that was registered with the wrong binding.
       if(method==='POST'&&sub&&parts[7]==='binding'){
         human('Rebinding a participant');
@@ -81,6 +79,15 @@ export class CollabRouter {
         human('Raising a token budget');
         return ok(this.hub.raiseParticipantBudget(sessionId,sub,await ctx.body()));
       }
+      // An unknown sub-resource must 404, not fall through to "register a participant".
+      if(sub)return undefined;
+      if(method==='POST'){
+        human('Registering a participant');
+        const {participant:created,token}=this.hub.addParticipant(sessionId,await ctx.body());
+        // The plaintext token is returned exactly once; only its hash is stored.
+        return ok({participant:created,participantToken:token,briefing:this.hub.digest(created)},201);
+      }
+      if(method==='GET')return ok(isHuman?this.hub.participantsForHuman(sessionId):this.hub.store.listParticipants(sessionId).map(entry=>({...entry})));
     }
     if(method==='POST'&&tail==='advance'){human('Advancing a phase');return ok(await this.hub.advance(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='policy'){human('Changing the policy');return ok(this.hub.updatePolicy(sessionId,await ctx.body()))}
