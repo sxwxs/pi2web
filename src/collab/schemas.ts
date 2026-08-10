@@ -120,6 +120,11 @@ export const rebindParticipantRequest=obj({
   agentId:optional(str({max:200}))
 });
 
+/** Raising a spent budget is its own operation: an escalation ruling can only be used once. */
+export const participantBudgetRequest=obj({
+  tokenBudget:num({integer:true,min:100,max:100_000_000})
+});
+
 export const advanceRequest=obj({
   force:withDefault(bool(),()=>false),
   reason:withDefault(str({max:2000}),()=>'')

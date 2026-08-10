@@ -76,6 +76,11 @@ export class CollabRouter {
         const {participant:bound,token}=this.hub.rebindParticipant(sessionId,sub,await ctx.body());
         return ok({participant:bound,participantToken:bound.binding.type==='external'?token:undefined});
       }
+      // .../participants/{participantId}/budget — un-blocks a seat that spent its budget, at any time.
+      if(method==='POST'&&sub&&parts[7]==='budget'){
+        human('Raising a token budget');
+        return ok(this.hub.raiseParticipantBudget(sessionId,sub,await ctx.body()));
+      }
     }
     if(method==='POST'&&tail==='advance'){human('Advancing a phase');return ok(await this.hub.advance(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='policy'){human('Changing the policy');return ok(this.hub.updatePolicy(sessionId,await ctx.body()))}
@@ -85,7 +90,7 @@ export class CollabRouter {
       : this.hub.events(sessionId,number('since',0),number('limit',500),participant));
     if(method==='GET'&&tail==='digest')return ok(this.hub.digest(asParticipant()));
     if(method==='GET'&&tail==='issues'&&!sub)return ok(isHuman?this.hub.store.listIssues(sessionId):this.hub.listIssues(asParticipant()));
-    if(method==='GET'&&tail==='issues'&&sub)return ok(this.hub.issueDetail(sessionId,sub));
+    if(method==='GET'&&tail==='issues'&&sub)return ok(this.hub.issueDetail(sessionId,sub,participant));
     if(method==='POST'&&tail==='issues'&&parts[7]==='withdraw')return ok(await this.hub.withdrawIssue(asParticipant(),sub));
     if(method==='POST'&&tail==='nominations')return ok(await this.hub.submitNominations(asParticipant(),await ctx.body()),201);
     if(method==='GET'&&tail==='criteria')return ok(this.hub.criteria(sessionId,participant));
