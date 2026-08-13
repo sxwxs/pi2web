@@ -240,12 +240,22 @@
       const proposers=proposal.votes.filter(vote=>vote.proposer),approves=proposal.votes.filter(vote=>vote.stance==='approve'),rejects=proposal.votes.filter(vote=>vote.stance==='reject'),complete=reviewers.every(reviewer=>proposal.votes.some(vote=>vote.participantId===reviewer.participantId)),status=rejects.length?'未通过':complete?'全票通过':'投票中';
       return `<tr><td><b>合并申请 ${index+1}</b><br>${proposal.issueIds.map(id=>`<span class="pill">${esc(label(id))}</span>`).join(' + ')}</td><td>${esc(proposal.rationale)}</td><td>${proposers.map(vote=>esc(participantName(session,vote.participantId))).join('、')}</td><td>${approves.map(vote=>esc(participantName(session,vote.participantId))).join('、')||'—'}</td><td>${rejects.map(vote=>`<b>${esc(participantName(session,vote.participantId))}</b>${vote.rationale?`：${esc(vote.rationale)}`:''}`).join('<br>')||'—'}</td><td><span class="pill ${status==='全票通过'?'green':status==='未通过'?'red':'yellow'}">${status}</span></td></tr>`}).join('')}</tbody></table></div>`;
   }
+  function reviewSummaryCard(consensus) {
+    const summary=consensus?.summary;if(!summary)return '';
+    const tone=summary.verdict==='approved'?'green':summary.verdict==='changes_required'?'red':'yellow';
+    return `<div class="card"><h3>评审总结 <span class="grow"></span><span class="pill ${tone}">${esc(summary.verdict)}</span></h3>
+      <p><b>${summary.actionItemCount ? `仍有 ${summary.actionItemCount} 项需要修复或跟进` : '没有剩余修复项'}</b>（共 ${summary.totalIssues} 项）</p>
+      <p class="muted">${esc(summary.description)} · 严重程度：${esc(JSON.stringify(summary.bySeverity))} · 处理结果：${esc(JSON.stringify(summary.byDisposition))}</p>
+      ${summary.actionItems?.length?`<table><thead><tr><th>ID / 严重程度</th><th>需要修什么</th><th>位置</th><th>当前处理</th></tr></thead><tbody>${summary.actionItems.map(item=>`<tr><td><b>#${esc(item.number)}</b><br><span class="pill ${['blocker','critical'].includes(item.severity)?'red':item.severity==='major'?'yellow':''}">${esc(item.severity)}</span></td><td><b>${esc(item.title)}</b><br>${esc(item.description)}${item.impact?`<details><summary>影响</summary>${esc(item.impact)}</details>`:''}</td><td>${esc(item.location?.path||'')}${item.location?.startLine?`:${item.location.startLine}`:''}</td><td><span class="pill yellow">${esc(item.disposition)}</span>${item.response?.rationale?`<br><small>${esc(item.response.rationale)}</small>`:''}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">所有 Issue 都已有终态处理。</p>'}
+    </div>`;
+  }
   function renderDetail() {
     if (!state.detail) {$('detail').innerHTML = '<p class="muted">选择左侧的协作会话，或先创建一个。</p>'; return}
     const draft = readParticipantDraft();
     const {session, issues, events, escalations, criteria, consensus} = state.detail;
     const progress = session.progress || {};
     const pending = escalations.filter(entry => entry.status === 'pending'), waitingDetails = waitingAgentDetails(session), allRunning = waitingDetails.length > 0 && waitingDetails.every(entry => entry.activelyRunning), retryableWaiting = waitingDetails.filter(entry => entry.retryable);
+    const displayedVerdict=session.kind==='review'?(consensus?.summary?.verdict||session.outcome?.verdict):session.outcome?.verdict;
     const waitingStatus = waitingDetails.map(entry => `${entry.name}（${entry.status}）`).join('、');
     const stallNotice = !session.stalled ? '' : allRunning
       ? `<div style="display:block" class="pill yellow"><b>评审耗时较长，但 Agent 仍在运行</b>（超过提醒阈值，自 ${esc(session.stalled.since)}）<br>当前状态：${esc(waitingStatus)}<br><small>这些 Agent 仍是 streaming / starting，请继续等待。不要重复提醒；提高超时时间只会延后这条提示，不会加速评审。</small></div>`
@@ -259,7 +269,7 @@
         <p class="muted">进度：${esc(JSON.stringify(progress))}</p>
         ${session.policy?.implementationFirst ? '<p class="muted">模式：先开发后评审（implementing → collecting 自动切换）</p>' : ''}
         ${session.kind === 'review' ? (session.policy?.consensusReview ? `<p class="muted">共识评审：盲审汇总 → 问题投票 / 合并提议 → 合并投票 → 最多 ${esc(session.policy.maxConsensusRounds)} 轮讨论 → 实现响应</p>` : '<p class="muted">共识评审：关闭（兼容旧 API 会话）</p>') : ''}
-        ${session.outcome?.verdict ? `<p><span class="pill ${session.outcome.verdict === 'approved' ? 'green' : 'yellow'}">结论：${esc(session.outcome.verdict)}</span>${session.outcome.approval?.unanimous ? ' <span class="pill green">评审全票通过</span>' : ''}</p>` : ''}
+        ${displayedVerdict ? `<p><span class="pill ${displayedVerdict === 'approved' ? 'green' : displayedVerdict === 'changes_required' ? 'red' : 'yellow'}">结论：${esc(displayedVerdict)}</span>${session.outcome?.approval?.unanimous ? ' <span class="pill green">问题认定已全票完成</span>' : ''}</p>` : ''}
         <div class="row">
           <button data-action="advance">推进阶段</button>
           ${retryableWaiting.length ? `<button data-action="retry">重新提醒已停止的 Agent（${retryableWaiting.length}）</button>` : ''}
@@ -311,14 +321,14 @@
 
       ${finalizeCard(session, criteria)}
 
-      ${session.kind === 'review' ? `<div class="card">
+      ${session.kind === 'review' ? `${reviewSummaryCard(consensus)}<div class="card">
         <h3>Issues（${issues.length}）<span class="grow"></span><span class="muted">当前共识轮次 ${session.debateRound || 0} / ${session.policy?.maxConsensusRounds || 3}</span></h3>
         <table><thead><tr><th>ID</th><th>标题 / 提出者</th><th>严重程度</th><th>状态</th><th>问题投票</th><th>Discussion</th></tr></thead><tbody>
-          ${issues.map(issue => {const cells=issueConsensusCells(session, consensus, issue.issueId),merged=issues.find(entry=>entry.issueId===issue.mergedInto);return `<tr>
+          ${issues.map(issue => {const cells=issueConsensusCells(session, consensus, issue.issueId),merged=issues.find(entry=>entry.issueId===issue.mergedInto),summaryItem=consensus?.summary?.issues?.find(entry=>entry.issueId===issue.issueId),disposition=summaryItem?.disposition||issue.status;return `<tr>
             <td><b title="${esc(issue.issueId)}">#${esc(issue.number || '?')}</b></td>
             <td><b>${esc(issue.title)}</b><br><small>${esc(participantName(session, issue.reporterId))}</small><br><small class="muted">${esc(issue.category)} · ${esc(issue.location?.path || '')}${issue.location?.startLine ? `:${issue.location.startLine}` : ''}</small></td>
             <td><span class="pill ${['blocker','critical'].includes(issue.severity)?'red':issue.severity==='major'?'yellow':''}">${esc(issue.severity)}</span></td>
-            <td>${esc(issue.status)}${issue.mergedInto ? `<br><small>→ #${esc(merged?.number || '?')}</small>` : ''}</td><td>${cells.votes}</td><td>${cells.thread}</td></tr>`}).join('') || '<tr><td colspan="6" class="muted">还没有 issue</td></tr>'}
+            <td>${esc(disposition)}${disposition!==issue.status?`<br><small class="muted">原状态：${esc(issue.status)}</small>`:''}${issue.mergedInto ? `<br><small>→ #${esc(merged?.number || '?')}</small>` : ''}</td><td>${cells.votes}</td><td>${cells.thread}</td></tr>`}).join('') || '<tr><td colspan="6" class="muted">还没有 issue</td></tr>'}
         </tbody></table></div>${mergeProposalCard(session, consensus, issues)}` : `<div class="card">
         <h3>评分维度（${criteria.length}）</h3>
         <table><thead><tr><th>名称</th><th>状态</th><th>权重</th><th>定义</th></tr></thead><tbody>
