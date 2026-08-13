@@ -64,6 +64,8 @@ describe('review consensus over HTTP',()=>{
     expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.status).toBe('finished');
     const consensus=(await call('GET',`/api/v1/collab/sessions/${sessionId}/review-consensus`)).data;
     expect(consensus.discussions).toHaveLength(4);expect(consensus.mergeProposals[0].votes).toHaveLength(5);
+    expect(consensus.issueConsensus).toHaveLength(3);
+    expect(consensus.issueConsensus.find((entry:any)=>entry.issueId===two).positions.every((position:any)=>position.stance==='approve')).toBe(true);
   });
 
   it('escalates an issue vote that remains rejected after the configured discussion rounds',async()=>{

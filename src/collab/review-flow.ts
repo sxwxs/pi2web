@@ -35,9 +35,9 @@ export function currentIssueVotes(snapshot:ReviewSnapshot){
   }
   return [...latest.values()];
 }
-export function issueConsensus(snapshot:ReviewSnapshot){
+export function issueConsensus(snapshot:ReviewSnapshot,options:{includeFinal?:boolean}={}){
   const votes=currentIssueVotes(snapshot),panel=reviewers(snapshot);
-  return consensusIssues(snapshot).map(issue=>{
+  return (options.includeFinal?snapshot.issues:consensusIssues(snapshot)).map(issue=>{
     const positions=panel.map(reviewer=>reviewer.participantId===issue.reporterId
       ?{participantId:reviewer.participantId,stance:'approve' as const,implicit:true}
       :{participantId:reviewer.participantId,stance:votes.find(vote=>vote.issueId===issue.issueId&&vote.participantId===reviewer.participantId)?.stance,rationale:votes.find(vote=>vote.issueId===issue.issueId&&vote.participantId===reviewer.participantId)?.rationale,implicit:false});
