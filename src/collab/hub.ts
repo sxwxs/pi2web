@@ -4,9 +4,9 @@ import {promisify} from 'node:util';
 import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type Issue,type Participant,type ReviewPhase,type ScoringPhase} from './types.js';
 import {CollabStore,type CreateSessionInput} from './store.js';
 import {ValidationError,parse,type FieldError} from './validate.js';
-import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,participantBudgetRequest,policyPatch,readyRequest,rebindParticipantRequest,resolveEscalationRequest,responsesRequest,scoresRequest,verdictsRequest,votesRequest} from './schemas.js';
+import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,participantBudgetRequest,policyPatch,readyRequest,rebindParticipantRequest,resolveEscalationRequest,responsesRequest,scoresRequest,verdictsRequest,votesRequest,issueVotesRequest,mergeVotesRequest,issueDiscussionsRequest,retryWaitingRequest} from './schemas.js';
 import {analyse,assertScoringCapability,assertScoringPhase,approvedCriteria,contestedCriteria,finalizeScores,isScoringReadyToAdvance,lockRubric,nextScoringPhase,nominationsSealed,scoresSealed,scoringPanel,scoringProgress,scoringWaitingOn,tallyVotes,votesSealed,type ScoringSnapshot} from './scoring-flow.js';
-import {applyEscalation,applyHumanRuling,applyResponse,applyVerdict,applyWithdraw,approvalSummary,assertCanFileFinding,assertCapability,canSeeOthersFindings,flowError,isOpenIssue,isReadyToAdvance,nextPhase,sessionProgress,stallCheck,waitingOn,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from './review-flow.js';
+import {applyEscalation,applyHumanRuling,applyResponse,applyVerdict,applyWithdraw,approvalSummary,assertCanFileFinding,assertCapability,canSeeOthersFindings,flowError,isOpenIssue,isReadyToAdvance,nextPhase,sessionProgress,stallCheck,waitingOn,currentIssueVotes,issueConsensus,contestedIssueIds,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from './review-flow.js';
 
 const run=promisify(execFile);
 
@@ -15,7 +15,7 @@ const UNDELIVERED_TASK_WARNING_MS=120_000;
 
 export type BaselineSnapshot={vcs:string,commit?:string,range?:string,dirtyHash?:string,paths:string[]};
 export type BaselineResolver=(input:{cwd:string,subject:CollabSubject,round:number})=>Promise<BaselineSnapshot>;
-export type HubOptions={resolveBaseline?:BaselineResolver,now?:()=>number,agentTokenUsage?:(agentId:string)=>Promise<number|undefined>};
+export type HubOptions={resolveBaseline?:BaselineResolver,now?:()=>number,agentTokenUsage?:(agentId:string)=>Promise<number|undefined>,agentStatus?:(agentId:string)=>string|undefined};
 
 /** Anchors every round to an immutable code state so round N+1 verdicts are not made against round N's memory. */
 export const gitBaseline:BaselineResolver=async({cwd,subject})=>{
@@ -145,8 +145,8 @@ export class CollabHub {
     const agentId=input.agentId.trim();
     if(this.store.listParticipants(sessionId).some(other=>other.participantId!==participantId&&other.agentId===agentId))
       throw flowError(COLLAB_ERRORS.conflict,'That agent is already registered in this session');
-    const {participant,token}=this.store.rebindParticipant(participantId,agentId);
-    this.record(sessionId,'participant_rebound',{participantId,agentId:participant.agentId,previousAgentId:current.agentId});
+    const {participant,token}=this.store.rebindParticipant(participantId,agentId,input.model);
+    this.record(sessionId,'participant_rebound',{participantId,agentId:participant.agentId,previousAgentId:current.agentId,model:participant.model});
     // Whatever this seat owes has to reach the *new* agent, even when the old one was already prompted: a rebind
     // exists precisely because that first delivery led nowhere. An entry that was never delivered is simply
     // re-announced; one that was already acked is queued again for the replacement.
@@ -256,6 +256,18 @@ export class CollabHub {
     await this.settle(sessionId);
     return this.store.getSession(sessionId);
   }
+  retryWaiting(sessionId:string,body:unknown={},actor='human'){
+    const input=parse(retryWaitingRequest,body),session=this.store.getSession(sessionId),allPending=session.kind==='scoring'?scoringWaitingOn(this.scoringSnapshot(sessionId)):waitingOn(this.snapshot(sessionId));
+    const wanted=input.participantIds?.length?new Set(input.participantIds):undefined,pending=allPending.filter(participantId=>!wanted||wanted.has(participantId));
+    const participants=this.store.listParticipants(sessionId),busy=pending.filter(participantId=>{const participant=participants.find(entry=>entry.participantId===participantId);return participant&&['starting','streaming','waiting_for_user','stopping'].includes(this.options.agentStatus?.(participant.agentId)??'')});
+    const retryable=pending.filter(participantId=>!busy.includes(participantId));
+    const baseTask=session.kind==='scoring'?({nominating:'nominate_criteria',voting:'vote_on_criteria',scoring:'score_rubric',debating:'debate_contested_scores',rescoring:'rescore_contested'} as Record<string,string>)[session.phase]
+      :({implementing:'implement',collecting:'file_findings',validating:'validate_issues',merge_voting:'vote_on_merges',issue_discussing:'defend_approved_issues',issue_reconsidering:'reconsider_issue_votes',responding:'respond_to_issues',adjudicating:'rule_on_responses'} as Record<string,string>)[session.phase];
+    if(!allPending.length)throw flowError(COLLAB_ERRORS.wrongPhase,'Nobody is currently waiting to submit');
+    if(!baseTask)throw flowError(COLLAB_ERRORS.wrongPhase,`Phase ${session.phase} has no retryable Agent task`);
+    const nonce=this.now();for(const participantId of retryable){const task=`${baseTask}#retry-${nonce}`;this.push(sessionId,participantId,task,{phase:session.phase,round:session.round,retry:true});this.record(sessionId,'task_assigned',{participantId,task,phase:session.phase,round:session.round,retry:true},actor)}
+    return {retried:retryable,skippedBusy:busy,phase:session.phase};
+  }
   listEscalations(filter:{sessionId?:string,status?:'pending'|'resolved'|'dismissed',limit?:number}={}){return this.store.listEscalations(filter)}
   getEscalation(escalationId:string){return this.store.getEscalation(escalationId)}
   /**
@@ -297,6 +309,7 @@ export class CollabHub {
     if(escalation.kind==='issue_dispute'&&escalation.refId&&input.issueDecision){
       const issue=this.store.getIssue(escalation.refId),outcome=applyHumanRuling(this.toFlowIssue(issue),input.issueDecision);
       this.store.updateIssue(issue.issueId,{status:outcome.status,round:outcome.round});
+      if(input.issueDecision==='reopen'&&session.policy.consensusReview)for(const reviewer of this.store.listParticipants(session.sessionId).filter(entry=>entry.role==='reviewer'&&entry.state!=='left'))this.store.saveIssueVote({sessionId:session.sessionId,issueId:issue.issueId,participantId:reviewer.participantId,round:session.round,consensusRound:session.debateRound+1,stance:'approve',rationale:`Human ruled this a valid issue: ${input.rationale}`});
       this.store.addIssueMessage(issue.issueId,outcome.round,resolvedBy,'ruling',{decision:input.decision,rationale:input.rationale,issueDecision:input.issueDecision});
       this.record(escalation.sessionId,'issue_ruled',{issueId:issue.issueId,status:outcome.status,decision:input.issueDecision},resolvedBy);
       applied.push(`issue:${input.issueDecision}`);
@@ -359,6 +372,70 @@ export class CollabHub {
     this.record(session.sessionId,'findings_submitted',{count:accepted.length,rejected:rejected.length,reviewComplete:input.reviewComplete},participant.participantId);
     await this.settle(session.sessionId);
     return response;
+  }
+
+  async submitIssueVotes(participant:Participant,body:unknown){
+    const input=parse(issueVotesRequest,body),cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
+    const session=this.store.getSession(participant.sessionId),snapshot=this.snapshot(session.sessionId);
+    assertCapability(this.toFlowParticipant(participant),'vote');
+    if(!['validating','issue_reconsidering'].includes(session.phase))throw flowError(COLLAB_ERRORS.wrongPhase,`Issue votes are only accepted in validating or issue_reconsidering, but the session is in ${session.phase}`);
+    const consensus=issueConsensus(snapshot),expected=session.phase==='validating'
+      ?this.store.listIssues(session.sessionId,{status:['open']}).filter(issue=>issue.reporterId!==participant.participantId).map(issue=>issue.issueId)
+      :consensus.filter(entry=>entry.rejecters.includes(participant.participantId)).map(entry=>entry.issueId);
+    const submitted=input.votes.map(vote=>vote.issueId),errors:FieldError[]=[];
+    for(const issueId of expected)if(!submitted.includes(issueId))errors.push(fieldError('votes','REQUIRED',`A vote for issue ${issueId} is required`));
+    for(const [index,vote] of input.votes.entries()){
+      if(!expected.includes(vote.issueId))errors.push(fieldError(`votes[${index}].issueId`,'UNEXPECTED',`You do not owe a vote for ${vote.issueId}`));
+      if(submitted.indexOf(vote.issueId)!==index)errors.push(fieldError(`votes[${index}].issueId`,'DUPLICATE','Only one vote per issue is accepted'));
+      if(vote.stance==='reject'&&(vote.rationale??'').trim().length<20)errors.push(fieldError(`votes[${index}].rationale`,'REQUIRED','Rejecting an issue requires a rationale of at least 20 characters'));
+    }
+    if(session.phase!=='validating'&&input.mergeProposals.length)errors.push(fieldError('mergeProposals','WRONG_PHASE','Merge proposals are only accepted during initial issue validation'));
+    if(errors.length)throw new ValidationError(errors);
+    for(const vote of input.votes)this.store.saveIssueVote({sessionId:session.sessionId,issueId:vote.issueId,participantId:participant.participantId,round:session.round,consensusRound:session.phase==='validating'?0:session.debateRound,stance:vote.stance,rationale:vote.rationale});
+    const proposalIds:string[]=[];
+    for(const proposal of input.mergeProposals){
+      const issueIds=[...new Set(proposal.issueIds)];
+      if(issueIds.length<2||issueIds.some(issueId=>!this.store.findIssueInSession(session.sessionId,issueId)))throw new ValidationError([fieldError('mergeProposals','UNKNOWN_ISSUE','Every merge proposal needs at least two issues from this session')]);
+      proposalIds.push(this.store.createMergeProposal({sessionId:session.sessionId,round:session.round,issueIds,participantId:participant.participantId,rationale:proposal.rationale}).proposalId);
+    }
+    if(input.complete)this.store.markPhaseComplete(session.sessionId,session.round,session.phase==='issue_reconsidering'?`issue_reconsidering:${session.debateRound}`:session.phase,participant.participantId);
+    const response={accepted:submitted,mergeProposals:proposalIds,complete:input.complete,consensusRound:session.debateRound};
+    this.finish(participant,input.clientRequestId,body,input.usage,response);
+    this.record(session.sessionId,'issue_votes_submitted',{count:submitted.length,mergeProposals:proposalIds,phase:session.phase,consensusRound:session.debateRound},participant.participantId);
+    await this.settle(session.sessionId);return response;
+  }
+
+  async submitMergeVotes(participant:Participant,body:unknown){
+    const input=parse(mergeVotesRequest,body),cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
+    const session=this.store.getSession(participant.sessionId),snapshot=this.snapshot(session.sessionId);
+    assertCapability(this.toFlowParticipant(participant),'merge');
+    if(session.phase!=='merge_voting')throw flowError(COLLAB_ERRORS.wrongPhase,`Merge votes are only accepted in phase merge_voting, but the session is in ${session.phase}`);
+    const proposals=(snapshot.mergeProposals??[]).filter(proposal=>proposal.round===session.round),expected=proposals.filter(proposal=>!proposal.votes.some(vote=>vote.participantId===participant.participantId)).map(proposal=>proposal.proposalId),submitted=input.votes.map(vote=>vote.proposalId),errors:FieldError[]=[];
+    for(const proposalId of expected)if(!submitted.includes(proposalId))errors.push(fieldError('votes','REQUIRED',`A vote for merge proposal ${proposalId} is required`));
+    for(const [index,vote] of input.votes.entries()){
+      if(!expected.includes(vote.proposalId))errors.push(fieldError(`votes[${index}].proposalId`,'UNEXPECTED',`You do not owe a vote for ${vote.proposalId}`));
+      if(vote.stance==='reject'&&(vote.rationale??'').trim().length<20)errors.push(fieldError(`votes[${index}].rationale`,'REQUIRED','Rejecting a merge requires a rationale of at least 20 characters'));
+    }
+    if(errors.length)throw new ValidationError(errors);
+    for(const vote of input.votes)this.store.saveMergeVote({proposalId:vote.proposalId,participantId:participant.participantId,stance:vote.stance,rationale:vote.rationale});
+    if(input.complete)this.store.markPhaseComplete(session.sessionId,session.round,'merge_voting',participant.participantId);
+    const response={accepted:submitted,complete:input.complete};this.finish(participant,input.clientRequestId,body,input.usage,response);
+    this.record(session.sessionId,'merge_votes_submitted',{count:submitted.length},participant.participantId);await this.settle(session.sessionId);return response;
+  }
+
+  async submitIssueDiscussions(participant:Participant,body:unknown){
+    const input=parse(issueDiscussionsRequest,body),cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
+    const session=this.store.getSession(participant.sessionId),snapshot=this.snapshot(session.sessionId);
+    assertCapability(this.toFlowParticipant(participant),'debate');
+    if(session.phase!=='issue_discussing')throw flowError(COLLAB_ERRORS.wrongPhase,`Issue discussions are only accepted in phase issue_discussing, but the session is in ${session.phase}`);
+    const expected=issueConsensus(snapshot).filter(entry=>entry.rejecters.length&&entry.supporters.includes(participant.participantId)).map(entry=>entry.issueId),submitted=input.discussions.map(entry=>entry.issueId),errors:FieldError[]=[];
+    for(const issueId of expected)if(!submitted.includes(issueId))errors.push(fieldError('discussions','REQUIRED',`A supporter argument for issue ${issueId} is required`));
+    for(const [index,entry] of input.discussions.entries())if(!expected.includes(entry.issueId))errors.push(fieldError(`discussions[${index}].issueId`,'UNEXPECTED',`You are not currently a supporter of ${entry.issueId}`));
+    if(errors.length)throw new ValidationError(errors);
+    for(const entry of input.discussions)this.store.addIssueMessage(entry.issueId,session.round,participant.participantId,'discussion',{argument:entry.argument,respondingTo:entry.respondingTo,consensusRound:session.debateRound});
+    if(input.complete)this.store.markPhaseComplete(session.sessionId,session.round,`issue_discussing:${session.debateRound}`,participant.participantId);
+    const response={accepted:submitted,complete:input.complete,consensusRound:session.debateRound};this.finish(participant,input.clientRequestId,body,input.usage,response);
+    this.record(session.sessionId,'issue_discussions_submitted',{count:submitted.length,consensusRound:session.debateRound},participant.participantId);await this.settle(session.sessionId);return response;
   }
 
   async submitResponses(participant:Participant,body:unknown){
@@ -440,8 +517,12 @@ export class CollabHub {
     if(input.refId){
       const issue=this.store.findIssueInSession(session.sessionId,input.refId);
       if(!issue)throw flowError(COLLAB_ERRORS.issueNotFound,'Issue not found in this session',404);
-      const outcome=applyEscalation({issue:this.toFlowIssue(issue),actor:this.toFlowParticipant(participant)});
-      this.store.updateIssue(issue.issueId,{status:outcome.status,round:outcome.round});
+      const consensusPhase=['validating','merge_voting','issue_discussing','issue_reconsidering'].includes(session.phase);
+      if(consensusPhase&&participant.role==='reviewer')this.store.updateIssue(issue.issueId,{status:'escalated'});
+      else{
+        const outcome=applyEscalation({issue:this.toFlowIssue(issue),actor:this.toFlowParticipant(participant)});
+        this.store.updateIssue(issue.issueId,{status:outcome.status,round:outcome.round});
+      }
     }
     const escalation=this.store.createEscalation({sessionId:session.sessionId,kind:input.kind,refId:input.refId,raisedBy:participant.participantId,
       summary:input.summary,positions:input.positions,question:input.question,options:input.options,urgency:input.urgency});
@@ -475,6 +556,26 @@ export class CollabHub {
       return {...base,task:required?'file_findings':'file_findings_optional',yourFindings:own,
         instructions:`Review the code at the pinned baseline and POST every finding to /api/v1/collab/sessions/${session.sessionId}/findings with baselineId="${baseline?.baselineId??''}". Set reviewComplete=true on your final call. location.path and evidence are mandatory.`};
     }
+    if(session.phase==='validating'){
+      const all=this.store.listIssues(session.sessionId,{status:['open']}),owed=all.filter(issue=>issue.reporterId!==participant.participantId);
+      return {...base,task:'validate_issues',issues:all.map(issue=>this.withHistory(issue)),yourRequiredIssueIds:owed.map(issue=>issue.issueId),currentVotes:currentIssueVotes(snapshot),mergeProposals:this.store.listMergeProposals(session.sessionId),
+        instructions:`All reviewers have finished the blind review. Read every issue, then POST one approve/reject vote for every issue you did not report to /api/v1/collab/sessions/${session.sessionId}/issue-votes. A reject needs a rationale. Include any duplicate groups in mergeProposals; the hub collects all proposals before a separate unanimous merge vote.`};
+    }
+    if(session.phase==='merge_voting'){
+      const proposals=this.store.listMergeProposals(session.sessionId),owed=proposals.filter(proposal=>!proposal.votes.some(vote=>vote.participantId===participant.participantId));
+      return {...base,task:owed.length?'vote_on_merges':'wait',mergeProposals:proposals,yourRequiredProposalIds:owed.map(entry=>entry.proposalId),
+        instructions:`Vote on every merge proposal you did not make via POST /api/v1/collab/sessions/${session.sessionId}/merge-votes. A merge is applied only with approval from every reviewer; rejecting requires a rationale.`};
+    }
+    if(session.phase==='issue_discussing'){
+      const consensus=issueConsensus(snapshot),owed=consensus.filter(entry=>entry.rejecters.length&&entry.supporters.includes(participant.participantId));
+      return {...base,task:owed.length?'defend_approved_issues':'wait',consensus,issues:owed.map(entry=>this.withHistory(this.store.getIssue(entry.issueId))),
+        instructions:`Some reviewers rejected these issues. As a current supporter, answer each rejection with evidence via POST /api/v1/collab/sessions/${session.sessionId}/issue-discussions, then end your turn. If you are the reporter and no longer stand by an issue, do not merely say "withdraw" in prose: POST /issues/{issueId}/withdraw. Any reviewer may POST /escalations with refId to request human intervention before all ${session.policy.maxConsensusRounds} rounds finish.`};
+    }
+    if(session.phase==='issue_reconsidering'){
+      const consensus=issueConsensus(snapshot),owed=consensus.filter(entry=>entry.rejecters.includes(participant.participantId));
+      return {...base,task:owed.length?'reconsider_issue_votes':'wait',consensus,issues:owed.map(entry=>this.withHistory(this.store.getIssue(entry.issueId))),
+        instructions:`Read the supporters' latest discussion, then POST a revised approve/reject vote for every issue you currently reject to /api/v1/collab/sessions/${session.sessionId}/issue-votes. Keeping reject still requires a rationale. If human judgment is needed now, POST /escalations with the issue refId instead of waiting for all ${session.policy.maxConsensusRounds} rounds.`};
+    }
     if(session.phase==='responding'){
       const mine=this.store.listIssues(session.sessionId,{targetParticipantId:participant.participantId,status:['open']});
       return {...base,task:mine.length?'respond_to_issues':'wait',issues:mine.map(issue=>this.withHistory(issue)),
@@ -486,6 +587,12 @@ export class CollabHub {
         instructions:`Rule on each response via POST /api/v1/collab/sessions/${session.sessionId}/verdicts. Accept closes the issue, reject reopens it for another round, escalate hands it to a human.`};
     }
     return {...base,task:'wait',instructions:session.phase==='awaiting_human'?'A human ruling is pending. Do not resubmit and do not poll; you will be prompted when it is your turn again.':'Nothing is required from you right now. End your turn; the hub prompts you when something needs you.'};
+  }
+
+  reviewConsensus(sessionId:string,viewer?:Participant){
+    const session=this.store.getSession(sessionId),snapshot=this.snapshot(sessionId);
+    if(viewer&&session.phase==='collecting')throw flowError(COLLAB_ERRORS.forbidden,'Consensus data stays sealed until every reviewer finishes collection',403);
+    return {phase:session.phase,round:session.round,consensusRound:session.debateRound,issueVotes:this.store.listIssueVotes(sessionId),issueConsensus:issueConsensus(snapshot),mergeProposals:this.store.listMergeProposals(sessionId),discussions:this.store.listIssues(sessionId).flatMap(issue=>this.store.listIssueMessages(issue.issueId).filter(message=>message.kind==='discussion'))};
   }
 
   /** Blind review: while findings are being collected, a participant only sees their own. */
@@ -764,10 +871,11 @@ export class CollabHub {
   snapshot(sessionId:string):ReviewSnapshot{
     const session=this.store.getSession(sessionId);
     return {
-      phase:session.phase as ReviewPhase,round:session.round,policy:session.policy,status:session.status,
+      phase:session.phase as ReviewPhase,round:session.round,debateRound:session.debateRound,policy:session.policy,status:session.status,
       participants:this.store.listParticipants(sessionId).map(participant=>this.toFlowParticipant(participant)),
       issues:this.store.listIssues(sessionId).map(issue=>this.toFlowIssue(issue)),
-      completions:this.store.listCompletions(sessionId).filter(entry=>entry.phase==='collecting'||entry.phase==='implementing').map(entry=>({phase:entry.phase as 'collecting'|'implementing',round:entry.round,participantId:entry.participantId})),
+      issueVotes:this.store.listIssueVotes(sessionId),mergeProposals:this.store.listMergeProposals(sessionId),
+      completions:this.store.listCompletions(sessionId).filter(entry=>{const [phase,suffix]=entry.phase.split(':');return !['issue_discussing','issue_reconsidering'].includes(phase)||Number(suffix)===session.debateRound}).map(entry=>({phase:entry.phase.split(':')[0] as ReviewPhase,round:entry.round,participantId:entry.participantId})),
       pendingEscalations:this.store.listEscalations({sessionId,status:'pending'}).length
     };
   }
@@ -780,14 +888,21 @@ export class CollabHub {
       await this.applyPhase(session,result,{});
     }
   }
-  private async applyPhase(session:CollabSession,result:{phase:ReviewPhase,round:number,reason:string,escalateDeadlock?:boolean,skipped?:string[]},context:{forced?:boolean,reason?:string,actor?:string}){
+  private async applyPhase(session:CollabSession,result:{phase:ReviewPhase,round:number,reason:string,debateRound?:number,escalateDeadlock?:boolean,escalateConsensus?:boolean,skipped?:string[]},context:{forced?:boolean,reason?:string,actor?:string}){
     const finished=result.phase==='finished';
+    if(context.forced&&result.skipped?.length){
+      const completionPhase=['issue_discussing','issue_reconsidering'].includes(session.phase)?`${session.phase}:${session.debateRound}`:session.phase;
+      for(const participantId of result.skipped)this.store.markPhaseComplete(session.sessionId,session.round,completionPhase,participantId);
+      if(session.phase==='merge_voting')for(const proposal of this.store.listMergeProposals(session.sessionId).filter(entry=>entry.round===session.round))for(const participantId of result.skipped)if(!proposal.votes.some(vote=>vote.participantId===participantId))this.store.saveMergeVote({proposalId:proposal.proposalId,participantId,stance:'reject',rationale:`Skipped by forced advance: ${context.reason||'no reason given'}`});
+    }
+    if(session.phase==='merge_voting'&&result.phase==='consolidating')this.applyApprovedMerges(session.sessionId);
+    if(result.escalateConsensus)this.raiseConsensusEscalations(session);
     // Pin the baseline *before* the phase is visible: otherwise a reviewer that polls in between sees
     // `collecting` with no baseline and its findings bounce off with STALE_BASELINE.
     if(result.phase==='collecting'&&(result.round!==session.round||session.phase==='implementing'))await this.captureBaseline({...session,phase:result.phase,round:result.round});
-    const updated=this.store.updateSession(session.sessionId,{phase:result.phase,round:result.round,status:finished?'finished':session.status,
+    const updated=this.store.updateSession(session.sessionId,{phase:result.phase,round:result.round,debateRound:result.debateRound??session.debateRound,status:finished?'finished':session.status,
       stalled:undefined,outcome:finished?this.outcome(session.sessionId):session.outcome});
-    this.record(session.sessionId,'phase_changed',{from:session.phase,to:result.phase,round:result.round,reason:result.reason,
+    this.record(session.sessionId,'phase_changed',{from:session.phase,to:result.phase,round:result.round,debateRound:result.debateRound??session.debateRound,reason:result.reason,
       ...(context.forced?{forced:true,forcedBy:context.actor??'human',forceReason:context.reason,skipped:result.skipped??[]}:{})},context.forced?(context.actor??'human'):undefined);
     if(result.escalateDeadlock)this.raiseDeadlockEscalation(updated);
     if(finished){this.record(session.sessionId,'session_finished',{outcome:updated.outcome??{}});this.announceFinish(this.store.getSession(session.sessionId))}
@@ -806,11 +921,44 @@ export class CollabHub {
     if(session.phase==='implementing')for(const participant of participants)if(participant.role==='implementer')targets.set(participant.participantId,'implement');
     // In build-then-review the implementer is writing code, not filing reverse findings, so it gets no task here.
     if(session.phase==='collecting')for(const participant of participants)if(participant.role!=='moderator'&&!(session.policy.implementationFirst&&participant.role==='implementer'))targets.set(participant.participantId,participant.role==='reviewer'?'file_findings':'file_findings_optional');
+    if(session.phase==='validating')for(const participant of participants)if(participant.role==='reviewer')targets.set(participant.participantId,'validate_issues');
+    if(session.phase==='merge_voting')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'vote_on_merges');
+    if(session.phase==='issue_discussing')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'defend_approved_issues');
+    if(session.phase==='issue_reconsidering')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'reconsider_issue_votes');
     if(session.phase==='responding')for(const issue of this.store.listIssues(sessionId,{status:['open']}))targets.set(issue.targetParticipantId,'respond_to_issues');
     if(session.phase==='adjudicating')for(const issue of this.store.listIssues(sessionId,{status:['answered']}))targets.set(issue.reporterId,'rule_on_responses');
     for(const [participantId,task] of targets){
       this.push(sessionId,participantId,task,{phase:session.phase,round:session.round});
       this.record(sessionId,'task_assigned',{participantId,task,phase:session.phase,round:session.round});
+    }
+  }
+  private applyApprovedMerges(sessionId:string){
+    const panel=this.store.listParticipants(sessionId).filter(participant=>participant.role==='reviewer'&&participant.state!=='left'),session=this.store.getSession(sessionId),proposals=this.store.listMergeProposals(sessionId).filter(proposal=>proposal.round===session.round),parent=new Map<string,string>();
+    const root=(id:string):string=>{const value=parent.get(id);if(!value){parent.set(id,id);return id}if(value===id)return id;const resolved=root(value);parent.set(id,resolved);return resolved};
+    const join=(a:string,b:string)=>{const left=root(a),right=root(b);if(left!==right)parent.set(right,left)};
+    for(const proposal of proposals){
+      const approved=panel.every(reviewer=>proposal.votes.some(vote=>vote.participantId===reviewer.participantId&&vote.stance==='approve'));
+      this.record(sessionId,approved?'merge_proposal_approved':'merge_proposal_rejected',{proposalId:proposal.proposalId,issueIds:proposal.issueIds,votes:proposal.votes});
+      if(approved)for(const issueId of proposal.issueIds.slice(1))join(proposal.issueIds[0],issueId);
+    }
+    const groups=new Map<string,string[]>();for(const issueId of parent.keys()){const key=root(issueId);groups.set(key,[...(groups.get(key)??[]),issueId])}
+    for(const ids of groups.values()){
+      const issues=ids.map(id=>this.store.getIssue(id)).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.issueId.localeCompare(b.issueId)),primary=issues[0];
+      for(const duplicate of issues.slice(1)){if(duplicate.status!=='open')continue;this.store.updateIssue(duplicate.issueId,{status:'duplicate',mergedInto:primary.issueId});this.record(sessionId,'issues_merged',{primaryIssueId:primary.issueId,duplicateIssueId:duplicate.issueId})}
+    }
+    this.store.markPhaseComplete(sessionId,session.round,'merge_voting','system');
+  }
+  private raiseConsensusEscalations(session:CollabSession){
+    const snapshot=this.snapshot(session.sessionId),votes=currentIssueVotes(snapshot);
+    for(const issueId of contestedIssueIds(snapshot)){
+      const issue=this.store.getIssue(issueId);if(this.store.findPendingEscalation(session.sessionId,'issue_dispute',issueId))continue;
+      this.store.updateIssue(issueId,{status:'escalated'});
+      const current=issueConsensus(snapshot).find(entry=>entry.issueId===issueId);
+      const voteHistory=this.store.listIssueVotes(session.sessionId).filter(vote=>vote.issueId===issueId).map(vote=>({participantId:vote.participantId,stance:`vote round ${vote.consensusRound}: ${vote.stance}`,rationale:vote.rationale??'approved without an additional rationale'}));
+      const discussions=this.store.listIssueMessages(issueId).filter(message=>message.kind==='discussion').map(message=>({participantId:message.authorId,stance:`discussion round ${message.payload.consensusRound??'?'}`,rationale:String(message.payload.argument??'')}));
+      const implicit=(current?.positions??[]).filter(position=>position.implicit).map(position=>({participantId:position.participantId,stance:'initial approve (reporter)',rationale:'issue reporter implicitly approves'})),positions=[...implicit,...voteHistory,...discussions];
+      const escalation=this.store.createEscalation({sessionId:session.sessionId,kind:'issue_dispute',refId:issueId,raisedBy:'system',summary:`The review panel did not reach unanimous agreement on whether this is a valid issue after ${session.policy.maxConsensusRounds} discussion round(s): ${issue.title}`,positions,question:`Should "${issue.title}" proceed to implementation?`,options:['valid issue','not an issue','needs more investigation'],urgency:issue.severity==='blocker'||issue.severity==='critical'?'high':'normal'});
+      this.record(session.sessionId,'escalation_raised',{escalationId:escalation.escalationId,kind:'issue_dispute',refId:issueId,reason:'issue_consensus_exhausted',votes:votes.filter(vote=>vote.issueId===issueId)});
     }
   }
   private raiseIssueEscalation(session:CollabSession,issue:Issue,participant:Participant,reason:string,rationale:string){
@@ -853,9 +1001,17 @@ export class CollabHub {
   checkStalls(){
     const changed:CollabSession[]=[];
     for(const session of this.store.listSessions({status:'active'})){
-      const snapshot=this.snapshot(session.sessionId),pending=waitingOn(snapshot);
+      const snapshot=this.snapshot(session.sessionId),allPending=waitingOn(snapshot),participants=this.store.listParticipants(session.sessionId);
+      // A long review can legitimately exceed the warning window. `streaming`/`starting` means Pi is still
+      // actively doing the assigned work, not that the seat forgot to submit its API result.
+      const busy=new Set(participants.filter(participant=>['starting','streaming','stopping'].includes(this.options.agentStatus?.(participant.agentId)??'')).map(participant=>participant.participantId));
+      const pending=allPending.filter(participantId=>!busy.has(participantId));
       const unclaimed=this.undeliveredTaskOwners(session.sessionId,session.policy.overdueWarningSec,pending);
       if(session.stalled){
+        // Keep an existing marker while all remaining seats are busy: clearing it would bump updatedAt and reset
+        // the overdue clock. The board renders it as "still running", and it becomes actionable immediately if
+        // those Agents go idle without submitting.
+        if(allPending.length&&pending.length===0)continue;
         /*
          * Do NOT re-run the timer here: writing the stall flag bumps updatedAt, so a fresh stallCheck would
          * always report "not overdue" and clear the flag a minute later, then alert again every window.
@@ -873,9 +1029,9 @@ export class CollabHub {
         continue;
       }
       const check=stallCheck(snapshot,Date.parse(session.updatedAt),this.now());
-      if(!check.stalled)continue;
-      const updated=this.store.updateSession(session.sessionId,{stalled:{since:new Date(this.now()).toISOString(),waitingOn:check.waitingOn}});
-      this.record(session.sessionId,'participant_overdue',{waitingOn:check.waitingOn,overdueBySec:check.overdueBySec,phase:session.phase});
+      if(!check.stalled||!pending.length)continue;
+      const updated=this.store.updateSession(session.sessionId,{stalled:{since:new Date(this.now()).toISOString(),waitingOn:pending}});
+      this.record(session.sessionId,'participant_overdue',{waitingOn:pending,overdueBySec:check.overdueBySec,phase:session.phase});
       changed.push(updated);
     }
     return changed;

@@ -17,6 +17,8 @@
     .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
     .row>label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
     .row input,.row select,.row textarea{min-width:150px}
+    .field-help{display:block;margin-top:4px;color:var(--muted);font-size:11px;line-height:1.45;max-width:520px}
+    .participant-config{padding:8px;border:1px solid var(--line);border-radius:6px;background:#252a33}
     table{width:100%;border-collapse:collapse;font-size:12px}
     th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
     th{color:var(--muted);font-weight:600}
@@ -57,14 +59,16 @@
           <label>Workspace<select id="newWorkspace"></select></label>
         </div>
         <div class="row" style="margin-top:8px">
-          <label style="flex:1">标题<input id="newTitle" required placeholder="支付回调评审"></label>
-          <label>相对路径<input id="newCwd" value="." size="8"></label>
+          <label style="flex:1">会话标题<input id="newTitle" required placeholder="支付回调评审"><small class="field-help">用于左侧列表、通知邮件和 Agent 任务标题，方便识别会话；它不决定实际评审范围。</small></label>
+          <label>工作目录<input id="newCwd" value="." size="8"><small class="field-help">相对于所选 Workspace，例如 <code>.</code> 或 <code>packages/api</code>。</small></label>
         </div>
         <div class="row" style="margin-top:8px">
-          <label>评审对象<select id="newSubjectType"><option value="commit_range">commit_range</option><option value="diff">diff</option><option value="paths">paths</option><option value="free">free</option></select></label>
-          <label style="flex:1">值<input id="newSubjectValue" required value="HEAD~1..HEAD"></label>
+          <label>评审 / 评分对象<select id="newSubjectType"><option value="commit_range">Git 提交范围</option><option value="diff">当前未提交改动</option><option value="paths">指定文件或目录</option><option value="free">自定义范围</option></select></label>
+          <label style="flex:1"><span id="newSubjectValueLabel">Git 范围</span><input id="newSubjectValue" required value="HEAD~1..HEAD" placeholder="HEAD~1..HEAD"><small id="newSubjectHelp" class="field-help">填写 Git revision range。中枢会把它放进每个 Agent 的任务包，并记录为评审基线范围。</small></label>
         </div>
         <label class="row" style="margin-top:8px;flex-direction:column;align-items:stretch">任务说明 / 评审重点（会原样进入每个 Agent 的任务包）<textarea id="newSubjectNotes" rows="4" placeholder="要开发的功能：……；验收标准：……；评审重点：并发与幂等"></textarea></label>
+        <p class="field-help">Review 会话默认启用共识流程：所有 Agent 完成盲审后统一进行问题投票、重复问题合并投票与分轮讨论；未收敛项交给人工裁定。</p>
+        <div class="row" style="margin-top:8px"><label>争议辩论轮数<input id="newConsensusRounds" type="number" min="1" max="10" step="1" value="3" style="width:90px"><small class="field-help">完成 3 轮“赞成方回应 → 反对方重投”后仍不一致才转人工；Agent 可中途主动上报。</small></label></div>
         <label class="toggle-row" style="margin-top:8px;display:flex;align-items:center;gap:8px"><input id="newImplementationFirst" type="checkbox" style="width:auto">先开发后评审：会话先进入 implementing，开发 Agent 完工（POST /ready 或托管 Agent 空闲）后自动召集评审</label>
         <div class="row" style="margin-top:8px"><button type="submit">创建会话</button></div>
       </form>

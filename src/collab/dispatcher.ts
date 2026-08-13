@@ -221,7 +221,7 @@ function protocolBriefing(input:{baseUrl:string,session:CollabSession,participan
   const api=`${baseUrl.replace(/\/$/,'')}/api/v1/collab/sessions/${session.sessionId}`;
   const digest=input.digest===undefined?'(unavailable, call GET /digest)':clip(JSON.stringify(input.digest,null,2),MAX_DIGEST_CHARS);
   const submit=session.kind==='review'
-    ? `POST ${api}/findings | ${api}/responses | ${api}/verdicts`
+    ? `POST ${api}/findings | ${api}/issue-votes | ${api}/merge-votes | ${api}/issue-discussions | ${api}/responses | ${api}/verdicts`
     : `POST ${api}/nominations | ${api}/votes | ${api}/scores | ${api}/debates/{debateId}/arguments`;
   return [
     `[pi2web collaboration hub] You have a task in collaboration session "${session.title}".`,
@@ -236,7 +236,8 @@ function protocolBriefing(input:{baseUrl:string,session:CollabSession,participan
     'Endpoints:',
     `  GET  ${api}/digest                 what you owe right now (authoritative)`,
     `  ${submit}`,
-    `  POST ${api}/escalations            hand a deadlock to a human`,
+    `  POST ${api}/escalations            ask for human judgment early (use refId for an issue)`,
+    ...(session.kind==='review'?[`  POST ${api}/issues/{issueId}/withdraw  reporter explicitly retracts an issue`]:[]),
     '',
     ...HAND_BACK,
     '',

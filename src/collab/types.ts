@@ -3,10 +3,10 @@
 export type CollabKind='review'|'scoring';
 export type SessionStatus='active'|'finished'|'aborted';
 /** Review phases. `stalled` is a flag on the session, never a phase: timeouts must not advance anything. */
-export type ReviewPhase='draft'|'implementing'|'collecting'|'consolidating'|'responding'|'adjudicating'|'awaiting_human'|'finished';
+export type ReviewPhase='draft'|'implementing'|'collecting'|'consolidating'|'validating'|'merge_voting'|'issue_discussing'|'issue_reconsidering'|'responding'|'adjudicating'|'awaiting_human'|'finished';
 export type ScoringPhase='nominating'|'consolidating'|'voting'|'rubric_locked'|'scoring'|'analysis'|'debating'|'rescoring'|'awaiting_human'|'finalized';
 export type CollabPhase=ReviewPhase|ScoringPhase;
-export const REVIEW_PHASES:ReviewPhase[]=['draft','implementing','collecting','consolidating','responding','adjudicating','awaiting_human','finished'];
+export const REVIEW_PHASES:ReviewPhase[]=['draft','implementing','collecting','consolidating','validating','merge_voting','issue_discussing','issue_reconsidering','responding','adjudicating','awaiting_human','finished'];
 export const SCORING_PHASES:ScoringPhase[]=['nominating','consolidating','voting','rubric_locked','scoring','analysis','debating','rescoring','awaiting_human','finalized'];
 
 export type Role='implementer'|'reviewer'|'moderator'|'human';
@@ -21,7 +21,7 @@ export const REGISTRABLE_ROLES:Role[]=['implementer','reviewer','moderator'];
 export type Capability='file_finding'|'respond'|'verdict'|'withdraw'|'nominate'|'vote'|'score'|'debate'|'clarify'|'merge'|'escalate';
 export const CAPABILITIES:Record<Role,Capability[]>={
   implementer:['file_finding','respond','verdict','withdraw','clarify','escalate'],
-  reviewer:['file_finding','respond','verdict','withdraw','nominate','vote','score','debate','clarify','escalate'],
+  reviewer:['file_finding','respond','verdict','withdraw','nominate','vote','score','debate','clarify','merge','escalate'],
   moderator:['file_finding','respond','verdict','withdraw','merge','clarify','escalate'],
   human:['file_finding','respond','verdict','withdraw','nominate','vote','score','debate','clarify','merge','escalate']
 };
@@ -67,6 +67,10 @@ export type CollabPolicy={
   overdueWarningSec:number;
   autoEscalateOnDeadlock:boolean;
   blindFindings:boolean;
+  /** After blind collection, all reviewers validate other reviewers' issues and vote on proposed duplicate merges. */
+  consensusReview:boolean;
+  /** Number of supporter/rejecter discussion cycles before unresolved issue votes go to a human. */
+  maxConsensusRounds:number;
   /** Build-then-review: the session opens in `implementing` and the reviewers are only called once the code is ready. */
   implementationFirst:boolean;
   /** With implementationFirst, a managed implementer going idle after its `implement` task counts as "ready". */
@@ -77,7 +81,7 @@ export type CollabPolicy={
 /** approvalThreshold is "two thirds" with a little headroom, so an exact 2-of-3 vote passes. */
 export const DEFAULT_POLICY:CollabPolicy={
   maxIssueRounds:3,maxTotalRounds:6,overdueWarningSec:1800,autoEscalateOnDeadlock:true,blindFindings:true,
-  implementationFirst:false,autoReviewOnAgentIdle:true,
+  consensusReview:false,maxConsensusRounds:3,implementationFirst:false,autoReviewOnAgentIdle:true,
   tokenBudgetPerParticipant:600_000,
   scoring:{minCriteria:4,maxCriteria:8,approvalThreshold:0.66,maxVotingRounds:3,scale:{min:0,max:10,step:0.5},convergenceRange:2,maxDebateRounds:2,blindScoring:true}
 };
@@ -102,13 +106,18 @@ export type CodeLocation={path:string;startLine?:number;endLine?:number};
 export type Evidence={path:string;startLine?:number;endLine?:number;excerpt?:string};
 export type Baseline={baselineId:string;sessionId:string;round:number;vcs:string;commit?:string;range?:string;dirtyHash?:string;paths:string[];capturedAt:string};
 export type Issue={
-  issueId:string;sessionId:string;externalId?:string;reporterId:string;targetParticipantId:string;
+  issueId:string;number:number;sessionId:string;externalId?:string;reporterId:string;targetParticipantId:string;
   title:string;severity:Severity;category:Category;requiredAction:RequiredAction;confidence?:number;
   location:CodeLocation;evidence?:string;impact?:string;suggestion?:string;baselineId:string;
   status:IssueStatus;round:number;version:number;mergedInto?:string;createdAt:string;updatedAt:string;
 };
-export type IssueMessageKind='response'|'verdict'|'note'|'ruling';
+export type IssueMessageKind='response'|'verdict'|'note'|'ruling'|'discussion';
 export type IssueMessage={messageId:string;issueId:string;round:number;authorId:string;kind:IssueMessageKind;payload:Record<string,unknown>;createdAt:string};
+export type IssueVoteStance='approve'|'reject';
+export type IssueVote={voteId:string;sessionId:string;issueId:string;participantId:string;round:number;consensusRound:number;stance:IssueVoteStance;rationale?:string;createdAt:string};
+export type MergeVoteStance='approve'|'reject';
+export type MergeVote={voteId:string;proposalId:string;participantId:string;stance:MergeVoteStance;rationale?:string;proposer:boolean;createdAt:string};
+export type MergeProposal={proposalId:string;sessionId:string;round:number;issueIds:string[];rationale:string;votes:MergeVote[];createdAt:string};
 export type Escalation={
   escalationId:string;sessionId:string;kind:EscalationKind;refId?:string;raisedBy:string;summary:string;
   positions:{participantId:string;stance:string;rationale:string}[];question:string;options:string[];

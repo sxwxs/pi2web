@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import {randomUUID,createHash} from 'node:crypto';
-import {COLLAB_ERRORS,DEFAULT_POLICY,type Baseline,type Criterion,type CriterionState,type Debate,type DebateStance,type Score,type Vote,type VoteStance,type CollabEvent,type CollabPolicy,type CollabSession,type CollabSubject,type Escalation,type EscalationKind,type EscalationStatus,type InboxItem,type Issue,type IssueMessage,type IssueMessageKind,type IssueStatus,type Participant,type Role,type Urgency} from './types.js';
+import {COLLAB_ERRORS,DEFAULT_POLICY,type Baseline,type Criterion,type CriterionState,type Debate,type DebateStance,type Score,type Vote,type VoteStance,type CollabEvent,type CollabPolicy,type CollabSession,type CollabSubject,type Escalation,type EscalationKind,type EscalationStatus,type InboxItem,type Issue,type IssueMessage,type IssueMessageKind,type IssueStatus,type Participant,type Role,type Urgency,type IssueVote,type IssueVoteStance,type MergeProposal,type MergeVoteStance} from './types.js';
 
 const now=()=>Date.now();
 const iso=(value:number)=>new Date(value).toISOString();
@@ -11,7 +11,7 @@ const notFound=(code:string,message:string)=>Object.assign(new Error(message),{c
 
 export type CreateSessionInput={kind:CollabSession['kind'],title:string,workspaceId:string,cwd:string,subject:CollabSubject,policy?:Partial<CollabPolicy>};
 export type CreateParticipantInput={sessionId:string,role:Role,displayName:string,model?:string,agentId:string,tokenBudget?:number};
-export type CreateIssueInput=Omit<Issue,'issueId'|'status'|'version'|'createdAt'|'updatedAt'|'mergedInto'>&{status?:IssueStatus};
+export type CreateIssueInput=Omit<Issue,'issueId'|'number'|'status'|'version'|'createdAt'|'updatedAt'|'mergedInto'>&{status?:IssueStatus};
 export type CreateEscalationInput={sessionId:string,kind:EscalationKind,refId?:string,raisedBy:string,summary:string,positions:Escalation['positions'],question:string,options:string[],urgency:Urgency};
 
 /**
@@ -59,7 +59,7 @@ export class CollabStore {
         FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE
       );
       CREATE TABLE IF NOT EXISTS collab_issues (
-        id TEXT PRIMARY KEY, session_id TEXT NOT NULL, external_id TEXT, reporter_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, issue_number INTEGER, session_id TEXT NOT NULL, external_id TEXT, reporter_id TEXT NOT NULL,
         target_participant_id TEXT NOT NULL, title TEXT NOT NULL, severity TEXT NOT NULL, category TEXT NOT NULL,
         required_action TEXT NOT NULL, confidence REAL, location_json TEXT NOT NULL, evidence TEXT, impact TEXT,
         suggestion TEXT, baseline_id TEXT NOT NULL, status TEXT NOT NULL, round INTEGER NOT NULL,
@@ -70,6 +70,23 @@ export class CollabStore {
         id TEXT PRIMARY KEY, issue_id TEXT NOT NULL, round INTEGER NOT NULL, author_id TEXT NOT NULL,
         kind TEXT NOT NULL, payload_json TEXT NOT NULL, created_at INTEGER NOT NULL,
         FOREIGN KEY(issue_id) REFERENCES collab_issues(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS collab_issue_votes (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL, issue_id TEXT NOT NULL, participant_id TEXT NOT NULL,
+        round INTEGER NOT NULL, consensus_round INTEGER NOT NULL, stance TEXT NOT NULL, rationale TEXT,
+        created_at INTEGER NOT NULL, UNIQUE(issue_id,participant_id,round,consensus_round),
+        FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY(issue_id) REFERENCES collab_issues(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS collab_merge_proposals (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL, round INTEGER NOT NULL, issue_ids_json TEXT NOT NULL,
+        rationale TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(session_id,round,issue_ids_json),
+        FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS collab_merge_votes (
+        id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL, participant_id TEXT NOT NULL, stance TEXT NOT NULL,
+        rationale TEXT, proposer INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+        UNIQUE(proposal_id,participant_id), FOREIGN KEY(proposal_id) REFERENCES collab_merge_proposals(id) ON DELETE CASCADE
       );
       CREATE TABLE IF NOT EXISTS collab_criteria (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL, state TEXT NOT NULL, name TEXT NOT NULL,
@@ -126,10 +143,17 @@ export class CollabStore {
       CREATE INDEX IF NOT EXISTS collab_participants_session ON collab_participants(session_id);
       CREATE INDEX IF NOT EXISTS collab_issues_session ON collab_issues(session_id, status);
       CREATE INDEX IF NOT EXISTS collab_issue_messages_issue ON collab_issue_messages(issue_id, created_at);
+      CREATE INDEX IF NOT EXISTS collab_issue_votes_session ON collab_issue_votes(session_id,round,consensus_round);
+      CREATE INDEX IF NOT EXISTS collab_merge_proposals_session ON collab_merge_proposals(session_id,round);
       CREATE INDEX IF NOT EXISTS collab_escalations_pending ON collab_escalations(status, created_at DESC);
       CREATE INDEX IF NOT EXISTS collab_inbox_pending ON collab_inbox(participant_id, acked_at, created_at);
       CREATE INDEX IF NOT EXISTS collab_scores_criterion ON collab_scores(session_id, criterion_id, round);
     `);
+    // Human-facing issue numbers are stable within a session; UUIDs remain the API identity and foreign key.
+    const issueColumns=this.db.prepare('PRAGMA table_info(collab_issues)').all() as {name:string}[];
+    if(!issueColumns.some(column=>column.name==='issue_number'))this.db.exec('ALTER TABLE collab_issues ADD COLUMN issue_number INTEGER');
+    this.db.exec(`UPDATE collab_issues AS current SET issue_number=(SELECT COUNT(*) FROM collab_issues AS older WHERE older.session_id=current.session_id AND (older.created_at<current.created_at OR (older.created_at=current.created_at AND older.rowid<=current.rowid))) WHERE issue_number IS NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS collab_issues_session_number ON collab_issues(session_id,issue_number);`);
     // Additive migration: scoring sessions need a debate counter independent of the voting round.
     const columns=this.db.prepare('PRAGMA table_info(collab_sessions)').all() as {name:string}[];
     if(!columns.some(column=>column.name==='debate_round'))this.db.exec('ALTER TABLE collab_sessions ADD COLUMN debate_round INTEGER NOT NULL DEFAULT 0');
@@ -210,10 +234,10 @@ export class CollabStore {
    * Hands the seat to another local agent. The token is rotated because the old one is already in the old
    * agent's conversation, and the hub keeps the new plaintext copy: it is what the next wake-up carries.
    */
-  rebindParticipant(participantId:string,agentId:string):{participant:Participant,token:string}{
+  rebindParticipant(participantId:string,agentId:string,model?:string):{participant:Participant,token:string}{
     const token=`cpt_${randomUUID().replace(/-/g,'')}${randomUUID().replace(/-/g,'')}`;
-    this.db.prepare('UPDATE collab_participants SET agent_id=?,token_hash=?,dispatch_token=? WHERE id=?')
-      .run(agentId,hashToken(token),token,participantId);
+    this.db.prepare('UPDATE collab_participants SET agent_id=?,model=?,token_hash=?,dispatch_token=? WHERE id=?')
+      .run(agentId,model??null,hashToken(token),token,participantId);
     return {participant:this.getParticipant(participantId),token};
   }
   updateParticipant(participantId:string,patch:Partial<Pick<Participant,'state'|'tokensUsed'|'tokenBudget'|'tokensEstimated'|'lastSeenAt'|'model'>>):Participant{
@@ -270,9 +294,10 @@ export class CollabStore {
   // ---- issues ----
   createIssue(input:CreateIssueInput):Issue{
     const issueId=`i-${randomUUID()}`,timestamp=now();
-    this.db.prepare(`INSERT INTO collab_issues(id,session_id,external_id,reporter_id,target_participant_id,title,severity,category,required_action,confidence,location_json,evidence,impact,suggestion,baseline_id,status,round,version,merged_into,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NULL,?,?)`)
-      .run(issueId,input.sessionId,input.externalId??null,input.reporterId,input.targetParticipantId,input.title,input.severity,input.category,input.requiredAction,input.confidence??null,
+    const issueNumber=Number((this.db.prepare('SELECT COALESCE(MAX(issue_number),0)+1 AS next FROM collab_issues WHERE session_id=?').get(input.sessionId) as any).next);
+    this.db.prepare(`INSERT INTO collab_issues(id,issue_number,session_id,external_id,reporter_id,target_participant_id,title,severity,category,required_action,confidence,location_json,evidence,impact,suggestion,baseline_id,status,round,version,merged_into,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NULL,?,?)`)
+      .run(issueId,issueNumber,input.sessionId,input.externalId??null,input.reporterId,input.targetParticipantId,input.title,input.severity,input.category,input.requiredAction,input.confidence??null,
         JSON.stringify(input.location),input.evidence??null,input.impact??null,input.suggestion??null,input.baselineId,input.status??'open',input.round,timestamp,timestamp);
     return this.getIssue(issueId);
   }
@@ -311,6 +336,31 @@ export class CollabStore {
   listIssueMessages(issueId:string):IssueMessage[]{
     return (this.db.prepare('SELECT * FROM collab_issue_messages WHERE issue_id=? ORDER BY created_at, rowid').all(issueId) as any[])
       .map(row=>({messageId:row.id,issueId:row.issue_id,round:row.round,authorId:row.author_id,kind:row.kind as IssueMessageKind,payload:json(row.payload_json,{}),createdAt:iso(row.created_at)}));
+  }
+
+  // ---- review consensus votes and duplicate-merge proposals ----
+  saveIssueVote(input:{sessionId:string,issueId:string,participantId:string,round:number,consensusRound:number,stance:IssueVoteStance,rationale?:string}):IssueVote{
+    this.db.prepare(`INSERT INTO collab_issue_votes(id,session_id,issue_id,participant_id,round,consensus_round,stance,rationale,created_at) VALUES(?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(issue_id,participant_id,round,consensus_round) DO UPDATE SET stance=excluded.stance,rationale=excluded.rationale,created_at=excluded.created_at`)
+      .run(`iv-${randomUUID()}`,input.sessionId,input.issueId,input.participantId,input.round,input.consensusRound,input.stance,input.rationale??null,now());
+    return this.listIssueVotes(input.sessionId).find(vote=>vote.issueId===input.issueId&&vote.participantId===input.participantId&&vote.round===input.round&&vote.consensusRound===input.consensusRound)!;
+  }
+  listIssueVotes(sessionId:string):IssueVote[]{return (this.db.prepare('SELECT * FROM collab_issue_votes WHERE session_id=? ORDER BY created_at,rowid').all(sessionId) as any[]).map(row=>({voteId:row.id,sessionId:row.session_id,issueId:row.issue_id,participantId:row.participant_id,round:row.round,consensusRound:row.consensus_round,stance:row.stance,rationale:row.rationale??undefined,createdAt:iso(row.created_at)}))}
+  createMergeProposal(input:{sessionId:string,round:number,issueIds:string[],participantId:string,rationale:string}):MergeProposal{
+    const issueIds=[...new Set(input.issueIds)].sort(),encoded=JSON.stringify(issueIds);
+    let row=this.db.prepare('SELECT id FROM collab_merge_proposals WHERE session_id=? AND round=? AND issue_ids_json=?').get(input.sessionId,input.round,encoded) as any;
+    if(!row){const id=`mp-${randomUUID()}`;this.db.prepare('INSERT INTO collab_merge_proposals(id,session_id,round,issue_ids_json,rationale,created_at) VALUES(?,?,?,?,?,?)').run(id,input.sessionId,input.round,encoded,input.rationale,now());row={id}}
+    this.saveMergeVote({proposalId:row.id,participantId:input.participantId,stance:'approve',rationale:input.rationale,proposer:true});
+    return this.listMergeProposals(input.sessionId).find(entry=>entry.proposalId===row.id)!;
+  }
+  saveMergeVote(input:{proposalId:string,participantId:string,stance:MergeVoteStance,rationale?:string,proposer?:boolean}){
+    this.db.prepare(`INSERT INTO collab_merge_votes(id,proposal_id,participant_id,stance,rationale,proposer,created_at) VALUES(?,?,?,?,?,?,?)
+      ON CONFLICT(proposal_id,participant_id) DO UPDATE SET stance=excluded.stance,rationale=excluded.rationale,proposer=MAX(collab_merge_votes.proposer,excluded.proposer),created_at=excluded.created_at`)
+      .run(`mv-${randomUUID()}`,input.proposalId,input.participantId,input.stance,input.rationale??null,input.proposer?1:0,now());
+  }
+  listMergeProposals(sessionId:string):MergeProposal[]{
+    const proposals=this.db.prepare('SELECT * FROM collab_merge_proposals WHERE session_id=? ORDER BY created_at,rowid').all(sessionId) as any[],votes=this.db.prepare('SELECT v.* FROM collab_merge_votes v JOIN collab_merge_proposals p ON p.id=v.proposal_id WHERE p.session_id=? ORDER BY v.created_at,v.rowid').all(sessionId) as any[];
+    return proposals.map(row=>({proposalId:row.id,sessionId:row.session_id,round:row.round,issueIds:json(row.issue_ids_json,[] as string[]),rationale:row.rationale,createdAt:iso(row.created_at),votes:votes.filter(vote=>vote.proposal_id===row.id).map(vote=>({voteId:vote.id,proposalId:vote.proposal_id,participantId:vote.participant_id,stance:vote.stance,rationale:vote.rationale??undefined,proposer:!!vote.proposer,createdAt:iso(vote.created_at)}))}));
   }
 
   // ---- escalations ----
@@ -453,7 +503,7 @@ const participantFrom=(row:any):Participant=>({
 const eventFrom=(row:any):CollabEvent=>({sessionId:row.session_id,sequence:row.sequence,eventId:row.id,type:row.type,actorId:row.actor_id??undefined,payload:json(row.payload_json,{}),createdAt:iso(row.created_at)});
 const baselineFrom=(row:any):Baseline=>({baselineId:row.id,sessionId:row.session_id,round:row.round,vcs:row.vcs,commit:row.commit_sha??undefined,range:row.range_expr??undefined,dirtyHash:row.dirty_hash??undefined,paths:json(row.paths_json,[] as string[]),capturedAt:iso(row.captured_at)});
 const issueFrom=(row:any):Issue=>({
-  issueId:row.id,sessionId:row.session_id,externalId:row.external_id??undefined,reporterId:row.reporter_id,targetParticipantId:row.target_participant_id,
+  issueId:row.id,number:Number(row.issue_number??0),sessionId:row.session_id,externalId:row.external_id??undefined,reporterId:row.reporter_id,targetParticipantId:row.target_participant_id,
   title:row.title,severity:row.severity,category:row.category,requiredAction:row.required_action,confidence:row.confidence??undefined,
   location:json(row.location_json,{path:''}),evidence:row.evidence??undefined,impact:row.impact??undefined,suggestion:row.suggestion??undefined,
   baselineId:row.baseline_id,status:row.status,round:row.round,version:row.version,mergedInto:row.merged_into??undefined,
