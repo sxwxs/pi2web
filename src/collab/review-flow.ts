@@ -1,4 +1,4 @@
-import {COLLAB_ERRORS,OPEN_ISSUE_STATUSES,can,type Capability,type CollabPolicy,type IssueStatus,type Participant,type ResponseType,type ReviewPhase,type Role,type SessionStatus,type VerdictType} from './types.js';
+import {COLLAB_ERRORS,OPEN_ISSUE_STATUSES,can,type Capability,type CollabPolicy,type IssueStatus,type Participant,type ResponseType,type ReviewPhase,type Role,type SessionStatus,type VerdictType,type IssueVote,type MergeProposal} from './types.js';
 
 /**
  * Pure review state machine. It performs no IO, so every rule below is directly unit-testable.
@@ -14,7 +14,8 @@ export type FlowIssue={issueId:string,reporterId:string,targetParticipantId:stri
 export type PhaseCompletion={phase:ReviewPhase,round:number,participantId:string};
 export type ReviewSnapshot={
   phase:ReviewPhase,round:number,policy:CollabPolicy,status:SessionStatus,
-  participants:FlowParticipant[],issues:FlowIssue[],completions:PhaseCompletion[],pendingEscalations:number
+  participants:FlowParticipant[],issues:FlowIssue[],completions:PhaseCompletion[],pendingEscalations:number,
+  debateRound?:number,issueVotes?:IssueVote[],mergeProposals?:MergeProposal[]
 };
 export type FlowError=Error&{code:string,httpStatus:number};
 
@@ -23,6 +24,28 @@ export const flowError=(code:string,message:string,httpStatus=409):FlowError=>Ob
 const active=(snapshot:ReviewSnapshot)=>snapshot.participants.filter(participant=>participant.state!=='left');
 const findParticipant=(snapshot:ReviewSnapshot,participantId:string)=>snapshot.participants.find(participant=>participant.participantId===participantId);
 const unique=(values:string[])=>[...new Set(values)];
+const reviewers=(snapshot:ReviewSnapshot)=>active(snapshot).filter(participant=>participant.role==='reviewer');
+const consensusIssues=(snapshot:ReviewSnapshot)=>snapshot.issues.filter(issue=>issue.status==='open');
+export function currentIssueVotes(snapshot:ReviewSnapshot){
+  const latest=new Map<string,IssueVote>();
+  for(const vote of snapshot.issueVotes??[]){
+    if(vote.round!==snapshot.round)continue;
+    const key=`${vote.issueId}:${vote.participantId}`,previous=latest.get(key);
+    if(!previous||vote.consensusRound>previous.consensusRound||(vote.consensusRound===previous.consensusRound&&vote.createdAt>previous.createdAt))latest.set(key,vote);
+  }
+  return [...latest.values()];
+}
+export function issueConsensus(snapshot:ReviewSnapshot){
+  const votes=currentIssueVotes(snapshot),panel=reviewers(snapshot);
+  return consensusIssues(snapshot).map(issue=>{
+    const positions=panel.map(reviewer=>reviewer.participantId===issue.reporterId
+      ?{participantId:reviewer.participantId,stance:'approve' as const,implicit:true}
+      :{participantId:reviewer.participantId,stance:votes.find(vote=>vote.issueId===issue.issueId&&vote.participantId===reviewer.participantId)?.stance,rationale:votes.find(vote=>vote.issueId===issue.issueId&&vote.participantId===reviewer.participantId)?.rationale,implicit:false});
+    return {issueId:issue.issueId,positions,missing:positions.filter(position=>!position.stance).map(position=>position.participantId),rejecters:positions.filter(position=>position.stance==='reject').map(position=>position.participantId),supporters:positions.filter(position=>position.stance==='approve').map(position=>position.participantId),unanimous:positions.length>0&&positions.every(position=>position.stance==='approve')};
+  });
+}
+export const contestedIssueIds=(snapshot:ReviewSnapshot)=>issueConsensus(snapshot).filter(entry=>entry.rejecters.length>0).map(entry=>entry.issueId);
+const currentMergeProposals=(snapshot:ReviewSnapshot)=>(snapshot.mergeProposals??[]).filter(proposal=>proposal.round===snapshot.round);
 
 /** Statuses nobody may move again without a human: rulings are final. */
 export const FINAL_ISSUE_STATUSES:IssueStatus[]=['human_ruled','wontfix','closed','duplicate','withdrawn'];
@@ -49,6 +72,13 @@ export function requiredActors(snapshot:ReviewSnapshot):string[]{
   switch(snapshot.phase){
     case 'implementing':return participants.filter(participant=>participant.role==='implementer').map(participant=>participant.participantId);
     case 'collecting':return participants.filter(participant=>participant.role==='reviewer').map(participant=>participant.participantId);
+    case 'validating':return reviewers(snapshot).map(participant=>participant.participantId);
+    case 'merge_voting':return reviewers(snapshot).filter(participant=>currentMergeProposals(snapshot).some(proposal=>!proposal.votes.some(vote=>vote.participantId===participant.participantId))).map(participant=>participant.participantId);
+    case 'issue_discussing':{
+      const contested=new Set(contestedIssueIds(snapshot));
+      return unique(issueConsensus(snapshot).filter(entry=>contested.has(entry.issueId)).flatMap(entry=>entry.supporters));
+    }
+    case 'issue_reconsidering':return unique(issueConsensus(snapshot).flatMap(entry=>entry.rejecters));
     case 'responding':return unique(snapshot.issues.filter(issue=>issue.status==='open').map(issue=>issue.targetParticipantId));
     case 'adjudicating':return unique(snapshot.issues.filter(issue=>issue.status==='answered').map(issue=>issue.reporterId));
     default:return [];
@@ -58,7 +88,7 @@ export function requiredActors(snapshot:ReviewSnapshot):string[]{
 /** Required actors that have not finished yet. An exhausted or departed participant still blocks: a human must intervene. */
 export function waitingOn(snapshot:ReviewSnapshot):string[]{
   const required=requiredActors(snapshot);
-  if(snapshot.phase==='collecting'||snapshot.phase==='implementing'){
+  if(['collecting','implementing','validating','merge_voting','issue_discussing','issue_reconsidering'].includes(snapshot.phase)){
     const done=new Set(snapshot.completions.filter(entry=>entry.phase===snapshot.phase&&entry.round===snapshot.round).map(entry=>entry.participantId));
     return required.filter(participantId=>!done.has(participantId));
   }
@@ -73,7 +103,7 @@ export function isReadyToAdvance(snapshot:ReviewSnapshot):boolean{
   return waitingOn(snapshot).length===0;
 }
 
-export type AdvanceResult={phase:ReviewPhase,round:number,reason:string,escalateDeadlock?:boolean,skipped?:string[]};
+export type AdvanceResult={phase:ReviewPhase,round:number,reason:string,debateRound?:number,escalateDeadlock?:boolean,escalateConsensus?:boolean,skipped?:string[]};
 
 /**
  * Computes the next phase. `forced` is the human override used to break a stall; it is the only way
@@ -88,6 +118,9 @@ export function nextPhase(snapshot:ReviewSnapshot,options:{forced?:boolean}={}):
     throw flowError(COLLAB_ERRORS.wrongPhase,`Still waiting on ${pending.length} participant(s): ${pending.join(', ')}`);
   }
   const skipped=options.forced&&pending.length?{skipped:pending}:{};
+  // A participant may explicitly ask for a human during any consensus step. Finish the current batched step,
+  // then stop before another debate round instead of silently debating past an open escalation.
+  if(snapshot.pendingEscalations>0&&!['awaiting_human','adjudicating'].includes(snapshot.phase))return {phase:'awaiting_human',round:snapshot.round,debateRound:snapshot.debateRound,reason:'participant_escalated',...skipped};
   switch(snapshot.phase){
     case 'draft':return snapshot.policy.implementationFirst
       ? {phase:'implementing',round:snapshot.round,reason:'implementation_started',...skipped}
@@ -95,9 +128,28 @@ export function nextPhase(snapshot:ReviewSnapshot,options:{forced?:boolean}={}):
     // The implementer declares itself done (or a managed agent goes idle); only then are the reviewers called.
     case 'implementing':return {phase:'collecting',round:snapshot.round,reason:'implementation_ready',...skipped};
     case 'collecting':return {phase:'consolidating',round:snapshot.round,reason:'findings_complete',...skipped};
-    case 'consolidating':return {phase:'responding',round:snapshot.round,reason:'digest_ready',...skipped};
+    case 'consolidating':{
+      if(!snapshot.policy.consensusReview)return {phase:'responding',round:snapshot.round,reason:'digest_ready',...skipped};
+      const panel=reviewers(snapshot),completed=(phase:ReviewPhase)=>new Set(snapshot.completions.filter(entry=>entry.phase===phase&&entry.round===snapshot.round).map(entry=>entry.participantId));
+      if(!panel.every(entry=>completed('validating').has(entry.participantId)))return {phase:'validating',round:snapshot.round,reason:'issue_validation_started',...skipped};
+      const proposals=currentMergeProposals(snapshot);
+      if(proposals.length&&!completed('merge_voting').has('system'))return {phase:'merge_voting',round:snapshot.round,reason:'merge_voting_started',...skipped};
+      return contestedIssueIds(snapshot).length
+        ?{phase:'issue_discussing',round:snapshot.round,debateRound:Math.max(1,snapshot.debateRound??0),reason:'issue_votes_contested',...skipped}
+        :{phase:'responding',round:snapshot.round,reason:'issues_unanimously_validated',...skipped};
+    }
+    case 'validating':return {phase:'consolidating',round:snapshot.round,reason:'issue_validation_complete',...skipped};
+    case 'merge_voting':return {phase:'consolidating',round:snapshot.round,reason:'merge_voting_complete',...skipped};
+    case 'issue_discussing':return {phase:'issue_reconsidering',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'supporter_arguments_complete',...skipped};
+    case 'issue_reconsidering':{
+      if(!contestedIssueIds(snapshot).length)return {phase:'responding',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'issue_votes_converged',...skipped};
+      if((snapshot.debateRound??1)>=snapshot.policy.maxConsensusRounds)return {phase:'awaiting_human',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'issue_consensus_exhausted',escalateConsensus:true,...skipped};
+      return {phase:'issue_discussing',round:snapshot.round,debateRound:(snapshot.debateRound??1)+1,reason:'issue_consensus_next_round',...skipped};
+    }
     case 'responding':return {phase:'adjudicating',round:snapshot.round,reason:'responses_complete',...skipped};
-    case 'awaiting_human':return {phase:'adjudicating',round:snapshot.round,reason:'human_ruled',...skipped};
+    case 'awaiting_human':return snapshot.policy.consensusReview&&!snapshot.issues.some(issue=>issue.status==='answered')
+      ?{phase:'consolidating',round:snapshot.round,reason:'consensus_human_ruled',...skipped}
+      :{phase:'adjudicating',round:snapshot.round,reason:'human_ruled',...skipped};
     case 'adjudicating':{
       if(snapshot.pendingEscalations>0)return {phase:'awaiting_human',round:snapshot.round,reason:'escalations_pending',...skipped};
       if(!snapshot.issues.some(isOpenIssue))return {phase:'finished',round:snapshot.round,reason:'all_issues_closed',...skipped};

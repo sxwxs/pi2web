@@ -88,6 +88,7 @@ export class CollabRouter {
       if(method==='GET')return ok(isHuman?this.hub.participantsForHuman(sessionId):this.hub.store.listParticipants(sessionId).map(entry=>({...entry})));
     }
     if(method==='POST'&&tail==='advance'){human('Advancing a phase');return ok(await this.hub.advance(sessionId,await ctx.body()))}
+    if(method==='POST'&&tail==='retry-waiting'){human('Retrying waiting Agents');return ok(this.hub.retryWaiting(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='policy'){human('Changing the policy');return ok(this.hub.updatePolicy(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='open-round'){human('Opening a round');return ok(await this.hub.openRound(sessionId))}
     if(method==='GET'&&tail==='events')return ok(url.searchParams.has('tail')
@@ -97,6 +98,10 @@ export class CollabRouter {
     if(method==='GET'&&tail==='issues'&&!sub)return ok(isHuman?this.hub.store.listIssues(sessionId):this.hub.listIssues(asParticipant()));
     if(method==='GET'&&tail==='issues'&&sub)return ok(this.hub.issueDetail(sessionId,sub,participant));
     if(method==='POST'&&tail==='issues'&&parts[7]==='withdraw')return ok(await this.hub.withdrawIssue(asParticipant(),sub));
+    if(method==='GET'&&tail==='review-consensus')return ok(this.hub.reviewConsensus(sessionId,participant));
+    if(method==='POST'&&tail==='issue-votes')return ok(await this.hub.submitIssueVotes(asParticipant(),await ctx.body()));
+    if(method==='POST'&&tail==='merge-votes')return ok(await this.hub.submitMergeVotes(asParticipant(),await ctx.body()));
+    if(method==='POST'&&tail==='issue-discussions')return ok(await this.hub.submitIssueDiscussions(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='nominations')return ok(await this.hub.submitNominations(asParticipant(),await ctx.body()),201);
     if(method==='GET'&&tail==='criteria')return ok(this.hub.criteria(sessionId,participant));
     if(method==='POST'&&tail==='votes')return ok(await this.hub.submitVotes(asParticipant(),await ctx.body()));

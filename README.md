@@ -170,7 +170,7 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 两个场景：
 
-- **Review Loop**（`kind:"review"`）：提 issue → 回应 → 裁定 → 关闭或升级人工。可选**先开发后评审**（`policy.implementationFirst:true`）：会话先进入 `implementing`，开发 Agent 完工后中枢自动召集全部评审 Agent。
+- **Review Loop**（`kind:"review"`）：盲审提 issue → 全体交叉投票 / 重复项合并投票 → 分轮讨论收敛 → 实现方回应 → 裁定或升级人工。Web 看板新建的 review 默认开启 `policy.consensusReview:true`；可选**先开发后评审**（`policy.implementationFirst:true`）。
 - **Panel Scoring**（`kind:"scoring"`）：提名维度 → 投票锁 rubric → 盲打分 → 辩论收敛 → 出分。
 
 两种凭证：**配对码**代表人，可以建会话、登记参与者、强制推进、裁定升级；**participantToken** 代表一个 Agent，只能操作自己所在的会话。会话和参与者只能由人创建，Agent 无法自助加入。
@@ -199,17 +199,18 @@ curl -H "Authorization: Bearer $PTOKEN" $B/sessions/$SID/digest                 
 ### 开发 + 评审闭环（implementationFirst）
 
 ```
-draft ──advance──▶ implementing ──POST /ready 或托管 Agent 空闲──▶ collecting ──全部评审提交──▶ consolidating
-                                                                          │
-   finished ◀── 所有 issue 关闭 ── adjudicating ◀── responding ◀───────────┘
+draft ──advance──▶ implementing ──POST /ready 或托管 Agent 空闲──▶ collecting ──全部评审提交──▶ validating
+                                                                                                  │
+   finished ◀── 所有 issue 关闭 ── adjudicating ◀── responding ◀── merge_voting / issue_discussion
       ▲                              │                    ▲
       └─ 人工裁定 ◀── awaiting_human ─┘（拒绝超过 maxIssueRounds / 主动 escalate / 超过 maxTotalRounds）
                                        └── verdict=reject → issue 回到 open，下一轮重新钉基线复审
 ```
 
 - 开发 Agent 拿到的任务是 `implement`。它收到的是一份**只讲活儿的工单**（目标、工作目录、完工后 `POST /ready`），不含评审协议细节——因为这一步还用不上，而且知道得越多越容易自己 sleep 轮询评审意见。pi2web 收到该 Agent 的 `agent_settled` 且它确实持有本轮 `implement` 任务，就自动视为完工（`policy.autoReviewOnAgentIdle`，默认 true），无需任何人点按钮。
-- 中枢在切到 `collecting` 的瞬间钉基线，并给**每个**评审 Agent 派任务；所有评审 Agent 都提交 `reviewComplete=true` 后才推进——这就是"需要所有评审 agent 达成一致"。零 issue 即通过。
-- 评审方交完之后，**中枢主动回头叫开发 Agent**：`respond_to_issues` 任务连同 issue 原文一起 prompt 过去。开发方不需要（也不应该）轮询评审结果。
+- 中枢在切到 `collecting` 的瞬间钉基线，并给**每个**评审 Agent 派任务；所有评审 Agent 都提交 `reviewComplete=true` 后才解除盲审封印。
+- 共识评审随后按批次推进：`validating` 中每个 reviewer 对所有非自己提出的 issue 投 approve/reject（reject 必须说明理由），并可提交重复项合并提议；汇总全部提议后进入 `merge_voting`，提议者视为赞成，其余 reviewer 必须投票，只有全票赞成才合并。问题票不一致时，赞成方在 `issue_discussing` 统一回应，反对方在 `issue_reconsidering` 看完理由后统一重投；经过 `maxConsensusRounds`（默认 3）轮完整的“赞成方回应 → 反对方重投”仍未全票通过才升级人工；任一 Agent 也可以中途主动调用 `/escalations` 提前请求人工介入。对应接口为 `/issue-votes`、`/merge-votes`、`/issue-discussions` 和只读汇总 `/review-consensus`。
+- 共识通过之后，**中枢主动回头叫开发 Agent**：`respond_to_issues` 任务连同 issue 原文一起 prompt 过去。开发方不需要（也不应该）轮询评审结果。
 - 有问题时：评审方 `POST /findings` → 中枢转给开发方 → 开发方 `POST /responses`（`fixed` / `partially_fixed` 必须附 changes 和新的 codeRef；不认可就用 `rejected` + rationale）→ **只有提出者**能 `POST /verdicts` 裁定：`accept` 关闭、`reject` 把 issue 打回下一轮（重新钉基线复审）、`escalate` 交人。
 - 谈不拢时：单个 issue 被拒超过 `maxIssueRounds`（默认 3）或会话超过 `maxTotalRounds`（默认 6）自动生成 escalation，会话进入 `awaiting_human`，同时发邮件。人裁定后是终局，Agent 不能再改。
 - 结束时 `outcome.verdict` 为 `approved` / `closed_after_human_ruling` / `closed_with_open_issues`，`outcome.approval` 记录每个评审 Agent 提了几条、还剩几条未结；同时中枢给所有参与者推一条 `session_result`，托管 Agent 会收到一句"会话结束、无需再等"的收尾消息。
@@ -218,7 +219,7 @@ draft ──advance──▶ implementing ──POST /ready 或托管 Agent 空�
 
 人工升级（escalation）进入 `GET /api/v1/collab/escalations`，用 `POST /api/v1/collab/escalations/:id/resolve` 裁定；裁定会真的落地：`issue_dispute` 必须给 `issueDecision`，`budget_exhausted` 传 `extra.tokenBudget` 就提额并解封该参与者，`other`（轮次封顶死锁）传 `extra.maxTotalRounds` 就抬高轮次上限——参数不合法（字符串、比已用量还小、没比现有上限高）直接 422，不会“看似成功实则什么都没做”地用掉那一次机会；裁定事件里的 `applied` 记录实际生效的变更。预算也可以事后单独提：`POST /sessions/:id/participants/:pid/budget -d '{"tokenBudget":600000}'`。`score_dispute` 不走裁定接口，而是用 `POST /sessions/:id/finalize` 一次性给出每个争议维度的分数（该调用同时关掉这条升级；若人工强推跳过了结算，中枢也会自动关掉它，并把这些维度标为 `method:"forced"` 而不是“已收敛”）。**评分会话里只要还有未裁定的升级，面板就停在当前阶段**（不会被下一阶段越过，否则会出现“会话已结束、问题还挂在人手上”），裁定后自动继续；不想等就用 `POST /advance -d '{"force":true,"reason":"..."}'`。配置了 MailDispatch 时，升级和会话停滞会立即发信（不参与聚合，可在配置对话框关闭；同一会话 5 分钟内最多一封，避免 Agent 连续升级刷爆邮箱）。
 
-Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与创建、参与者登记与一次性 token、issue/维度、待裁定队列与裁定表单、事件时间线，并通过 WebSocket `subscribe_collab` 实时刷新。
+Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与创建、参与者登记、会话内从 `#1` 开始的短 Issue 编号、明确的严重程度、提出者 / 问题投票 / 独立合并投票表 / discussion、待裁定队列与事件时间线，并通过 WebSocket `subscribe_collab` 实时刷新。等待状态会同时显示本机 Agent 生命周期：`streaming` / `starting` 表示仍在执行，超过提醒阈值也不判为漏交；只有 `idle` / `unloaded` / `error` 且阶段 API 尚未提交时才适合用 `/retry-waiting` 重新唤醒。`waiting_for_user` 要先处理 Agent 交互；`advance force=true` 会真正跳过未提交结果。
 
 ## API
 
@@ -233,7 +234,7 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET /api/v1/sessions`
 - `GET/POST /api/v1/agents`
 - `GET/DELETE /api/v1/agents/:id`
-- `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/responses`、`/verdicts`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
+- `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/issue-votes`、`/merge-votes`、`/issue-discussions`、`/review-consensus`、`/retry-waiting`、`/responses`、`/verdicts`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
 - `GET /api/v1/collab/escalations`、`POST /api/v1/collab/escalations/:id/resolve`
 - `GET/POST /api/v1/terminals`
 - `GET/DELETE /api/v1/terminals/:id`

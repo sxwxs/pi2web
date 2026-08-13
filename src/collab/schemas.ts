@@ -34,6 +34,27 @@ export const findingsRequest=obj({
   usage:usage()
 });
 
+/** Batched after blind collection: one request validates every issue this reviewer did not report. */
+export const issueVotesRequest=obj({
+  clientRequestId:clientRequestId(),
+  votes:arr(obj({issueId:str({min:1,max:100}),stance:oneOf(['approve','reject'] as const),rationale:optional(str({max:4000}))}),{max:200}),
+  mergeProposals:withDefault(arr(obj({issueIds:arr(str({min:1,max:100}),{min:2,max:20}),rationale:str({min:10,max:2000})}),{max:50}),()=>[]),
+  complete:withDefault(bool(),()=>true),
+  usage:usage()
+});
+export const mergeVotesRequest=obj({
+  clientRequestId:clientRequestId(),
+  votes:arr(obj({proposalId:str({min:1,max:100}),stance:oneOf(['approve','reject'] as const),rationale:optional(str({max:4000}))}),{max:100}),
+  complete:withDefault(bool(),()=>true),
+  usage:usage()
+});
+export const issueDiscussionsRequest=obj({
+  clientRequestId:clientRequestId(),
+  discussions:arr(obj({issueId:str({min:1,max:100}),argument:str({min:20,max:4000}),respondingTo:optional(str({max:100}))}),{max:200}),
+  complete:withDefault(bool(),()=>true),
+  usage:usage()
+});
+
 export const responseSchema=obj({
   issueId:str({min:1,max:100}),
   responseType:oneOf(RESPONSE_TYPES),
@@ -96,6 +117,8 @@ export const policyPatch=obj({
   overdueWarningSec:optional(num({integer:true,min:60,max:86_400})),
   autoEscalateOnDeadlock:optional(bool()),
   blindFindings:optional(bool()),
+  consensusReview:optional(bool()),
+  maxConsensusRounds:optional(num({integer:true,min:1,max:10})),
   implementationFirst:optional(bool()),
   autoReviewOnAgentIdle:optional(bool()),
   tokenBudgetPerParticipant:optional(num({integer:true,min:1000,max:100_000_000})),
@@ -132,7 +155,9 @@ export const createParticipantRequest=obj({
 
 export const rebindParticipantRequest=obj({
   /** Hands the seat to another local agent: the bound one died, or was picked by mistake. */
-  agentId:str({min:1,max:200})
+  agentId:str({min:1,max:200}),
+  /** Filled by the human UI from the selected Agent's actual capabilities; never typed by the operator. */
+  model:optional(str({max:200}))
 });
 
 /** Raising a spent budget is its own operation: an escalation ruling can only be used once. */
@@ -143,6 +168,10 @@ export const participantBudgetRequest=obj({
 export const advanceRequest=obj({
   force:withDefault(bool(),()=>false),
   reason:withDefault(str({max:2000}),()=>'')
+});
+export const retryWaitingRequest=obj({
+  /** Optional UI-selected subset. Busy Agents are always skipped by the hub. */
+  participantIds:optional(arr(str({min:1,max:100}),{max:100}))
 });
 
 export const resolveEscalationRequest=obj({

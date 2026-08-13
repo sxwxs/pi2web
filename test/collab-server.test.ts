@@ -173,9 +173,9 @@ describe('collaboration HTTP API',()=>{
     const budget=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/budget`,{tokenBudget:900_000});
     expect(budget.status).toBe(200);
     expect(budget.data).toMatchObject({participantId,tokenBudget:900_000});
-    const rebound=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/binding`,{agentId:'agent-r1-replacement'});
+    const rebound=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/binding`,{agentId:'agent-r1-replacement',model:'anthropic/claude-sonnet-4'});
     expect(rebound.status).toBe(200);
-    expect(rebound.data.participant).toMatchObject({agentId:'agent-r1-replacement'});
+    expect(rebound.data.participant).toMatchObject({agentId:'agent-r1-replacement',model:'anthropic/claude-sonnet-4'});
     expect(rebound.data.participantToken).toMatch(/^cpt_/);
     // A seat without an agent is not a thing any more: the hub has to know who to wake.
     expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/binding`,{})).status).toBe(422);

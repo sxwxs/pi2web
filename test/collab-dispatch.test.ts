@@ -260,6 +260,17 @@ describe('collab dispatcher',()=>{
     expect(timed.checkStalls()).toHaveLength(0);
   });
 
+  it('does not call a long-running streaming Agent stalled, but alarms if it goes idle without submitting',async()=>{
+    let clock=Date.now(),status='streaming';
+    const timed=new CollabHub(store,{resolveBaseline:baseline,now:()=>clock,agentStatus:()=>status});timed.init();
+    const created=await timed.createSession({kind:'review',title:'Long active review',workspaceId:'ws-1',subject:{type:'free',value:'branch'},policy:{overdueWarningSec:60}},async()=>dir);
+    const reviewer=timed.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-reviewer'}).participant;
+    await timed.openRound(created.sessionId);clock+=5*60_000;
+    expect(timed.checkStalls()).toHaveLength(0);
+    status='idle';
+    expect(timed.checkStalls()[0]?.stalled?.waitingOn).toEqual([reviewer.participantId]);
+  });
+
   it('retires the queue entry once the agent has been told, so a restart does not repeat itself',async()=>{
     const created=await session();
     const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-reviewer'});
