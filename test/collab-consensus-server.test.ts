@@ -59,13 +59,15 @@ describe('review consensus over HTTP',()=>{
 
     const open=(await call('GET',`/api/v1/collab/sessions/${sessionId}/issues`)).data.filter((issue:any)=>issue.status==='open');
     expect(open).toHaveLength(2);
-    await call('POST',`/api/v1/collab/sessions/${sessionId}/responses`,{clientRequestId:rid(),responses:open.map((issue:any)=>({issueId:issue.issueId,responseType:'rejected',rationale:'The implementation owner records the panel decision without making a code change.'}))},implementer.participantToken);
+    await call('POST',`/api/v1/collab/sessions/${sessionId}/responses`,{clientRequestId:rid(),responses:open.map((issue:any)=>issue.issueId===two?{issueId:issue.issueId,responseType:'deferred',rationale:'The valid issue is accepted but implementation is explicitly deferred to follow-up work.'}:{issueId:issue.issueId,responseType:'rejected',rationale:'The implementation owner records the panel decision without making a code change.'})},implementer.participantToken);
     for(const [name,issueId] of [['A',one],['B',two]] as const)await call('POST',`/api/v1/collab/sessions/${sessionId}/verdicts`,{clientRequestId:rid(),verdicts:[{issueId,verdict:'accept'}]},tokens[name]);
     expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.status).toBe('finished');
     const consensus=(await call('GET',`/api/v1/collab/sessions/${sessionId}/review-consensus`)).data;
     expect(consensus.discussions).toHaveLength(4);expect(consensus.mergeProposals[0].votes).toHaveLength(5);
     expect(consensus.issueConsensus).toHaveLength(3);
     expect(consensus.issueConsensus.find((entry:any)=>entry.issueId===two).positions.every((position:any)=>position.stance==='approve')).toBe(true);
+    expect(consensus.summary).toMatchObject({verdict:'follow_up_required',actionItemCount:1});
+    expect(consensus.summary.actionItems[0]).toMatchObject({issueId:two,disposition:'deferred',requiresAction:true});
   });
 
   it('escalates an issue vote that remains rejected after the configured discussion rounds',async()=>{

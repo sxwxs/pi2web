@@ -219,7 +219,7 @@ draft ──advance──▶ implementing ──POST /ready 或托管 Agent 空�
 
 人工升级（escalation）进入 `GET /api/v1/collab/escalations`，用 `POST /api/v1/collab/escalations/:id/resolve` 裁定；裁定会真的落地：`issue_dispute` 必须给 `issueDecision`，`budget_exhausted` 传 `extra.tokenBudget` 就提额并解封该参与者，`other`（轮次封顶死锁）传 `extra.maxTotalRounds` 就抬高轮次上限——参数不合法（字符串、比已用量还小、没比现有上限高）直接 422，不会“看似成功实则什么都没做”地用掉那一次机会；裁定事件里的 `applied` 记录实际生效的变更。预算也可以事后单独提：`POST /sessions/:id/participants/:pid/budget -d '{"tokenBudget":600000}'`。`score_dispute` 不走裁定接口，而是用 `POST /sessions/:id/finalize` 一次性给出每个争议维度的分数（该调用同时关掉这条升级；若人工强推跳过了结算，中枢也会自动关掉它，并把这些维度标为 `method:"forced"` 而不是“已收敛”）。**评分会话里只要还有未裁定的升级，面板就停在当前阶段**（不会被下一阶段越过，否则会出现“会话已结束、问题还挂在人手上”），裁定后自动继续；不想等就用 `POST /advance -d '{"force":true,"reason":"..."}'`。配置了 MailDispatch 时，升级和会话停滞会立即发信（不参与聚合，可在配置对话框关闭；同一会话 5 分钟内最多一封，避免 Agent 连续升级刷爆邮箱）。
 
-Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与创建、参与者登记、会话内从 `#1` 开始的短 Issue 编号、明确的严重程度、提出者 / 问题投票 / 独立合并投票表 / discussion、待裁定队列与事件时间线，并通过 WebSocket `subscribe_collab` 实时刷新。等待状态会同时显示本机 Agent 生命周期：`streaming` / `starting` 表示仍在执行，超过提醒阈值也不判为漏交；只有 `idle` / `unloaded` / `error` 且阶段 API 尚未提交时才适合用 `/retry-waiting` 重新唤醒。`waiting_for_user` 要先处理 Agent 交互；`advance force=true` 会真正跳过未提交结果。
+Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与创建、参与者登记、会话内从 `#1` 开始的短 Issue 编号、明确的严重程度、提出者 / 问题投票 / 独立合并投票表 / discussion、待裁定队列与事件时间线，并通过 WebSocket `subscribe_collab` 实时刷新。Review 还会生成“评审总结”：按严重程度列出仍需修复/跟进的 action items、文件位置、修复建议和当前 disposition；历史上 `deferred + accept` 被存成 `resolved` 的记录也会按真实响应显示为 `deferred`，避免误报 approved。等待状态会同时显示本机 Agent 生命周期：`streaming` / `starting` 表示仍在执行，超过提醒阈值也不判为漏交；只有 `idle` / `unloaded` / `error` 且阶段 API 尚未提交时才适合用 `/retry-waiting` 重新唤醒。`waiting_for_user` 要先处理 Agent 交互；`advance force=true` 会真正跳过未提交结果。
 
 ## API
 

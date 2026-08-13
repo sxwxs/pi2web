@@ -589,12 +589,31 @@ export class CollabHub {
     return {...base,task:'wait',instructions:session.phase==='awaiting_human'?'A human ruling is pending. Do not resubmit and do not poll; you will be prompted when it is your turn again.':'Nothing is required from you right now. End your turn; the hub prompts you when something needs you.'};
   }
 
+  reviewSummary(sessionId:string){
+    const issues=this.store.listIssues(sessionId),severityOrder:Record<string,number>={blocker:0,critical:1,major:2,minor:3,nit:4};
+    const entries=issues.map(issue=>{
+      const messages=this.store.listIssueMessages(issue.issueId),response=[...messages].reverse().find(message=>message.kind==='response'),verdict=[...messages].reverse().find(message=>message.kind==='verdict');
+      const responseType=typeof response?.payload.responseType==='string'?response.payload.responseType:undefined,verdictType=typeof verdict?.payload.verdict==='string'?verdict.payload.verdict:undefined;
+      // Historical versions mapped every accepted response to `resolved`. Derive the actionable disposition from
+      // the actual response so a deferred finding never disappears from the close-out report as "fixed".
+      const disposition=responseType==='deferred'&&verdictType==='accept'?'deferred':responseType==='rejected'&&verdictType==='accept'?'wontfix':responseType==='needs_info'&&verdictType==='accept'?'needs_info':issue.status;
+      const requiresAction=['open','answered','escalated','deferred','needs_info'].includes(disposition)||responseType==='partially_fixed';
+      return {number:issue.number,issueId:issue.issueId,title:issue.title,severity:issue.severity,status:issue.status,disposition,requiresAction,category:issue.category,requiredAction:issue.requiredAction,
+        location:issue.location,description:issue.suggestion||issue.impact||issue.evidence||issue.title,evidence:issue.evidence,impact:issue.impact,suggestion:issue.suggestion,
+        response:response?{responseType,rationale:response.payload.rationale,changes:response.payload.changes??[]}:undefined,verdict:verdict?{verdict:verdictType,rationale:verdict.payload.rationale}:undefined};
+    }).sort((a,b)=>(severityOrder[a.severity]??99)-(severityOrder[b.severity]??99)||a.number-b.number);
+    const actionItems=entries.filter(entry=>entry.requiresAction),bySeverity:Record<string,number>={},byDisposition:Record<string,number>={};
+    for(const entry of entries){bySeverity[entry.severity]=(bySeverity[entry.severity]??0)+1;byDisposition[entry.disposition]=(byDisposition[entry.disposition]??0)+1}
+    const urgent=actionItems.filter(entry=>entry.severity==='blocker'||entry.severity==='critical').length;
+    return {description:actionItems.length?`${actionItems.length} issue(s) still require implementation or follow-up${urgent?`, including ${urgent} blocker/critical`:''}.`:`All ${entries.length} reviewed issue(s) have a terminal disposition and no remaining implementation action.`,
+      verdict:actionItems.length?(urgent?'changes_required':'follow_up_required'):'approved',totalIssues:entries.length,actionItemCount:actionItems.length,bySeverity,byDisposition,actionItems,issues:entries};
+  }
   reviewConsensus(sessionId:string,viewer?:Participant){
     const session=this.store.getSession(sessionId),snapshot=this.snapshot(sessionId);
     if(viewer&&session.phase==='collecting')throw flowError(COLLAB_ERRORS.forbidden,'Consensus data stays sealed until every reviewer finishes collection',403);
     // The state machine only evaluates still-open issues, but the board is also an audit view after finish.
     // Include terminal/resolved/merged issues here so their historical ballots do not disappear at close-out.
-    return {phase:session.phase,round:session.round,consensusRound:session.debateRound,issueVotes:this.store.listIssueVotes(sessionId),issueConsensus:issueConsensus(snapshot,{includeFinal:true}),mergeProposals:this.store.listMergeProposals(sessionId),discussions:this.store.listIssues(sessionId).flatMap(issue=>this.store.listIssueMessages(issue.issueId).filter(message=>message.kind==='discussion'))};
+    return {phase:session.phase,round:session.round,consensusRound:session.debateRound,issueVotes:this.store.listIssueVotes(sessionId),issueConsensus:issueConsensus(snapshot,{includeFinal:true}),mergeProposals:this.store.listMergeProposals(sessionId),discussions:this.store.listIssues(sessionId).flatMap(issue=>this.store.listIssueMessages(issue.issueId).filter(message=>message.kind==='discussion')),summary:this.reviewSummary(sessionId)};
   }
 
   /** Blind review: while findings are being collected, a participant only sees their own. */

@@ -118,7 +118,7 @@ export class CollabRouter {
     if(method==='POST'&&tail==='escalations')return ok(await this.hub.raiseEscalation(asParticipant(),await ctx.body()),202);
     // The report is the human close-out view: it lists every issue and escalation, which would defeat blind
     // collection if a participant token could read it while the round is still open.
-    if(method==='GET'&&tail==='report'){human('Reading the session report');return ok({session:this.hub.getSession(sessionId),progress:this.hub.progress(sessionId),issues:this.hub.store.listIssues(sessionId),escalations:this.hub.listEscalations({sessionId})})}
+    if(method==='GET'&&tail==='report'){human('Reading the session report');const reportSession=this.hub.getSession(sessionId);return ok({session:reportSession,progress:this.hub.progress(sessionId),issues:this.hub.store.listIssues(sessionId),reviewSummary:reportSession.kind==='review'?this.hub.reviewSummary(sessionId):undefined,escalations:this.hub.listEscalations({sessionId})})}
     return undefined;
   }
 
