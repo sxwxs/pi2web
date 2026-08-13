@@ -592,7 +592,9 @@ export class CollabHub {
   reviewConsensus(sessionId:string,viewer?:Participant){
     const session=this.store.getSession(sessionId),snapshot=this.snapshot(sessionId);
     if(viewer&&session.phase==='collecting')throw flowError(COLLAB_ERRORS.forbidden,'Consensus data stays sealed until every reviewer finishes collection',403);
-    return {phase:session.phase,round:session.round,consensusRound:session.debateRound,issueVotes:this.store.listIssueVotes(sessionId),issueConsensus:issueConsensus(snapshot),mergeProposals:this.store.listMergeProposals(sessionId),discussions:this.store.listIssues(sessionId).flatMap(issue=>this.store.listIssueMessages(issue.issueId).filter(message=>message.kind==='discussion'))};
+    // The state machine only evaluates still-open issues, but the board is also an audit view after finish.
+    // Include terminal/resolved/merged issues here so their historical ballots do not disappear at close-out.
+    return {phase:session.phase,round:session.round,consensusRound:session.debateRound,issueVotes:this.store.listIssueVotes(sessionId),issueConsensus:issueConsensus(snapshot,{includeFinal:true}),mergeProposals:this.store.listMergeProposals(sessionId),discussions:this.store.listIssues(sessionId).flatMap(issue=>this.store.listIssueMessages(issue.issueId).filter(message=>message.kind==='discussion'))};
   }
 
   /** Blind review: while findings are being collected, a participant only sees their own. */
