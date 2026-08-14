@@ -64,12 +64,11 @@ describe('collab validator',()=>{
 });
 
 describe('collab capabilities',()=>{
-  it('lets any role file issues and respond so reverse review needs no second flow',()=>{
-    for(const role of ['implementer','reviewer','moderator'] as const){
-      expect(can(role,'file_finding')).toBe(true);
-      expect(can(role,'respond')).toBe(true);
-      expect(can(role,'verdict')).toBe(true);
-    }
+  it('lets any role file findings but reserves implementation readiness for developers',()=>{
+    for(const role of ['implementer','reviewer','moderator'] as const)expect(can(role,'file_finding')).toBe(true);
+    expect(can('implementer','ready')).toBe(true);
+    expect(can('reviewer','ready')).toBe(false);
+    expect(can('moderator','ready')).toBe(false);
   });
   it('recuses the implementer from scoring but keeps clarification open',()=>{
     expect(can('implementer','score')).toBe(false);

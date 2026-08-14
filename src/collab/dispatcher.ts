@@ -110,9 +110,12 @@ export class CollabDispatcher {
     }
     if(participant.state!=='active')return;                              // left or out of budget: a human has to act
     const session=this.hub.store.findSession(sessionId);
-    // `session_result` is the closing note, so it is the one task that may still be delivered after the session ended.
+    // A human may reopen a review while the previous closing note is still scheduled. Never deliver that stale
+    // "finished" message into a new active cycle, and do not retire the freshly rotated credential with it.
     const terminal=task==='session_result';
-    if(!session||(session.status!=='active'&&!terminal))return;
+    if(!session)return;
+    if(terminal&&session.status!=='finished'){this.hub.completeDelivery(participantId,task);return}
+    if(!terminal&&session.status!=='active')return;
     // The bound agent is part of the identity of a delivery: after a rebind the *new* agent has received
     // nothing, so a key without it matches the old delivery and leaves the replacement agent idle.
     const key=`${agentId}:${task}:${session.phase}:${session.round}:${session.debateRound}`;
@@ -221,7 +224,7 @@ function protocolBriefing(input:{baseUrl:string,session:CollabSession,participan
   const api=`${baseUrl.replace(/\/$/,'')}/api/v1/collab/sessions/${session.sessionId}`;
   const digest=input.digest===undefined?'(unavailable, call GET /digest)':clip(JSON.stringify(input.digest,null,2),MAX_DIGEST_CHARS);
   const submit=session.kind==='review'
-    ? `POST ${api}/findings | ${api}/issue-votes | ${api}/merge-votes | ${api}/issue-discussions | ${api}/responses | ${api}/verdicts`
+    ? `POST ${api}/findings | ${api}/issue-votes | ${api}/merge-votes | ${api}/issue-discussions`
     : `POST ${api}/nominations | ${api}/votes | ${api}/scores | ${api}/debates/{debateId}/arguments`;
   return [
     `[pi2web collaboration hub] You have a task in collaboration session "${session.title}".`,

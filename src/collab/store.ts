@@ -240,6 +240,12 @@ export class CollabStore {
       .run(agentId,model??null,hashToken(token),token,participantId);
     return {participant:this.getParticipant(participantId),token};
   }
+  /** A finished review drops dispatch credentials. Reopening rotates them before any Agent is called again. */
+  rotateParticipantToken(participantId:string):string{
+    const token=`cpt_${randomUUID().replace(/-/g,'')}${randomUUID().replace(/-/g,'')}`;
+    this.db.prepare('UPDATE collab_participants SET token_hash=?,dispatch_token=? WHERE id=?').run(hashToken(token),token,participantId);
+    return token;
+  }
   updateParticipant(participantId:string,patch:Partial<Pick<Participant,'state'|'tokensUsed'|'tokenBudget'|'tokensEstimated'|'lastSeenAt'|'model'>>):Participant{
     const current=this.getParticipant(participantId);
     this.db.prepare('UPDATE collab_participants SET state=?,tokens_used=?,token_budget=?,tokens_estimated=?,last_seen_at=?,model=? WHERE id=?').run(

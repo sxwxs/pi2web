@@ -53,16 +53,12 @@ describe('collaboration HTTP API',()=>{
     const issueId=submitted.data.accepted[0].issueId;
 
     const implDigest=(await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,implementer.participantToken)).data;
-    expect(implDigest).toMatchObject({task:'respond_to_issues',phase:'responding'});
-    const responded=await call('POST',`/api/v1/collab/sessions/${sessionId}/responses`,{clientRequestId:rid(),responses:[{issueId,responseType:'fixed',changes:[{path:'src/pay/callback.ts',summary:'verify the HMAC'}],codeRef:{dirtyHash:'sha256:new'}}]},implementer.participantToken);
-    expect(responded.data.accepted).toEqual([{issueId,status:'answered'}]);
-
-    const ruled=await call('POST',`/api/v1/collab/sessions/${sessionId}/verdicts`,{clientRequestId:rid(),verdicts:[{issueId,verdict:'accept'}]},reviewer.participantToken);
-    expect(ruled.data.accepted).toEqual([{issueId,status:'resolved'}]);
+    expect(implDigest).toMatchObject({task:'wait',phase:'finished'});
 
     const report=(await call('GET',`/api/v1/collab/sessions/${sessionId}/report`)).data;
-    expect(report.session).toMatchObject({phase:'finished',status:'finished'});
-    expect(report.progress).toMatchObject({openIssues:0,totalIssues:1});
+    expect(report.session).toMatchObject({phase:'finished',status:'finished',outcome:{verdict:'changes_required'}});
+    expect(report.progress).toMatchObject({openIssues:0,totalIssues:1,byStatus:{confirmed:1}});
+    expect(report.issues[0]).toMatchObject({issueId,status:'confirmed'});
   });
 
   it('rejects a malformed submission with per-field codes an agent can act on',async()=>{
@@ -99,6 +95,7 @@ describe('collaboration HTTP API',()=>{
     expect((await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Agent made this',workspaceId:workspace.id,subject:{type:'free',value:'x'}},token)).status).toBe(403);
     expect((await call('POST',`/api/v1/collab/sessions/${first.sessionId}/participants`,{role:'reviewer',displayName:'r2',agentId:'agent-r2'},token)).status).toBe(403);
     expect((await call('POST',`/api/v1/collab/sessions/${first.sessionId}/advance`,{force:true,reason:'because I said so'},token)).status).toBe(403);
+    expect((await call('POST',`/api/v1/collab/sessions/${first.sessionId}/recheck`,{mode:'review_only'},token)).status).toBe(403);
     expect((await call('GET','/api/v1/collab/escalations',undefined,token)).status).toBe(403);
     // The close-out report lists every issue and escalation, so it is a human view even inside the own session.
     expect((await call('GET',`/api/v1/collab/sessions/${first.sessionId}/report`,undefined,token)).status).toBe(403);
@@ -112,7 +109,7 @@ describe('collaboration HTTP API',()=>{
 
   it('routes a dispute to a human queue and applies the ruling',async()=>{
     const {call,workspace}=await boot();
-    const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Disputed review',workspaceId:workspace.id,subject:{type:'free',value:'a'}})).data.sessionId;
+    const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Disputed review',workspaceId:workspace.id,subject:{type:'free',value:'a'},policy:{consensusReview:true}})).data.sessionId;
     const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:'agent-r1'})).data;
     const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:'agent-impl'})).data;
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
@@ -122,6 +119,8 @@ describe('collaboration HTTP API',()=>{
     const escalated=await call('POST',`/api/v1/collab/sessions/${sessionId}/escalations`,{clientRequestId:rid(),kind:'issue_dispute',refId:issueId,
       summary:'We disagree about whether this callback path is reachable in production at all.',question:'Is the path reachable?',options:['yes','no'],urgency:'high'},implementer.participantToken);
     expect(escalated.status).toBe(202);
+    // The reviewer completes the now-empty validation batch; the pending dispute then parks on a human.
+    await call('POST',`/api/v1/collab/sessions/${sessionId}/issue-votes`,{clientRequestId:rid(),votes:[],complete:true},reviewer.participantToken);
     expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.phase).toBe('awaiting_human');
 
     const pending=(await call('GET','/api/v1/collab/escalations?status=pending')).data;

@@ -1,4 +1,4 @@
-import {CATEGORIES,DEBATE_STANCES,ESCALATION_KINDS,REGISTRABLE_ROLES,REQUIRED_ACTIONS,RESPONSE_TYPES,SEVERITIES,VERDICT_TYPES,VOTE_STANCES} from './types.js';
+import {CATEGORIES,DEBATE_STANCES,ESCALATION_KINDS,REGISTRABLE_ROLES,REQUIRED_ACTIONS,SEVERITIES,VOTE_STANCES} from './types.js';
 import {anyJson,arr,bool,num,obj,oneOf,optional,refine,str,withDefault,type FieldError,type Validator} from './validate.js';
 
 /**
@@ -30,6 +30,12 @@ export const findingsRequest=obj({
   clientRequestId:clientRequestId(),
   baselineId:str({min:1,max:100}),
   findings:arr(findingSchema,{max:50}),
+  /** On a later review round, the original reporter verifies each previously confirmed issue. */
+  rechecks:withDefault(arr(obj({
+    issueId:str({min:1,max:100}),
+    outcome:oneOf(['resolved','still_present'] as const),
+    rationale:str({min:10,max:4000})
+  }),{max:100}),()=>[]),
   reviewComplete:withDefault(bool(),()=>false),
   usage:usage()
 });
@@ -54,27 +60,6 @@ export const issueDiscussionsRequest=obj({
   complete:withDefault(bool(),()=>true),
   usage:usage()
 });
-
-export const responseSchema=obj({
-  issueId:str({min:1,max:100}),
-  responseType:oneOf(RESPONSE_TYPES),
-  rationale:optional(str({max:4000})),
-  changes:withDefault(arr(obj({path:str({min:1,max:400}),summary:str({min:5,max:1000})}),{max:50}),()=>[]),
-  remaining:optional(str({max:2000})),
-  question:optional(str({max:2000})),
-  followUpRef:optional(str({max:200})),
-  codeRef:optional(obj({commit:optional(str({max:100})),dirtyHash:optional(str({max:200}))})),
-  expectedVersion:optional(num({integer:true,min:1}))
-});
-export const responsesRequest=obj({clientRequestId:clientRequestId(),responses:arr(responseSchema,{min:1,max:50}),usage:usage()});
-
-export const verdictSchema=obj({
-  issueId:str({min:1,max:100}),
-  verdict:oneOf(VERDICT_TYPES),
-  rationale:optional(str({max:4000})),
-  expectedVersion:optional(num({integer:true,min:1}))
-});
-export const verdictsRequest=obj({clientRequestId:clientRequestId(),verdicts:arr(verdictSchema,{min:1,max:50}),usage:usage()});
 
 export const escalationRequest=obj({
   clientRequestId:clientRequestId(),
@@ -132,6 +117,12 @@ export const readyRequest=obj({
   changes:withDefault(arr(obj({path:str({min:1,max:400}),summary:str({min:5,max:1000})}),{max:100}),()=>[]),
   codeRef:optional(obj({commit:optional(str({max:100})),dirtyHash:optional(str({max:200}))})),
   usage:usage()
+});
+
+/** Human-only restart of a finished review: review current code, or let selected developers fix first. */
+export const recheckRequest=obj({
+  mode:oneOf(['review_only','fix_then_review'] as const),
+  implementerParticipantIds:withDefault(arr(str({min:1,max:100}),{max:20}),()=>[])
 });
 
 export const createSessionRequest=obj({
