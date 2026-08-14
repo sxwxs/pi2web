@@ -112,6 +112,37 @@
     const tone = session.status !== 'active' ? 'green' : session.stalled ? 'red' : session.phase === 'awaiting_human' ? 'yellow' : 'blue';
     return `<span class="pill ${tone}">${esc(session.phase)}</span>`;
   };
+  /** Compact live state diagram. Consensus sub-phases share one semantic step instead of exposing old API noise. */
+  function reviewFlowChart(session) {
+    if (session.kind !== 'review') return '';
+    const groups = {draft:0, implementing:1, collecting:2, consolidating:3, validating:3, merge_voting:3, issue_discussing:3, issue_reconsidering:3, awaiting_human:3, finished:4};
+    const current = groups[session.phase] ?? 0, finished = session.status === 'finished';
+    const steps = [
+      {label:'准备',detail:'人员与范围',group:0},
+      {label:session.round > 1 ? '修复' : '开发',detail:'可选',group:1,optional:true},
+      {label:'独立盲审',detail:`review round ${session.round}`,group:2},
+      {label:'问题共识',detail:session.phase === 'awaiting_human' ? '等待人工裁定' : '投票 · 合并 · 讨论',group:3},
+      {label:'评审完成',detail:'输出报告',group:4}
+    ];
+    const nodes = steps.map(step => {
+      const active = !finished && step.group === current, done = finished || step.group < current;
+      return `<div class="flow-step ${active?'active':''} ${done?'done':''} ${step.optional?'optional':''}"><b>${done?'✓ ':''}${esc(step.label)}</b><small>${esc(step.detail)}</small></div>`;
+    });
+    return `<div class="card"><h3>Review 动态流程</h3><div class="flow-chart">${nodes.map((node,index)=>`${index?'<span class="flow-arrow">→</span>':''}${node}`).join('')}</div><div class="flow-loop">评审完成后可直接复核当前代码，或先交给选定的开发 Agent 修复；随后回到“独立盲审”，不再经过 responding/adjudicating。</div></div>`;
+  }
+  function recheckCard(session, issues) {
+    if (session.kind !== 'review' || session.status !== 'finished') return '';
+    const implementers = (session.participants || []).filter(entry => entry.role === 'implementer' && entry.state === 'active');
+    const actions = issues.filter(issue => ['confirmed','open','answered','escalated'].includes(issue.status));
+    return `<div class="card"><h3>继续这个 Review <span class="grow"></span><span class="pill yellow">${actions.length} 个待复核问题</span></h3>
+      <div class="recheck-actions"><p><b>直接复核</b>：代码已由人工或其它 Agent 修改，立即固定新 baseline 并召集原 Reviewer。</p>
+        <button type="button" data-action="recheck">复核当前代码</button></div>
+      <div class="recheck-actions" style="margin-top:10px"><p><b>修复后复核</b>：先把确认的问题交给一个开发 Agent；它提交 ready 后，中枢自动召集 Reviewer。</p>
+        <div class="row"><label>负责修复的开发 Agent<select id="recheckImplementer">${implementers.map(entry=>`<option value="${esc(entry.participantId)}">${esc(entry.displayName)}</option>`).join('')}</select></label>
+        <button type="button" data-action="fix-recheck" ${implementers.length?'':'disabled'}>推进到修复 → 复核</button></div>
+        ${implementers.length?'':'<small class="muted">请先在下方参与者区域新增一个 implementer Agent。</small>'}</div>
+    </div>`;
+  };
   function renderSessions() {
     $('escalationBadge').innerHTML = state.escalations.length
       ? `<span class="pill red">${state.escalations.length} 项待人工裁定</span>` : '<span class="muted">无待裁定项</span>';
@@ -268,14 +299,17 @@
         ${stallNotice}
         <p class="muted">进度：${esc(JSON.stringify(progress))}</p>
         ${session.policy?.implementationFirst ? '<p class="muted">模式：先开发后评审（implementing → collecting 自动切换）</p>' : ''}
-        ${session.kind === 'review' ? (session.policy?.consensusReview ? `<p class="muted">共识评审：盲审汇总 → 问题投票 / 合并提议 → 合并投票 → 最多 ${esc(session.policy.maxConsensusRounds)} 轮讨论 → 实现响应</p>` : '<p class="muted">共识评审：关闭（兼容旧 API 会话）</p>') : ''}
+        ${session.kind === 'review' ? (session.policy?.consensusReview ? `<p class="muted">共识评审：盲审汇总 → 问题投票 / 合并提议 → 合并投票 → 最多 ${esc(session.policy.maxConsensusRounds)} 轮讨论 → 输出报告</p>` : '<p class="muted">共识评审：关闭（收集完成后直接输出报告）</p>') : ''}
         ${displayedVerdict ? `<p><span class="pill ${displayedVerdict === 'approved' ? 'green' : displayedVerdict === 'changes_required' ? 'red' : 'yellow'}">结论：${esc(displayedVerdict)}</span>${session.outcome?.approval?.unanimous ? ' <span class="pill green">问题认定已全票完成</span>' : ''}</p>` : ''}
-        <div class="row">
+        ${session.status === 'active' ? `<div class="row">
           <button data-action="advance">推进阶段</button>
           ${retryableWaiting.length ? `<button data-action="retry">重新提醒已停止的 Agent（${retryableWaiting.length}）</button>` : ''}
           <button data-action="force">强制跳过未提交并推进…</button>
-        </div>
+        </div>` : ''}
       </div>
+
+      ${reviewFlowChart(session)}
+      ${recheckCard(session, issues)}
 
       <div class="card">
         <h3>参与者 <span class="grow"></span></h3>
@@ -291,7 +325,7 @@
             <td>${participant.pendingTasks ? `<span class="pill red">${participant.pendingTasks} 未送达</span>` : '<span class="muted">-</span>'}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">还没有参与者</td></tr>'}
         </tbody></table>
         <form id="participantForm" class="row" style="margin-top:10px">
-          <label>角色<select id="pRole"><option value="reviewer">评审 reviewer</option><option value="implementer">开发 implementer</option><option value="moderator">协调 moderator</option></select></label>
+          <label>角色<select id="pRole">${session.status === 'finished' && session.kind === 'review' ? '<option value="implementer">开发 implementer</option>' : '<option value="reviewer">评审 reviewer</option><option value="implementer">开发 implementer</option><option value="moderator">协调 moderator</option>'}</select></label>
           <label>Agent<select id="pAgent" required><option value="__new__">＋ 新建 Agent</option>${availableAgents(session).map(agent => `<option value="${esc(agent.agentId)}">${esc(agent.sessionName || agent.agentId)}${agent.status ? ` (${esc(agent.status)})` : ''}</option>`).join('')}</select></label>
           <label id="pNewModelWrap" class="participant-config">新 Agent 使用的模型<select id="pNewModel" required>${modelOptionsHtml(session)}</select><small class="field-help">只列出 Pi 当前已配置凭据、在这个项目中实际可用的模型。</small></label>
           <span id="pAgentHint" class="field-help">新 Agent 的名称会根据会话和角色自动生成；模型标注会从实际模型自动填写。</span>
@@ -411,6 +445,17 @@
           if (!reason) return;
           await post(`/api/v1/collab/sessions/${sessionId}/advance`, {force: true, reason});
           toast('已强制推进');
+        }
+        if (action === 'recheck') {
+          if (!confirm('确认当前代码已经准备好复核？中枢会固定新 baseline 并立即召集所有 Reviewer。')) return;
+          await post(`/api/v1/collab/sessions/${sessionId}/recheck`, {mode:'review_only'});
+          toast('已开启新一轮复核');
+        }
+        if (action === 'fix-recheck') {
+          const participantId = $('recheckImplementer')?.value;
+          if (!participantId) throw Error('请先选择一个开发 Agent');
+          await post(`/api/v1/collab/sessions/${sessionId}/recheck`, {mode:'fix_then_review', implementerParticipantIds:[participantId]});
+          toast('已交给开发 Agent 修复；完成后将自动召集 Reviewer');
         }
       });
     }

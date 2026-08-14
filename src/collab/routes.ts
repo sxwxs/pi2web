@@ -91,6 +91,7 @@ export class CollabRouter {
     if(method==='POST'&&tail==='retry-waiting'){human('Retrying waiting Agents');return ok(this.hub.retryWaiting(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='policy'){human('Changing the policy');return ok(this.hub.updatePolicy(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='open-round'){human('Opening a round');return ok(await this.hub.openRound(sessionId))}
+    if(method==='POST'&&tail==='recheck'){human('Reopening a finished review');return ok(await this.hub.startRecheck(sessionId,await ctx.body()))}
     if(method==='GET'&&tail==='events')return ok(url.searchParams.has('tail')
       ? this.hub.recentEvents(sessionId,number('tail',200),participant)
       : this.hub.events(sessionId,number('since',0),number('limit',500),participant));
@@ -113,8 +114,6 @@ export class CollabRouter {
     if(method==='POST'&&tail==='finalize'){human('Finalizing a scoring session');return ok(await this.hub.finalizeScoring(sessionId,await ctx.body()))}
     if(method==='POST'&&tail==='ready')return ok(await this.hub.markImplementationReady(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='findings')return ok(await this.hub.submitFindings(asParticipant(),await ctx.body()),201);
-    if(method==='POST'&&tail==='responses')return ok(await this.hub.submitResponses(asParticipant(),await ctx.body()));
-    if(method==='POST'&&tail==='verdicts')return ok(await this.hub.submitVerdicts(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='escalations')return ok(await this.hub.raiseEscalation(asParticipant(),await ctx.body()),202);
     // The report is the human close-out view: it lists every issue and escalation, which would defeat blind
     // collection if a participant token could read it while the round is still open.

@@ -19,7 +19,7 @@ async function boot(){
 const finding=(title:string,line:number)=>({title,severity:'major',category:'correctness',location:{path:'src/example.ts',startLine:line},evidence:`The implementation at line ${line} demonstrably violates the required behavior.`,suggestion:'Correct the implementation and add a regression test.'});
 
 describe('review consensus over HTTP',()=>{
-  it('batches issue validation, unanimously votes on duplicate merges, debates rejects, and then responds',async()=>{
+  it('batches issue validation, unanimously votes on duplicate merges, debates rejects, and then finishes',async()=>{
     const {call,workspace}=await boot();
     const created=await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Consensus review',workspaceId:workspace.id,subject:{type:'free',value:'current branch'},policy:{consensusReview:true,maxConsensusRounds:2}});
     const sessionId=created.data.sessionId,tokens:Record<string,string>={},participantIds:Record<string,string>={};
@@ -55,19 +55,16 @@ describe('review consensus over HTTP',()=>{
     for(const name of ['A','B','D','E'])await call('POST',`/api/v1/collab/sessions/${sessionId}/issue-discussions`,{clientRequestId:rid(),discussions:[{issueId:two,argument:`${name} reviewed the rejection, and concrete execution evidence still shows this is a real correctness defect.`}],complete:true},tokens[name]);
     expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.phase).toBe('issue_reconsidering');
     await call('POST',`/api/v1/collab/sessions/${sessionId}/issue-votes`,{clientRequestId:rid(),votes:[{issueId:two,stance:'approve'}],complete:true},tokens.C);
-    expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.phase).toBe('responding');
+    expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data).toMatchObject({phase:'finished',status:'finished'});
 
-    const open=(await call('GET',`/api/v1/collab/sessions/${sessionId}/issues`)).data.filter((issue:any)=>issue.status==='open');
-    expect(open).toHaveLength(2);
-    await call('POST',`/api/v1/collab/sessions/${sessionId}/responses`,{clientRequestId:rid(),responses:open.map((issue:any)=>issue.issueId===two?{issueId:issue.issueId,responseType:'deferred',rationale:'The valid issue is accepted but implementation is explicitly deferred to follow-up work.'}:{issueId:issue.issueId,responseType:'rejected',rationale:'The implementation owner records the panel decision without making a code change.'})},implementer.participantToken);
-    for(const [name,issueId] of [['A',one],['B',two]] as const)await call('POST',`/api/v1/collab/sessions/${sessionId}/verdicts`,{clientRequestId:rid(),verdicts:[{issueId,verdict:'accept'}]},tokens[name]);
-    expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.status).toBe('finished');
+    const confirmed=(await call('GET',`/api/v1/collab/sessions/${sessionId}/issues`)).data.filter((issue:any)=>issue.status==='confirmed');
+    expect(confirmed).toHaveLength(2);
     const consensus=(await call('GET',`/api/v1/collab/sessions/${sessionId}/review-consensus`)).data;
     expect(consensus.discussions).toHaveLength(4);expect(consensus.mergeProposals[0].votes).toHaveLength(5);
     expect(consensus.issueConsensus).toHaveLength(3);
     expect(consensus.issueConsensus.find((entry:any)=>entry.issueId===two).positions.every((position:any)=>position.stance==='approve')).toBe(true);
-    expect(consensus.summary).toMatchObject({verdict:'follow_up_required',actionItemCount:1});
-    expect(consensus.summary.actionItems[0]).toMatchObject({issueId:two,disposition:'deferred',requiresAction:true});
+    expect(consensus.summary).toMatchObject({verdict:'follow_up_required',actionItemCount:2});
+    expect(consensus.summary.actionItems.map((item:any)=>item.issueId)).toEqual(expect.arrayContaining([one,two]));
   });
 
   it('escalates an issue vote that remains rejected after the configured discussion rounds',async()=>{

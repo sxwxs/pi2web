@@ -2,7 +2,9 @@
 
 > 状态：**已实现**（M0–M7；M8 的 openapi.yaml 与 Pi 扩展工具仍未做）。决策记录见 §10。
 >
-> 实现补记：新增 **build-then-review**（`policy.implementationFirst`）——会话可先进入 `implementing` 阶段由开发 Agent 施工，`POST /sessions/{id}/ready` 或托管开发 Agent 的 `agent_settled`（`policy.autoReviewOnAgentIdle`）触发中枢自动召集全部评审 Agent；结束时 `outcome.verdict/approval` 显式记录是否全票通过。
+> 实现补记：Review 已改为 **review-only + 人工触发 remediation**。正常评审在盲审、Issue 共识和人工争议裁定后直接 `finished`，不再经过 `responding/adjudicating`。确认的问题以 `confirmed` 保留。人可对 finished Review 调 `POST /sessions/{id}/recheck`：直接复核当前代码，或指定 implementer 先修复；开发 `/ready` 后自动召集原 Reviewer，Reviewer 在下一轮 findings 提交中逐项回报 `resolved/still_present`。
+>
+> 实现补记：支持 **build-then-review**（`policy.implementationFirst`）——首次会话可先进入 `implementing` 阶段由开发 Agent 施工，`POST /sessions/{id}/ready` 或托管开发 Agent 的 `agent_settled`（`policy.autoReviewOnAgentIdle`）触发中枢自动召集全部评审 Agent；结束时 `outcome.verdict/approval` 记录评审结论。
 >
 > 实现补记：托管参与者的 participantToken 以**明文**存在 `collab_participants.dispatch_token`——中枢必须把凭证交给它唤醒的 Agent，而这一步没有人在场输入。外部参与者仍然只存 sha256；会话结束后中枢丢弃明文副本（注意：这是清除保管，不是吐销——token 本身仍能只读访问已结束的会话，且它会留在被唤醒 Agent 的会话记录里）。
 >
@@ -20,7 +22,7 @@ pi2web 现在是"人 ↔ 单个 Agent"的远程网关。本方案在其上叠加
 - Agent 之间只交换**结构化数据（JSON）**，不是自由文本聊天；自由文本只作为结构化字段里的 `rationale` / `body`。
 - 中枢负责：身份与权限、汇总与分发、状态机推进、去重、僵局告警、收敛判定、**人工升级（escalation）**。
 - 两个首发场景：
-  - **场景一 Review Loop**：1 个实现 Agent × N 个评审 Agent，issue 提出 → 汇总 → 回应 → 裁定 → 关闭 / 升级人工。
+  - **场景一 Review Loop**：N 个评审 Agent 盲审 → Issue 共识 → 输出报告；人可另行启动“开发修复 → 原 Reviewer 复核”的循环。
   - **场景二 Panel Scoring**：N 个评审 Agent 协商评分维度（提名 → 归并 → 投票 → 锁定 rubric）→ 独立打分 → 辩论收敛 → 出分 / 升级人工。
 
 两个场景共享同一套底座：`CollabSession`（协作会话）+ `Participant`（参与者）+ `EventLog`（追加日志）+ `Escalation`（人工介入）。
@@ -111,8 +113,7 @@ pi2web 现在是"人 ↔ 单个 Agent"的远程网关。本方案在其上叠加
 | capability | implementer | reviewer | moderator |
 |---|---|---|---|
 | `file_finding`（提 issue） | ✅ | ✅ | ✅ |
-| `respond`（回应指向自己的 issue） | ✅ | ✅ | ✅ |
-| `verdict`（裁定自己提的 issue） | ✅ | ✅ | ✅ |
+| `ready`（开发完成，交给 Reviewer） | ✅ | ❌ | ❌ |
 | `nominate` / `vote` / `score` | ❌（利益回避，§4.4） | ✅ | ❌ |
 | `debate` | 仅 `stance:"clarify"` | ✅ | ❌ |
 | `merge` / `advance` | ❌ | ❌ | ❌（`advance` 仅人） |
@@ -175,46 +176,35 @@ pi2web 现在是"人 ↔ 单个 Agent"的远程网关。本方案在其上叠加
 ### 3.1 Session 阶段机
 
 ```
-draft ──open_round──▶ collecting        (参与者提交 findings)
-collecting ──全员提交 | 人工 advance──▶ consolidating (中枢去重、排序、编号)
-consolidating ──自动──▶ responding       (被指向方收到汇总包，逐条回应)
-responding ──全部回应 | 人工 advance──▶ adjudicating (回应分发回各自提出者，提出者裁定)
-adjudicating ──▶ 若仍有 open issue 且 round < max ──▶ collecting (round+1，只针对未关闭 issue)
-             ──▶ 全部 resolved/closed ──▶ finished
-             ──▶ 有 escalated 且人工未裁决 ──▶ awaiting_human ──▶ (裁决后回到 adjudicating)
+draft ──open_round──▶ [implementing] ──ready──▶ collecting（固定 baseline，Reviewer 盲审）
+collecting ──全员提交 | 人工 advance──▶ consolidating
+consolidating ─▶ validating ─▶ [merge_voting] ─▶ [issue_discussing ↔ issue_reconsidering]
+              └────────────────────── 共识完成 ───────────────────▶ finished
+未收敛争议 ─▶ awaiting_human ──裁定完成──▶ consolidating ─▶ finished
+
+finished ──人工 recheck(review_only)──────────────▶ collecting（round+1）
+finished ──人工 recheck(fix_then_review)──▶ implementing ──ready──▶ collecting（round+1）
 
 任何阶段超过 overdueWarningSec 仍有人未交 ──▶ 叠加 stalled 标记（**不改变阶段**，见 §2.5）
 ```
 
+`responding/adjudicating` 已从现行状态机任务和 HTTP 路由移除；类型中只保留旧数据库恢复所需的 legacy phase 名称。
+
 ### 3.2 Issue 状态机
 
 ```
-                    ┌────────────── reviewer: withdraw ─────────────┐
-                    │                                               ▼
-open ──implementer 回应──▶ answered ──reviewer verdict──┬─ accept ─▶ resolved
-                                                        ├─ reject ─▶ open (round+1)
-                                                        └─ escalate ▶ escalated
-open/answered ── 任一方 escalate / round>max / 参与者 budget_exhausted ──▶ escalated
-escalated ── 人工裁决 ──▶ resolved | wontfix | closed(无效)
+open（本轮新 Finding） ──Panel 共识通过──▶ confirmed（评审输出，需要处理但不阻塞 finished）
+open ──提出者 withdraw─────────────────▶ withdrawn
+open ──共识无法收敛────────────────────▶ escalated ──人工裁决──▶ confirmed | wontfix | closed
+confirmed ──下一轮原提出者复核 resolved──────▶ resolved
+confirmed ──下一轮原提出者复核 still_present──▶ confirmed
 ```
 
-`implementer` 的回应类型（`responseType`）：
+开发 Agent 不再逐条回应 Issue。人工启动 `fix_then_review` 后，选定开发 Agent 收到全部 `confirmed` Action Items，完成代码修改并统一调用 `/ready`；随后原 Reviewer 在新 baseline 上复核自己提出的旧问题，同时可以提交新 Finding。
 
-| 值 | 含义 | 必填字段 |
-|---|---|---|
-| `fixed` | 已修复 | `changes[]`（文件+简述，可含 commit/diff 摘要） |
-| `partially_fixed` | 部分修复 | `changes[]` + `remaining` |
-| `rejected` | 不认为是问题 | `rationale`（≥ 30 字符，强制说明理由） |
-| `needs_info` | 需要澄清 | `question` |
-| `deferred` | 认可但本轮不做 | `rationale` + `followUpRef?` |
-
-`reviewer` 的裁定（`verdict`）：`accept` / `reject`（附 `rationale`）/ `needs_info` / `escalate`（附 `rationale`）。
-
-> 关键约束：**只有 issue 的提出者（或人工）才能把它关掉**，被指向方无权 close。
+> **对称评审（决策 4）**仍保留：任何参与者都可以在盲审阶段提 Finding，并指定 `targetParticipantId` 作为报告归属信息；它不再产生强制回应任务。
 >
-> **对称评审（决策 4）**：任何参与者都能提 issue，issue 用 `targetParticipantId` 指定回应方（缺省是 implementer）。所以实现 Agent 可以反向对某条评审意见/某个评审者提 issue（例如"该 finding 引用的行号不存在"），走的是**完全相同**的状态机——谁被指向谁回应，谁提出谁裁定。
->
-> 轮次爆炸由三重兜底控制：`maxIssueRounds`（单 issue）、`maxTotalRounds`（会话）、`tokenBudgetPerParticipant`（成本）。
+> 修复—复核循环只由人从 finished 状态显式启动，不会因为报告中存在问题而自动消耗下一轮。
 >
 > `location.path` **必填**（决策 5）：缺失返回 `422 EVIDENCE_REQUIRED`。确实无法定位到文件的意见（如架构性建议）必须用 `location.path` 指向最相关的文件并把范围说明写进 `evidence`。
 
@@ -248,22 +238,22 @@ POST /api/v1/collab/sessions/{id}/findings
         "possibleDuplicates": [{ "issueId":"i-7", "similarTo":"i-3", "score":0.82 }] }
 ```
 
-实现 Agent 拿到的汇总包（`GET /sessions/{id}/digest?for=implementer`）：
+人工启动 `fix_then_review` 后，选定开发 Agent 拿到的任务包（`GET /sessions/{id}/digest`）：
 
 ```jsonc
 {
-  "sessionId":"...", "round":1,
-  "stats": { "total": 12, "byRequiredAction": { "must_fix": 3, "should_fix": 5, "discuss": 2, "fyi": 2 } },
-  "issues": [ { "issueId":"i-7", "title":"...", "severity":"critical", "reportedBy":"reviewer-security",
-                "location":{...}, "evidence":"...", "suggestion":"...", "history":[ /* 历轮往返 */ ] } ],
-  "duplicateGroups": [ ["i-7","i-3"] ],
-  "instructions": "对每个 issue 调用 POST .../issues/{issueId}/response ..."
+  "sessionId":"...", "round":2, "phase":"implementing", "task":"implement",
+  "issues": [ { "issueId":"i-7", "status":"confirmed", "title":"...", "severity":"critical",
+                "location":{...}, "evidence":"...", "suggestion":"...", "history":[...] } ],
+  "instructions": "修复确认的问题；完成后统一 POST /ready，随后中枢召集 Reviewer"
 }
 ```
 
-实现 Agent 回应：`POST /sessions/{id}/responses`（同样批量 + 幂等）。
-评审 Agent 裁定：`POST /sessions/{id}/verdicts`。
-任一方升级：`POST /sessions/{id}/escalations`。
+Reviewer 在复核轮次的 digest 中会收到 `issuesToRecheck`，每项都必须在最终 `/findings` 请求的 `rechecks[]` 中标记为 `resolved` 或 `still_present`。
+
+后续轮次的 Reviewer 在同一个 `/findings` 请求里提交 `rechecks:[{issueId,outcome:"resolved|still_present",rationale}]`。
+人启动复核：`POST /sessions/{id}/recheck {mode:"review_only|fix_then_review", implementerParticipantIds?:[]}`。
+任一方在评审共识阶段升级：`POST /sessions/{id}/escalations`。
 
 ### 3.4 去重策略
 
@@ -287,8 +277,7 @@ v0.1 把 `subject` 当成纯描述，这会在第 2 轮出问题：实现 Agent 
 ```
 
 - **所有 finding 必须携带 `baselineId`**；针对旧 baseline 的提交返回 `409 STALE_BASELINE`，回执带当前 baseline，Agent 自行重新取代码。
-- 实现 Agent 的 `fixed` 回应必须带 `codeRef`（新 commit / dirtyHash）。中枢据此为下一轮生成新 baseline，并在裁定任务包里给出 `baselineFrom → baselineTo` 与受影响文件列表，让评审 Agent 明确知道"要复核的是这一段变更"。
-- 若实现 Agent 声称 `fixed` 但 `codeRef` 与上一轮完全相同（没有任何改动），中枢直接拒收：`422 NO_CODE_CHANGE`。这堵住了"嘴上说改了"的最常见失败模式。
+- `fix_then_review` 中开发 Agent 的 `/ready` 携带 `codeRef`（新 commit / dirtyHash）与变更文件；中枢随后重新捕获 baseline，并在 Reviewer 任务包中明确列出待复核的 `confirmed` Issues。
 - 中枢**不做语义判断**（不判断修复是否正确），只保证"大家在同一份代码上说话"，判断权仍属评审 Agent 与人。
 
 ---
@@ -437,14 +426,13 @@ POST /api/v1/collab/escalations
 |---|---|---|---|
 | POST | `/sessions` | 创建协作会话 | **仅人**（pairing code） |
 | GET | `/sessions` `/sessions/{id}` | 列表 / 详情 | 人 + 参与者 |
-| POST | `/sessions/{id}/participants` | **仅人**登记参与者，返回 participantToken + briefing；只在 `draft`/`implementing`/`collecting`（scoring 为 `nominating`）阶段开放，登记时立即派发当前任务 | 人（pairing code） |
+| POST | `/sessions/{id}/participants` | **仅人**登记参与者；Review 在 `draft`/`implementing`/`collecting` 开放，且 finished 后允许追加 implementer 为下一次修复做准备；scoring 仅 `nominating` | 人（pairing code） |
 | POST | `/sessions/{id}/advance` | 僵局时**人工强推**（记入报告） | **仅人**（pairing code） |
 | GET | `/sessions/{id}/events?since=` `?tail=` | 事件回放（`tail=` 取最新 N 条）；盲评/封盘期间他人提交的 payload 对参与者按条打码 | 全体 |
 | GET | `/sessions/{id}/inbox?wait=` | 外部 Agent 长轮询任务 | 参与者本人 |
 | GET | `/sessions/{id}/digest?for=` | 角色定制的当前任务包 | 参与者本人 |
 | POST | `/sessions/{id}/findings` | 提交评审发现（批量、幂等） | 任何参与者（对称评审） |
-| POST | `/sessions/{id}/responses` | 被指向方回应（批量、幂等） | issue 的 `targetParticipantId` |
-| POST | `/sessions/{id}/verdicts` | 提出者裁定 | issue 的 `reporterId` |
+| POST | `/sessions/{id}/recheck` | 对 finished Review 直接复核，或指定开发 Agent 先修复再复核 | **仅人**（pairing code） |
 | GET | `/sessions/{id}/issues` | issue 看板（盲评期间参与者只能看到自己提的和指向自己的，单条 `…/issues/{iid}` 同规则） | 全体 |
 | POST | `/sessions/{id}/issues/{iid}/merge-into` | 合并重复 | moderator / 人 |
 | POST | `/sessions/{id}/criteria/nominations` | 提名评分类目 | reviewer |
@@ -555,8 +543,8 @@ collab_idempotency(key PK, session_id, participant_id, response_json, created_at
 ## 12. 测试策略
 
 - **纯状态机单测**（`review-flow.ts` / `scoring-flow.ts` 不碰 IO）：全部状态迁移、越权（非提出者关 issue）、**超时阻塞（必须验证不会自动推进）**、轮次上限、token 预算耗尽、收敛与强制锁定兜底。这是收益最高的一块，必须先于 HTTP 层。
-- **HTTP 契约测试**：沿用现有 `RemotePiServer({port:0,dataDir})` + `fetch` 的写法（见 `test/mail-settings-server.test.ts`），跑完整闭环：2 reviewer 提 findings → implementer 回应 → verdict → 关闭/升级。
-- **幂等与并发**：同一 `clientRequestId` 重放两次只产生一条 issue；两个 reviewer 同时对同一 issue 写 verdict 时 `409`。
+- **HTTP 契约测试**：沿用现有 `RemotePiServer({port:0,dataDir})` + `fetch` 的写法，覆盖 Reviewer findings → finished/confirmed，以及 finished → 新开发修复 → `/ready` → 原 Reviewer `resolved/still_present` 复核闭环。
+- **幂等与并发**：同一 `clientRequestId` 重放两次只产生一条 Issue 或一份复核结果；重复复核同一 Issue 会被拒绝。
 - **恶意/畸形输入**：超大 payload、错误 severity、缺失 `location.path` / `evidence`、跨 session 引用 issueId（必须 404 而不是泄露）、用 A 的 token 改 B 的对象、用 participantToken 调 `POST /sessions` 或 `/advance`（必须 403）。
 - **持久化**：重启 pi2web 后 session/issue/escalation 全部还在（复用 mail-settings 测试里"重启再查"的写法）。
 - **不做**：真实多 LLM 联调不进 CI（不稳定、烧钱），改用脚本 `examples/collab-demo` 手动跑。

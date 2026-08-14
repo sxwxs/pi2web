@@ -1,4 +1,4 @@
-import {COLLAB_ERRORS,OPEN_ISSUE_STATUSES,can,type Capability,type CollabPolicy,type IssueStatus,type Participant,type ResponseType,type ReviewPhase,type Role,type SessionStatus,type VerdictType,type IssueVote,type MergeProposal} from './types.js';
+import {COLLAB_ERRORS,OPEN_ISSUE_STATUSES,can,type Capability,type CollabPolicy,type IssueStatus,type Participant,type ReviewPhase,type Role,type SessionStatus,type IssueVote,type MergeProposal} from './types.js';
 
 /**
  * Pure review state machine. It performs no IO, so every rule below is directly unit-testable.
@@ -25,7 +25,8 @@ const active=(snapshot:ReviewSnapshot)=>snapshot.participants.filter(participant
 const findParticipant=(snapshot:ReviewSnapshot,participantId:string)=>snapshot.participants.find(participant=>participant.participantId===participantId);
 const unique=(values:string[])=>[...new Set(values)];
 const reviewers=(snapshot:ReviewSnapshot)=>active(snapshot).filter(participant=>participant.role==='reviewer');
-const consensusIssues=(snapshot:ReviewSnapshot)=>snapshot.issues.filter(issue=>issue.status==='open');
+/** Only findings created in this review round need panel validation; older confirmed findings are rechecked separately. */
+const consensusIssues=(snapshot:ReviewSnapshot)=>snapshot.issues.filter(issue=>issue.status==='open'&&issue.round===snapshot.round);
 export function currentIssueVotes(snapshot:ReviewSnapshot){
   const latest=new Map<string,IssueVote>();
   for(const vote of snapshot.issueVotes??[]){
@@ -36,11 +37,16 @@ export function currentIssueVotes(snapshot:ReviewSnapshot){
   return [...latest.values()];
 }
 export function issueConsensus(snapshot:ReviewSnapshot,options:{includeFinal?:boolean}={}){
-  const votes=currentIssueVotes(snapshot),panel=reviewers(snapshot);
+  const panel=reviewers(snapshot);
   return (options.includeFinal?snapshot.issues:consensusIssues(snapshot)).map(issue=>{
+    // The audit view includes findings from earlier review rounds, so read each issue's own latest ballot rather
+    // than accidentally showing the current round's (usually absent) votes against every historical issue.
+    const issueVotes=(snapshot.issueVotes??[]).filter(vote=>vote.issueId===issue.issueId&&vote.round===issue.round);
+    const latest=new Map<string,IssueVote>();
+    for(const vote of issueVotes){const previous=latest.get(vote.participantId);if(!previous||vote.consensusRound>previous.consensusRound||(vote.consensusRound===previous.consensusRound&&vote.createdAt>previous.createdAt))latest.set(vote.participantId,vote)}
     const positions=panel.map(reviewer=>reviewer.participantId===issue.reporterId
       ?{participantId:reviewer.participantId,stance:'approve' as const,implicit:true}
-      :{participantId:reviewer.participantId,stance:votes.find(vote=>vote.issueId===issue.issueId&&vote.participantId===reviewer.participantId)?.stance,rationale:votes.find(vote=>vote.issueId===issue.issueId&&vote.participantId===reviewer.participantId)?.rationale,implicit:false});
+      :{participantId:reviewer.participantId,stance:latest.get(reviewer.participantId)?.stance,rationale:latest.get(reviewer.participantId)?.rationale,implicit:false});
     return {issueId:issue.issueId,positions,missing:positions.filter(position=>!position.stance).map(position=>position.participantId),rejecters:positions.filter(position=>position.stance==='reject').map(position=>position.participantId),supporters:positions.filter(position=>position.stance==='approve').map(position=>position.participantId),unanimous:positions.length>0&&positions.every(position=>position.stance==='approve')};
   });
 }
@@ -79,8 +85,7 @@ export function requiredActors(snapshot:ReviewSnapshot):string[]{
       return unique(issueConsensus(snapshot).filter(entry=>contested.has(entry.issueId)).flatMap(entry=>entry.supporters));
     }
     case 'issue_reconsidering':return unique(issueConsensus(snapshot).flatMap(entry=>entry.rejecters));
-    case 'responding':return unique(snapshot.issues.filter(issue=>issue.status==='open').map(issue=>issue.targetParticipantId));
-    case 'adjudicating':return unique(snapshot.issues.filter(issue=>issue.status==='answered').map(issue=>issue.reporterId));
+    // responding/adjudicating are legacy persisted phases. New reviews finish after panel consensus.
     default:return [];
   }
 }
@@ -120,7 +125,7 @@ export function nextPhase(snapshot:ReviewSnapshot,options:{forced?:boolean}={}):
   const skipped=options.forced&&pending.length?{skipped:pending}:{};
   // A participant may explicitly ask for a human during any consensus step. Finish the current batched step,
   // then stop before another debate round instead of silently debating past an open escalation.
-  if(snapshot.pendingEscalations>0&&!['awaiting_human','adjudicating'].includes(snapshot.phase))return {phase:'awaiting_human',round:snapshot.round,debateRound:snapshot.debateRound,reason:'participant_escalated',...skipped};
+  if(snapshot.pendingEscalations>0&&snapshot.phase!=='awaiting_human')return {phase:'awaiting_human',round:snapshot.round,debateRound:snapshot.debateRound,reason:'participant_escalated',...skipped};
   switch(snapshot.phase){
     case 'draft':return snapshot.policy.implementationFirst
       ? {phase:'implementing',round:snapshot.round,reason:'implementation_started',...skipped}
@@ -129,33 +134,28 @@ export function nextPhase(snapshot:ReviewSnapshot,options:{forced?:boolean}={}):
     case 'implementing':return {phase:'collecting',round:snapshot.round,reason:'implementation_ready',...skipped};
     case 'collecting':return {phase:'consolidating',round:snapshot.round,reason:'findings_complete',...skipped};
     case 'consolidating':{
-      if(!snapshot.policy.consensusReview)return {phase:'responding',round:snapshot.round,reason:'digest_ready',...skipped};
+      if(!snapshot.policy.consensusReview)return {phase:'finished',round:snapshot.round,reason:'review_complete',...skipped};
       const panel=reviewers(snapshot),completed=(phase:ReviewPhase)=>new Set(snapshot.completions.filter(entry=>entry.phase===phase&&entry.round===snapshot.round).map(entry=>entry.participantId));
       if(!panel.every(entry=>completed('validating').has(entry.participantId)))return {phase:'validating',round:snapshot.round,reason:'issue_validation_started',...skipped};
       const proposals=currentMergeProposals(snapshot);
       if(proposals.length&&!completed('merge_voting').has('system'))return {phase:'merge_voting',round:snapshot.round,reason:'merge_voting_started',...skipped};
       return contestedIssueIds(snapshot).length
         ?{phase:'issue_discussing',round:snapshot.round,debateRound:Math.max(1,snapshot.debateRound??0),reason:'issue_votes_contested',...skipped}
-        :{phase:'responding',round:snapshot.round,reason:'issues_unanimously_validated',...skipped};
+        :{phase:'finished',round:snapshot.round,reason:'review_consensus_complete',...skipped};
     }
     case 'validating':return {phase:'consolidating',round:snapshot.round,reason:'issue_validation_complete',...skipped};
     case 'merge_voting':return {phase:'consolidating',round:snapshot.round,reason:'merge_voting_complete',...skipped};
     case 'issue_discussing':return {phase:'issue_reconsidering',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'supporter_arguments_complete',...skipped};
     case 'issue_reconsidering':{
-      if(!contestedIssueIds(snapshot).length)return {phase:'responding',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'issue_votes_converged',...skipped};
+      if(!contestedIssueIds(snapshot).length)return {phase:'finished',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'review_consensus_complete',...skipped};
       if((snapshot.debateRound??1)>=snapshot.policy.maxConsensusRounds)return {phase:'awaiting_human',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'issue_consensus_exhausted',escalateConsensus:true,...skipped};
       return {phase:'issue_discussing',round:snapshot.round,debateRound:(snapshot.debateRound??1)+1,reason:'issue_consensus_next_round',...skipped};
     }
-    case 'responding':return {phase:'adjudicating',round:snapshot.round,reason:'responses_complete',...skipped};
-    case 'awaiting_human':return snapshot.policy.consensusReview&&!snapshot.issues.some(issue=>issue.status==='answered')
-      ?{phase:'consolidating',round:snapshot.round,reason:'consensus_human_ruled',...skipped}
-      :{phase:'adjudicating',round:snapshot.round,reason:'human_ruled',...skipped};
-    case 'adjudicating':{
-      if(snapshot.pendingEscalations>0)return {phase:'awaiting_human',round:snapshot.round,reason:'escalations_pending',...skipped};
-      if(!snapshot.issues.some(isOpenIssue))return {phase:'finished',round:snapshot.round,reason:'all_issues_closed',...skipped};
-      if(snapshot.round>=snapshot.policy.maxTotalRounds)return {phase:'awaiting_human',round:snapshot.round,reason:'max_total_rounds_reached',escalateDeadlock:true,...skipped};
-      return {phase:'collecting',round:snapshot.round+1,reason:'next_round',...skipped};
-    }
+    case 'awaiting_human':return {phase:'consolidating',round:snapshot.round,reason:'consensus_human_ruled',...skipped};
+    // Compatibility recovery for sessions persisted by the old mandatory response loop: do not ask Agents for
+    // another response; close the review and let a human start an explicit fix/recheck cycle if desired.
+    case 'responding':
+    case 'adjudicating':return {phase:'finished',round:snapshot.round,reason:'legacy_response_loop_removed',...skipped};
     default:throw flowError(COLLAB_ERRORS.wrongPhase,`Phase ${snapshot.phase} cannot advance`);
   }
 }
@@ -179,37 +179,10 @@ export function canSeeOthersFindings(snapshot:ReviewSnapshot):boolean{
   return !snapshot.policy.blindFindings||snapshot.phase!=='collecting';
 }
 
-export type ResponseOutcome={status:IssueStatus,round:number,escalate:boolean,escalateReason?:string};
+export type IssueMutationOutcome={status:IssueStatus,round:number,escalate:boolean,escalateReason?:string};
 
-/** Applies a response from the participant an issue is addressed to. Responding never closes an issue. */
-export function applyResponse(input:{issue:FlowIssue,actor:FlowParticipant,responseType:ResponseType,policy:CollabPolicy}):ResponseOutcome{
-  const {issue,actor}=input;
-  assertCapability(actor,'respond');
-  if(issue.targetParticipantId!==actor.participantId)throw flowError(COLLAB_ERRORS.forbidden,'Only the participant an issue is addressed to may respond to it',403);
-  if(FINAL_ISSUE_STATUSES.includes(issue.status))throw flowError(COLLAB_ERRORS.humanRulingFinal,`Issue is ${issue.status} and can no longer be changed`);
-  if(issue.status!=='open')throw flowError(COLLAB_ERRORS.conflict,`Issue is ${issue.status}; only open issues accept a response`);
-  // Every response type only answers the issue. Even `deferred` and `rejected` leave the decision to the reporter.
-  return {status:'answered',round:issue.round,escalate:false};
-}
-
-export type VerdictOutcome={status:IssueStatus,round:number,escalate:boolean,escalateReason?:string};
-
-/** Applies the reporter's verdict. Rejecting reopens the issue for another round until the round cap escalates it. */
-export function applyVerdict(input:{issue:FlowIssue,actor:FlowParticipant,verdict:VerdictType,policy:CollabPolicy}):VerdictOutcome{
-  const {issue,actor,verdict,policy}=input;
-  assertCapability(actor,'verdict');
-  if(issue.reporterId!==actor.participantId)throw flowError(COLLAB_ERRORS.forbidden,'Only the participant who reported an issue may rule on it',403);
-  if(FINAL_ISSUE_STATUSES.includes(issue.status))throw flowError(COLLAB_ERRORS.humanRulingFinal,`Issue is ${issue.status} and can no longer be changed`);
-  if(issue.status!=='answered')throw flowError(COLLAB_ERRORS.conflict,`Issue is ${issue.status}; only answered issues accept a verdict`);
-  if(verdict==='accept')return {status:'resolved',round:issue.round,escalate:false};
-  if(verdict==='escalate')return {status:'escalated',round:issue.round,escalate:true,escalateReason:'reporter_escalated'};
-  const nextRound=issue.round+1;
-  if(nextRound>policy.maxIssueRounds)return {status:'escalated',round:issue.round,escalate:true,escalateReason:'max_issue_rounds_reached'};
-  return {status:'open',round:nextRound,escalate:false};
-}
-
-/** Either side may escalate directly instead of looping; the issue then waits for a human. */
-export function applyEscalation(input:{issue:FlowIssue,actor:FlowParticipant}):VerdictOutcome{
+/** Either side may escalate a panel dispute directly instead of spending more consensus rounds. */
+export function applyEscalation(input:{issue:FlowIssue,actor:FlowParticipant}):IssueMutationOutcome{
   const {issue,actor}=input;
   assertCapability(actor,'escalate');
   if(issue.reporterId!==actor.participantId&&issue.targetParticipantId!==actor.participantId)throw flowError(COLLAB_ERRORS.forbidden,'Only the reporter or the addressed participant may escalate an issue',403);
@@ -217,7 +190,7 @@ export function applyEscalation(input:{issue:FlowIssue,actor:FlowParticipant}):V
   return {status:'escalated',round:issue.round,escalate:true,escalateReason:'participant_escalated'};
 }
 
-export function applyWithdraw(input:{issue:FlowIssue,actor:FlowParticipant}):VerdictOutcome{
+export function applyWithdraw(input:{issue:FlowIssue,actor:FlowParticipant}):IssueMutationOutcome{
   const {issue,actor}=input;
   assertCapability(actor,'withdraw');
   if(issue.reporterId!==actor.participantId)throw flowError(COLLAB_ERRORS.forbidden,'Only the reporter may withdraw an issue',403);
@@ -227,7 +200,7 @@ export function applyWithdraw(input:{issue:FlowIssue,actor:FlowParticipant}):Ver
 
 export type HumanDecision='resolved'|'wontfix'|'closed'|'reopen';
 /** A human ruling is terminal except for an explicit reopen, which hands the issue back to the responder. */
-export function applyHumanRuling(issue:FlowIssue,decision:HumanDecision):VerdictOutcome{
+export function applyHumanRuling(issue:FlowIssue,decision:HumanDecision):IssueMutationOutcome{
   if(decision==='reopen')return {status:'open',round:issue.round+1,escalate:false};
   return {status:decision==='resolved'?'human_ruled':decision,round:issue.round,escalate:false};
 }

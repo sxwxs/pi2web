@@ -2,11 +2,14 @@
 
 export type CollabKind='review'|'scoring';
 export type SessionStatus='active'|'finished'|'aborted';
-/** Review phases. `stalled` is a flag on the session, never a phase: timeouts must not advance anything. */
-export type ReviewPhase='draft'|'implementing'|'collecting'|'consolidating'|'validating'|'merge_voting'|'issue_discussing'|'issue_reconsidering'|'responding'|'adjudicating'|'awaiting_human'|'finished';
+/** Current review phases. `stalled` is a flag on the session, never a phase. */
+export type CurrentReviewPhase='draft'|'implementing'|'collecting'|'consolidating'|'validating'|'merge_voting'|'issue_discussing'|'issue_reconsidering'|'awaiting_human'|'finished';
+/** Read-only compatibility for databases that were persisted before the mandatory response loop was removed. */
+export type LegacyReviewPhase='responding'|'adjudicating';
+export type ReviewPhase=CurrentReviewPhase|LegacyReviewPhase;
 export type ScoringPhase='nominating'|'consolidating'|'voting'|'rubric_locked'|'scoring'|'analysis'|'debating'|'rescoring'|'awaiting_human'|'finalized';
 export type CollabPhase=ReviewPhase|ScoringPhase;
-export const REVIEW_PHASES:ReviewPhase[]=['draft','implementing','collecting','consolidating','validating','merge_voting','issue_discussing','issue_reconsidering','responding','adjudicating','awaiting_human','finished'];
+export const REVIEW_PHASES:CurrentReviewPhase[]=['draft','implementing','collecting','consolidating','validating','merge_voting','issue_discussing','issue_reconsidering','awaiting_human','finished'];
 export const SCORING_PHASES:ScoringPhase[]=['nominating','consolidating','voting','rubric_locked','scoring','analysis','debating','rescoring','awaiting_human','finalized'];
 
 export type Role='implementer'|'reviewer'|'moderator'|'human';
@@ -18,12 +21,12 @@ export const ROLES:Role[]=['implementer','reviewer','moderator','human'];
  */
 export const REGISTRABLE_ROLES:Role[]=['implementer','reviewer','moderator'];
 /** Permissions are capability-based so symmetric (reverse) review needs no second code path. */
-export type Capability='file_finding'|'respond'|'verdict'|'withdraw'|'nominate'|'vote'|'score'|'debate'|'clarify'|'merge'|'escalate';
+export type Capability='file_finding'|'ready'|'withdraw'|'nominate'|'vote'|'score'|'debate'|'clarify'|'merge'|'escalate';
 export const CAPABILITIES:Record<Role,Capability[]>={
-  implementer:['file_finding','respond','verdict','withdraw','clarify','escalate'],
-  reviewer:['file_finding','respond','verdict','withdraw','nominate','vote','score','debate','clarify','merge','escalate'],
-  moderator:['file_finding','respond','verdict','withdraw','merge','clarify','escalate'],
-  human:['file_finding','respond','verdict','withdraw','nominate','vote','score','debate','clarify','merge','escalate']
+  implementer:['file_finding','ready','withdraw','clarify','escalate'],
+  reviewer:['file_finding','withdraw','nominate','vote','score','debate','clarify','merge','escalate'],
+  moderator:['file_finding','withdraw','merge','clarify','escalate'],
+  human:['file_finding','ready','withdraw','nominate','vote','score','debate','clarify','merge','escalate']
 };
 export const can=(role:Role,capability:Capability)=>CAPABILITIES[role]?.includes(capability)??false;
 
@@ -36,15 +39,10 @@ export const CATEGORIES:Category[]=['security','correctness','performance','main
 export type RequiredAction='must_fix'|'should_fix'|'discuss'|'fyi';
 export const REQUIRED_ACTIONS:RequiredAction[]=['must_fix','should_fix','discuss','fyi'];
 
-export type IssueStatus='open'|'answered'|'resolved'|'escalated'|'human_ruled'|'wontfix'|'closed'|'duplicate'|'withdrawn';
-export const ISSUE_STATUSES:IssueStatus[]=['open','answered','resolved','escalated','human_ruled','wontfix','closed','duplicate','withdrawn'];
+export type IssueStatus='open'|'confirmed'|'answered'|'resolved'|'escalated'|'human_ruled'|'wontfix'|'closed'|'duplicate'|'withdrawn';
+export const ISSUE_STATUSES:IssueStatus[]=['open','confirmed','answered','resolved','escalated','human_ruled','wontfix','closed','duplicate','withdrawn'];
 /** Statuses that still block the session from finishing. */
 export const OPEN_ISSUE_STATUSES:IssueStatus[]=['open','answered','escalated'];
-export type ResponseType='fixed'|'partially_fixed'|'rejected'|'needs_info'|'deferred';
-export const RESPONSE_TYPES:ResponseType[]=['fixed','partially_fixed','rejected','needs_info','deferred'];
-export type VerdictType='accept'|'reject'|'needs_info'|'escalate';
-export const VERDICT_TYPES:VerdictType[]=['accept','reject','needs_info','escalate'];
-
 export type EscalationKind='issue_dispute'|'rubric_dispute'|'score_dispute'|'budget_exhausted'|'other';
 export const ESCALATION_KINDS:EscalationKind[]=['issue_dispute','rubric_dispute','score_dispute','budget_exhausted','other'];
 export type EscalationStatus='pending'|'resolved'|'dismissed';
@@ -111,7 +109,7 @@ export type Issue={
   location:CodeLocation;evidence?:string;impact?:string;suggestion?:string;baselineId:string;
   status:IssueStatus;round:number;version:number;mergedInto?:string;createdAt:string;updatedAt:string;
 };
-export type IssueMessageKind='response'|'verdict'|'note'|'ruling'|'discussion';
+export type IssueMessageKind='response'|'verdict'|'note'|'ruling'|'discussion'|'recheck';
 export type IssueMessage={messageId:string;issueId:string;round:number;authorId:string;kind:IssueMessageKind;payload:Record<string,unknown>;createdAt:string};
 export type IssueVoteStance='approve'|'reject';
 export type IssueVote={voteId:string;sessionId:string;issueId:string;participantId:string;round:number;consensusRound:number;stance:IssueVoteStance;rationale?:string;createdAt:string};
