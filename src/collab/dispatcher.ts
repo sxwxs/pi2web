@@ -45,6 +45,7 @@ export class CollabDispatcher {
    */
   private resumePending(){
     try{
+      this.hub.recoverEarlyIssueVotes();
       const cutoff=Date.now()-CLOSING_NOTE_RETRY_WINDOW_MS;
       const finished=this.hub.store.listSessions({status:'finished',limit:50});
       for(const session of [...this.hub.store.listSessions({status:'active',limit:200}),...finished]){

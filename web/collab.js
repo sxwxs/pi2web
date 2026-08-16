@@ -159,11 +159,15 @@
   /** The hub reports participantIds; a human reading the board wants the names it typed in. */
   const participantName = (session, participantId) =>
     (session.participants || []).find(entry => entry.participantId === participantId)?.displayName || participantId;
-  const waitingAgentDetails = session => ((session.progress || {}).waitingOn || []).map(participantId => {
+  const waitingAgentDetails = session => {
+    const progress = session.progress || {};
+    const ids = [...new Set([...(progress.waitingOn || []), ...(progress.pendingCrossVotes || [])])];
+    return ids.map(participantId => {
     const participant = (session.participants || []).find(entry => entry.participantId === participantId), agent = state.agents.find(entry => entry.agentId === participant?.agentId);
     const status = agent?.status || 'unknown', activelyRunning = ['starting','streaming','stopping'].includes(status), needsUser = status === 'waiting_for_user';
     return {participantId, name: participant?.displayName || participantId, status, activelyRunning, retryable: !activelyRunning && !needsUser};
   });
+  };
   /** Local agents that may still take a seat: the hub rejects the same agentId twice in one session. */
   const availableAgents = session => {
     const taken = new Set((session.participants || []).map(participant => participant.agentId).filter(Boolean));
@@ -258,7 +262,12 @@
   };
   function issueConsensusCells(session, consensus, issueId) {
     const current = (consensus?.issueConsensus || []).find(entry => entry.issueId === issueId), discussions = (consensus?.discussions || []).filter(entry => entry.issueId === issueId);
-    const votes = current?.positions?.length ? current.positions.map(position => `<div><span class="pill ${position.stance === 'approve' ? 'green' : position.stance === 'reject' ? 'red' : 'yellow'}">${esc(position.stance || '未投')}</span> ${esc(participantName(session, position.participantId))}${position.implicit ? ' <small class="muted">(提出者)</small>' : ''}${position.rationale ? `<br><small>${esc(position.rationale)}</small>` : ''}</div>`).join('') : '<span class="muted">尚未开始投票</span>';
+    const realVotes = (current?.positions || []).filter(position => position.stance && !position.implicit);
+    const collecting = session.phase === 'collecting';
+    const caption = !current?.positions?.length ? '<span class="muted">尚未开始投票</span>'
+      : collecting && !realVotes.length ? '<div class="muted">提出者默认赞成；交叉投票在其他评审员交完自己的 findings 后立即开始，不必等全员盲审结束。</div>'
+      : '';
+    const votes = current?.positions?.length ? `${caption}${current.positions.map(position => `<div><span class="pill ${position.stance === 'approve' ? 'green' : position.stance === 'reject' ? 'red' : 'yellow'}">${esc(position.stance || '未投')}</span> ${esc(participantName(session, position.participantId))}${position.implicit ? ' <small class="muted">(提出者)</small>' : ''}${position.rationale ? `<br><small>${esc(position.rationale)}</small>` : ''}</div>`).join('')}` : caption;
     const thread = discussions.length ? `<details><summary>${discussions.length} 条讨论</summary>${discussions.map(message => `<div style="margin:6px 0"><b>${esc(participantName(session, message.authorId))}</b> · round ${esc(message.payload?.consensusRound ?? '')}<br>${esc(message.payload?.argument || '')}</div>`).join('')}</details>` : '<span class="muted">—</span>';
     return {votes, thread};
   }
@@ -285,7 +294,7 @@
     const draft = readParticipantDraft();
     const {session, issues, events, escalations, criteria, consensus} = state.detail;
     const progress = session.progress || {};
-    const pending = escalations.filter(entry => entry.status === 'pending'), waitingDetails = waitingAgentDetails(session), allRunning = waitingDetails.length > 0 && waitingDetails.every(entry => entry.activelyRunning), retryableWaiting = waitingDetails.filter(entry => entry.retryable);
+    const pending = escalations.filter(entry => entry.status === 'pending'), waitingDetails = waitingAgentDetails(session), crossVoteIds = progress.pendingCrossVotes || [], allRunning = waitingDetails.length > 0 && waitingDetails.every(entry => entry.activelyRunning), retryableWaiting = waitingDetails.filter(entry => entry.retryable);
     const displayedVerdict=session.kind==='review'?(consensus?.summary?.verdict||session.outcome?.verdict):session.outcome?.verdict;
     const waitingStatus = waitingDetails.map(entry => `${entry.name}（${entry.status}）`).join('、');
     const stallNotice = !session.stalled ? '' : allRunning
@@ -298,6 +307,7 @@
         <div class="muted">对象：${esc(session.subject.type)} = ${esc(session.subject.value)}${session.subject.notes ? ` · ${esc(session.subject.notes)}` : ''}</div>
         ${stallNotice}
         <p class="muted">进度：${esc(JSON.stringify(progress))}</p>
+        ${crossVoteIds.length ? `<p><span class="pill yellow">交叉投票进行中</span> 已完成盲审、还需给他人 Issue 投票：${esc(crossVoteIds.map(id => participantName(session, id)).join('、'))}</p>` : ''}
         ${session.policy?.implementationFirst ? '<p class="muted">模式：先开发后评审（implementing → collecting 自动切换）</p>' : ''}
         ${session.kind === 'review' ? (session.policy?.consensusReview ? `<p class="muted">共识评审：盲审汇总 → 问题投票 / 合并提议 → 合并投票 → 最多 ${esc(session.policy.maxConsensusRounds)} 轮讨论 → 输出报告</p>` : '<p class="muted">共识评审：关闭（收集完成后直接输出报告）</p>') : ''}
         ${displayedVerdict ? `<p><span class="pill ${displayedVerdict === 'approved' ? 'green' : displayedVerdict === 'changes_required' ? 'red' : 'yellow'}">结论：${esc(displayedVerdict)}</span>${session.outcome?.approval?.unanimous ? ' <span class="pill green">问题认定已全票完成</span>' : ''}</p>` : ''}

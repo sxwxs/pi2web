@@ -62,6 +62,20 @@ describe('collab dispatcher',()=>{
     expect(sent).toHaveLength(1);
   });
 
+  it('wakes finished collectors to cross-vote before the last reviewer files',async()=>{
+    const created=await hub.createSession({kind:'review',title:'Overlap',workspaceId:'ws-1',subject:{type:'free',value:'branch'},policy:{consensusReview:true}},async()=>dir);
+    const a=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'A',agentId:'agent-A'});
+    const b=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'B',agentId:'agent-B'});
+    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'C',agentId:'agent-C'});
+    await hub.openRound(created.sessionId);await dispatcher.drain();sent.length=0;
+    const baselineId=store.getBaselineForRound(created.sessionId,1)!.baselineId;
+    await hub.submitFindings(a.participant,{clientRequestId:rid(),baselineId,findings:[{title:'First collector correctness issue',severity:'major',category:'correctness',location:{path:'src/a.ts',startLine:1},evidence:'The implementation at line 1 demonstrably violates the required behavior.'}],reviewComplete:true});
+    await hub.submitFindings(b.participant,{clientRequestId:rid(),baselineId,findings:[{title:'Second collector correctness issue',severity:'major',category:'correctness',location:{path:'src/b.ts',startLine:2},evidence:'The implementation at line 2 demonstrably violates the required behavior.'}],reviewComplete:true});
+    await dispatcher.drain();
+    expect(sent.filter(entry=>entry.message.includes('validate_issues')).map(entry=>entry.agentId).sort()).toEqual(['agent-A','agent-B']);
+    expect(sent.some(entry=>entry.agentId==='agent-C'&&entry.message.includes('validate_issues'))).toBe(false);
+  });
+
   it('tells a managed agent that the session is over instead of leaving it waiting',async()=>{
     const created=await session();
     const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-1'});

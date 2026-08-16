@@ -1,6 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {DEFAULT_POLICY,type CollabPolicy,type IssueStatus} from '../src/collab/types.js';
-import {applyEscalation,applyHumanRuling,applyWithdraw,assertCanFileFinding,canSeeOthersFindings,isReadyToAdvance,nextPhase,requiredActors,sessionProgress,stallCheck,waitingOn,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from '../src/collab/review-flow.js';
+import {applyEscalation,applyHumanRuling,applyWithdraw,assertCanFileFinding,canSeeOthersFindings,isReadyToAdvance,nextPhase,pendingCrossVoters,requiredActors,sessionProgress,stallCheck,waitingOn,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from '../src/collab/review-flow.js';
 
 const reviewer=(id:string):FlowParticipant=>({participantId:id,role:'reviewer',state:'active'});
 const implementer=(id='impl'):FlowParticipant=>({participantId:id,role:'implementer',state:'active'});
@@ -12,6 +12,16 @@ const snapshot=(patch:Partial<ReviewSnapshot>={}):ReviewSnapshot=>({
 });
 
 describe('review flow without a response phase',()=>{
+  it('asks finished collectors to cross-vote without waiting for the last reviewer',()=>{
+    const state=snapshot({policy:policy({consensusReview:true}),issues:[issue(),issue({issueId:'i-2',reporterId:'r2'})],
+      completions:[{phase:'collecting',round:1,participantId:'r1'}]});
+    expect(waitingOn(state)).toEqual(['r2']);
+    expect(pendingCrossVoters(state)).toEqual(['r1']);
+    expect(sessionProgress(state).pendingCrossVotes).toEqual(['r1']);
+    const bothFiled={...state,completions:[{phase:'collecting' as const,round:1,participantId:'r1'},{phase:'collecting' as const,round:1,participantId:'r2'}]};
+    expect(pendingCrossVoters(bothFiled).sort()).toEqual(['r1','r2']);
+  });
+
   it('waits for reviewers, not implementers, during blind collection',()=>{
     const state=snapshot();
     expect(requiredActors(state)).toEqual(['r1','r2']);
