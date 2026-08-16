@@ -1,11 +1,13 @@
 import {execFile} from 'node:child_process';
 import {createHash} from 'node:crypto';
+import {readFile} from 'node:fs/promises';
+import path from 'node:path';
 import {promisify} from 'node:util';
 import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type Issue,type Participant,type ReviewPhase,type ScoringPhase} from './types.js';
 import {CollabStore,type CreateSessionInput} from './store.js';
 import {ValidationError,parse,type FieldError} from './validate.js';
-import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,participantBudgetRequest,policyPatch,readyRequest,rebindParticipantRequest,recheckRequest,resolveEscalationRequest,scoresRequest,votesRequest,issueVotesRequest,mergeVotesRequest,issueDiscussionsRequest,retryWaitingRequest} from './schemas.js';
-import {analyse,assertScoringCapability,assertScoringPhase,approvedCriteria,contestedCriteria,finalizeScores,isScoringReadyToAdvance,lockRubric,nextScoringPhase,nominationsSealed,scoresSealed,scoringPanel,scoringProgress,scoringWaitingOn,tallyVotes,votesSealed,type ScoringSnapshot} from './scoring-flow.js';
+import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,debateArgumentsRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,participantBudgetRequest,policyPatch,readyRequest,rebindParticipantRequest,recheckRequest,resolveEscalationRequest,scoresRequest,votesRequest,issueVotesRequest,mergeVotesRequest,issueDiscussionsRequest,retryWaitingRequest} from './schemas.js';
+import {analyse,assertScoringCapability,assertScoringPhase,contestedCriteria,finalizeScores,isScoringReadyToAdvance,nextScoringPhase,nominationsSealed,scoresSealed,scoringPanel,scoringProgress,scoringWaitingOn,tallyVotes,votesSealed,type ScoringSnapshot} from './scoring-flow.js';
 import {applyEscalation,applyHumanRuling,applyWithdraw,approvalSummary,assertCanFileFinding,assertCapability,canSeeOthersFindings,flowError,isReadyToAdvance,nextPhase,sessionProgress,stallCheck,waitingOn,currentIssueVotes,issueConsensus,contestedIssueIds,pendingCrossVoters,owedIssueVoteIds,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from './review-flow.js';
 
 const run=promisify(execFile);
@@ -23,8 +25,14 @@ export const gitBaseline:BaselineResolver=async({cwd,subject})=>{
   try{
     const commit=(await git(['rev-parse','HEAD'])).trim();
     let dirtyHash:string|undefined;
-    const status=(await git(['status','--porcelain'])).trim();
-    if(status){const diff=await git(['diff','HEAD']).catch(()=>'');dirtyHash=`sha256:${createHash('sha256').update(status).update(diff).digest('hex')}`}
+    const status=await git(['status','--porcelain','-z']);
+    if(status){
+      const diff=await git(['diff','HEAD','--binary']).catch(()=>'');
+      const untracked=(await git(['ls-files','--others','--exclude-standard','-z']).catch(()=>'')).split('\0').filter(Boolean).sort();
+      const hash=createHash('sha256').update(status).update(diff);
+      for(const relative of untracked){hash.update(relative).update('\0');try{hash.update(await readFile(path.join(cwd,relative)))}catch{/* A file removed during capture is already represented by status. */}}
+      dirtyHash=`sha256:${hash.digest('hex')}`;
+    }
     return {vcs:'git',commit,range:subject.type==='commit_range'?subject.value:undefined,dirtyHash,paths:subject.type==='paths'?subject.value.split(/[\n,]/).map(value=>value.trim()).filter(Boolean):[]};
   }catch{
     // Not a git checkout (or git is missing). The hub still works; it just cannot prove code identity.
@@ -53,7 +61,7 @@ export class CollabHub {
   subscribe(listener:(event:CollabEvent)=>void){this.listeners.add(listener);return()=>this.listeners.delete(listener)}
   private emit(event:CollabEvent){for(const listener of this.listeners)try{listener(event)}catch{/* A broken subscriber must not roll back committed state. */}}
   private record(sessionId:string,type:string,payload:Record<string,unknown>={},actorId?:string){const event=this.store.appendEvent(sessionId,type,payload,actorId);this.emit(event);return event}
-  /** Queues a wake-up. The dispatcher turns it into a prompt and acks it; nothing else reads this queue. */
+  /** Queues a durable wake-up. The dispatcher prompts; collab_get_task acknowledges collection. */
   private push(sessionId:string,participantId:string,type:string,payload:Record<string,unknown>){
     return this.store.pushInbox(sessionId,participantId,type,payload);
   }
@@ -67,8 +75,8 @@ export class CollabHub {
    */
   retireDispatchToken(participantId:string){this.store.clearDispatchToken(participantId)}
   /**
-   * Marks the queued items of a task as handled once the agent has been told about them. Nobody acks for
-   * itself any more, so without this an item would look pending forever and be re-sent on every restart.
+   * Marks queued items handled explicitly. Normal tasks use claimTaskForAgent(); this helper remains for
+   * terminal notes and stale cleanup because those messages do not call collab_get_task.
    */
   completeDelivery(participantId:string,task:string){
     const items=this.store.listInbox(participantId).filter(item=>item.type===task);
@@ -87,6 +95,8 @@ export class CollabHub {
     const cwd=await resolveCwd(input.workspaceId,input.relativeCwd);
     const session=this.store.createSession({kind:input.kind,title:input.title,workspaceId:input.workspaceId,cwd,subject:input.subject,policy:input.policy} as CreateSessionInput);
     this.record(session.sessionId,'session_created',{kind:session.kind,title:session.title,cwd,subject:session.subject});
+    // Scoring has no open-round hand-off, so pin its code before the first panel task is issued.
+    if(session.kind==='scoring')await this.captureBaseline(session);
     return session;
   }
   listSessions(filter:{status?:string,kind?:string,limit?:number,offset?:number}={}){return this.store.listSessions(filter)}
@@ -99,6 +109,11 @@ export class CollabHub {
   }
   /** Phases in which a new seat can still be given a well-defined task; anywhere else it would only deadlock. */
   private registrationPhases(session:CollabSession){return session.kind==='scoring'?['nominating']:['draft','implementing','collecting']}
+  /** A dedicated collaboration Agent may own only one active seat globally; agentId alone is the bridge identity. */
+  private assertAgentAvailable(agentId:string,_sessionId:string,exceptParticipantId?:string){
+    const occupied=this.store.findActiveParticipantsByAgent(agentId).find(participant=>participant.participantId!==exceptParticipantId);
+    if(occupied)throw flowError(COLLAB_ERRORS.conflict,`That agent is already registered to an active seat in collaboration session ${occupied.sessionId}`);
+  }
   addParticipant(sessionId:string,body:unknown){
     const input=parse(createParticipantRequest,body),session=this.store.getSession(sessionId);
     // A finished review may receive a new developer before a human starts an explicit fix/recheck cycle. Other
@@ -112,9 +127,7 @@ export class CollabHub {
         // would be advice an operator cannot act on. Repairing the existing seat is the real path.
         ?`A scoring panel is fixed once the rubric is locked (the session is in ${session.phase}). Repair the existing seat instead: POST /participants/{participantId}/binding to hand it to another agent, and POST /participants/{participantId}/budget if it ran out of tokens.`
         :`A participant can only be registered in phase ${this.registrationPhases(session).join('/')}, but the session is in ${session.phase}. Wait for the next round, or rebind an existing seat.`);
-    // One agent may not hold two seats: a single model must not be able to vote twice.
-    if(this.store.listParticipants(sessionId).some(existing=>existing.agentId===input.agentId))
-      throw flowError(COLLAB_ERRORS.conflict,'That agent is already registered in this session');
+    this.assertAgentAvailable(input.agentId,sessionId);
     const {participant,token}=this.store.createParticipant({sessionId,role:input.role,displayName:input.displayName,model:input.model,agentId:input.agentId,tokenBudget:input.tokenBudget});
     // The hub wakes this agent itself, so it keeps the credential it will hand over.
     this.store.setDispatchToken(participant.participantId,token);
@@ -145,8 +158,7 @@ export class CollabHub {
     if(current.sessionId!==sessionId)throw flowError(COLLAB_ERRORS.participantNotFound,'Participant not found in this session',404);
     if(session.status!=='active')throw flowError(COLLAB_ERRORS.wrongPhase,'A finished session cannot be rebound');
     const agentId=input.agentId.trim();
-    if(this.store.listParticipants(sessionId).some(other=>other.participantId!==participantId&&other.agentId===agentId))
-      throw flowError(COLLAB_ERRORS.conflict,'That agent is already registered in this session');
+    this.assertAgentAvailable(agentId,sessionId,participantId);
     const {participant,token}=this.store.rebindParticipant(participantId,agentId,input.model);
     this.record(sessionId,'participant_rebound',{participantId,agentId:participant.agentId,previousAgentId:current.agentId,model:participant.model});
     // Whatever this seat owes has to reach the *new* agent, even when the old one was already prompted: a rebind
@@ -192,9 +204,11 @@ export class CollabHub {
     if(!reviewers.length)throw flowError(COLLAB_ERRORS.wrongPhase,'A recheck needs at least one active reviewer');
     const selected=[...new Set(input.implementerParticipantIds)],implementers=participants.filter(entry=>entry.role==='implementer'&&entry.state==='active');
     if(input.mode==='fix_then_review'){
-      if(!selected.length)throw new ValidationError([fieldError('implementerParticipantIds','REQUIRED','Select at least one active implementer for fix_then_review')]);
+      if(selected.length!==1)throw new ValidationError([fieldError('implementerParticipantIds','WRONG_COUNT','Select exactly one active implementer; parallel implementers cannot safely share one workspace')]);
       for(const participantId of selected)if(!implementers.some(entry=>entry.participantId===participantId))throw new ValidationError([fieldError('implementerParticipantIds','UNKNOWN_PARTICIPANT',`${participantId} is not an active implementer in this session`)]);
     }else if(selected.length)throw new ValidationError([fieldError('implementerParticipantIds','UNEXPECTED','review_only does not assign an implementer')]);
+    // Finished seats can be reused elsewhere. Reopening is the durability boundary where they become active again.
+    for(const participant of participants.filter(entry=>entry.state==='active'))this.assertAgentAvailable(participant.agentId,sessionId,participant.participantId);
     const round=session.round+1,phase:ReviewPhase=input.mode==='fix_then_review'?'implementing':'collecting';
     // Closing notes from the prior result must not race the new task. Credentials were intentionally retired at
     // close, so rotate every active seat before dispatching this new cycle.
@@ -217,7 +231,8 @@ export class CollabHub {
     const participants=this.store.listParticipants(sessionId);
     if(!participants.some(participant=>participant.role==='reviewer'))throw flowError(COLLAB_ERRORS.wrongPhase,'Register at least one reviewer before opening the round');
     const buildFirst=session.policy.implementationFirst;
-    if(buildFirst&&!participants.some(participant=>participant.role==='implementer'))throw flowError(COLLAB_ERRORS.wrongPhase,'An implementationFirst session needs an implementer before it can open');
+    const implementers=participants.filter(participant=>participant.role==='implementer'&&participant.state==='active');
+    if(buildFirst&&implementers.length!==1)throw flowError(COLLAB_ERRORS.wrongPhase,'An implementationFirst session needs exactly one active implementer because all seats share one workspace');
     // Same ordering rule as applyPhase: the baseline exists before anyone can see phase `collecting`.
     if(!buildFirst)await this.captureBaseline({...session,phase:'collecting'});
     const updated=this.store.updateSession(sessionId,{phase:buildFirst?'implementing':'collecting'});
@@ -244,27 +259,6 @@ export class CollabHub {
     const response={accepted:true,phase:current.phase,round:current.round,waitingOn:waitingOn(this.snapshot(session.sessionId))};
     this.finish(participant,input.clientRequestId,body,input.usage,response);
     return response;
-  }
-  /**
-   * Called when a pi2web agent settles. A managed implementer that was told to implement and then went idle
-   * is treated as ready, which is what makes "the developer finished, call the reviewers" fully automatic.
-   * Idle chatter cannot trigger it: the agent must be holding an `implement` task for the current round.
-   */
-  async noteAgentIdle(agentId:string){
-    if(!agentId)return;
-    const sessions=this.store.listSessions({status:'active',limit:200}).filter(session=>session.kind==='review'&&session.phase==='implementing'&&session.policy.autoReviewOnAgentIdle);
-    for(const session of sessions){
-      for(const participant of this.store.listParticipants(session.sessionId)){
-        if(participant.agentId!==agentId||participant.role!=='implementer'||participant.state!=='active')continue;
-        const done=this.store.listCompletions(session.sessionId).some(entry=>entry.phase==='implementing'&&entry.round===session.round&&entry.participantId===participant.participantId);
-        if(done)continue;
-        const assigned=this.store.listInbox(participant.participantId,true,50).some(item=>item.type==='implement'&&Number(item.payload.round)===session.round);
-        if(!assigned)continue;
-        this.store.markPhaseComplete(session.sessionId,session.round,'implementing',participant.participantId);
-        this.record(session.sessionId,'implementation_ready',{participantId:participant.participantId,trigger:'agent_idle',agentId},participant.participantId);
-        await this.settle(session.sessionId);
-      }
-    }
   }
   /** The only way to move past participants that never submitted. Everything about the override is logged. */
   async advance(sessionId:string,body:unknown,actor='human'){
@@ -382,6 +376,18 @@ export class CollabHub {
     if(!participant)throw flowError(COLLAB_ERRORS.forbidden,'Unknown participant token',401);
     return this.store.updateParticipant(participant.participantId,{lastSeenAt:new Date(this.now()).toISOString()});
   }
+  /** Internal bridge identity lookup. A collaboration Agent is constrained to exactly one active seat. */
+  participantForAgent(agentId:string):Participant{
+    const matches=this.store.findActiveParticipantsByAgent(agentId);
+    if(matches.length!==1)throw flowError(COLLAB_ERRORS.forbidden,matches.length?'This collaboration Agent has more than one active seat':'This Agent has no active collaboration seat',403);
+    return this.store.updateParticipant(matches[0].participantId,{lastSeenAt:new Date(this.now()).toISOString()});
+  }
+  /** A wake-up is durable until the extension actually asks for its task; merely queueing a Pi follow-up is not delivery. */
+  claimTaskForAgent(agentId:string){
+    const participant=this.participantForAgent(agentId),task=this.digest(participant),pending=this.store.listInbox(participant.participantId).filter(item=>item.type!=='session_result');
+    if(pending.length){this.store.ackInbox(participant.participantId,pending.map(item=>item.itemId));this.record(participant.sessionId,'task_collected',{participantId:participant.participantId,tasks:pending.map(item=>item.type)},participant.participantId)}
+    return task;
+  }
 
   async submitFindings(participant:Participant,body:unknown){
     const input=parse(findingsRequest,body);
@@ -391,6 +397,7 @@ export class CollabHub {
     const baseline=this.store.getBaselineForRound(session.sessionId,session.round);
     if(!baseline)throw flowError(COLLAB_ERRORS.wrongPhase,'No baseline has been captured for this round yet');
     if(input.baselineId!==baseline.baselineId)throw Object.assign(flowError(COLLAB_ERRORS.staleBaseline,`Findings target baseline ${input.baselineId}, but the current baseline is ${baseline.baselineId}. Re-read the code and resubmit.`),{currentBaseline:baseline});
+    await this.assertBaselineCurrent(session,baseline);
     const participants=this.store.listParticipants(session.sessionId);
     const defaultTarget=participants.find(entry=>entry.role==='implementer');
     const accepted:{externalId?:string,issueId:string}[]=[],rejected:{externalId?:string,code:string,message:string}[]=[];
@@ -622,6 +629,61 @@ export class CollabHub {
     return {phase:session.phase,round:session.round,consensusRound:session.debateRound,issueVotes:this.store.listIssueVotes(sessionId),issueConsensus:issueConsensus(snapshot,{includeFinal:true}),mergeProposals:this.store.listMergeProposals(sessionId),discussions:this.store.listIssues(sessionId).flatMap(issue=>this.store.listIssueMessages(issue.issueId).filter(message=>message.kind==='discussion')),summary:this.reviewSummary(sessionId)};
   }
 
+  /**
+   * Per-round audit of a review. The single issue list only ever shows the *current* verdict, so once a recheck
+   * flips a finding to `resolved` the board loses the fact that round 2 was the wave that fixed it — and a
+   * finding that appeared only in round 3 looks like it was there from the start. Each entry is one wave:
+   * what the panel re-verified from earlier rounds, and what it newly found at that round's baseline.
+   */
+  reviewRounds(sessionId:string){
+    const session=this.store.getSession(sessionId);
+    if(session.kind!=='review')throw flowError(COLLAB_ERRORS.wrongPhase,'Round history exists for review sessions only');
+    const issues=this.store.listIssues(sessionId),events=this.store.listEventsByType(sessionId,['review_reopened','phase_changed','session_finished']);
+    const history=new Map(issues.map(issue=>[issue.issueId,this.store.listIssueMessages(issue.issueId)]));
+    const rechecksOf=(issueId:string)=>(history.get(issueId)??[]).filter(message=>message.kind==='recheck')
+      .map(message=>({round:Number(message.payload.reviewRound??message.round),outcome:String(message.payload.outcome??''),rationale:String(message.payload.rationale??''),reviewerId:message.authorId,at:message.createdAt}));
+    const brief=(issue:Issue)=>({issueId:issue.issueId,number:issue.number,title:issue.title,severity:issue.severity,category:issue.category,
+      status:issue.status,reporterId:issue.reporterId,location:issue.location,foundInRound:issue.round});
+    // A recheck only ever closes an issue by writing `resolved`. Sessions recorded by the older
+    // respond/adjudicate flow closed findings with no recheck message at all, so where this round left no
+    // recheck evidence the current status decides — otherwise every long-closed legacy finding would be
+    // reported forever as "nobody re-verified this".
+    const actionable=['open','confirmed','answered','escalated'];
+    const rounds=[];
+    for(let round=1;round<=session.round;round++){
+      const reopened=events.find(event=>event.type==='review_reopened'&&Number(event.payload.round)===round);
+      const carried=issues.filter(issue=>{
+        if(issue.round>=round)return false;
+        const past=rechecksOf(issue.issueId);
+        if(past.some(entry=>entry.round<round&&entry.outcome==='resolved'))return false;
+        // Being asked to re-verify it at this round or later proves it was still open here.
+        if(past.some(entry=>entry.round>=round))return true;
+        return actionable.includes(issue.status);
+      });
+      const rechecks=carried.map(issue=>{
+        const done=rechecksOf(issue.issueId).find(entry=>entry.round===round);
+        // `pending` is not a reviewer verdict: it is "this wave never reported back on it", which for the live
+        // round means still owed and for a closed round means it was carried further without an answer.
+        return {...brief(issue),outcome:done?done.outcome:'pending',rationale:done?.rationale??'',reviewerId:done?.reviewerId??issue.reporterId,at:done?.at};
+      });
+      const newIssues=issues.filter(issue=>issue.round===round).map(issue=>({...brief(issue),
+        rechecks:rechecksOf(issue.issueId).filter(entry=>entry.round>round)}));
+      const finishedEvent=events.find(event=>event.type==='phase_changed'&&event.payload.to==='finished'&&Number(event.payload.round)===round);
+      const closed=finishedEvent?events.find(event=>event.type==='session_finished'&&event.sequence>finishedEvent.sequence):undefined;
+      const verdict=(closed?.payload.outcome as {verdict?:string}|undefined)?.verdict;
+      rounds.push({round,mode:round===1?'initial':String(reopened?.payload.mode??'recheck'),
+        startedAt:round===1?session.createdAt:reopened?.createdAt,finishedAt:finishedEvent?.createdAt,
+        status:round<session.round||session.status!=='active'?'finished':'in_progress',
+        phase:round===session.round?session.phase:'finished',verdict,
+        baseline:this.store.getBaselineForRound(sessionId,round),
+        rechecks,newIssues,
+        counts:{carried:carried.length,resolved:rechecks.filter(entry=>entry.outcome==='resolved').length,
+          stillPresent:rechecks.filter(entry=>entry.outcome==='still_present').length,
+          pending:rechecks.filter(entry=>entry.outcome==='pending').length,newIssues:newIssues.length}});
+    }
+    return rounds;
+  }
+
   /** Blind review: while findings are being collected, a participant only sees their own. */
   listIssues(participant:Participant){
     const session=this.store.getSession(participant.sessionId),snapshot=this.snapshot(session.sessionId);
@@ -694,6 +756,13 @@ export class CollabHub {
     const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId);
     assertScoringCapability(this.toFlowParticipant(participant),'vote');
     assertScoringPhase(snapshot,['voting'],'Voting on criteria');
+    const expected=this.store.listCriteria(session.sessionId).filter(criterion=>criterion.state==='candidate').map(criterion=>criterion.criterionId),submitted=input.votes.map(vote=>vote.criterionId),voteErrors:FieldError[]=[];
+    for(const criterionId of expected)if(!submitted.includes(criterionId))voteErrors.push(fieldError('votes','REQUIRED',`A vote for criterion ${criterionId} is required`));
+    for(const [index,criterionId] of submitted.entries()){
+      if(!expected.includes(criterionId))voteErrors.push(fieldError(`votes[${index}].criterionId`,'UNEXPECTED',`Criterion ${criterionId} is not a current candidate`));
+      if(submitted.indexOf(criterionId)!==index)voteErrors.push(fieldError(`votes[${index}].criterionId`,'DUPLICATE','Only one vote per criterion is accepted'));
+    }
+    if(voteErrors.length)throw new ValidationError(voteErrors);
     const accepted:string[]=[],rejected:{criterionId:string,code:string,message:string}[]=[];
     for(const vote of input.votes){
       const criterion=this.store.findCriterionInSession(session.sessionId,vote.criterionId);
@@ -715,9 +784,16 @@ export class CollabHub {
     const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId);
     assertScoringCapability(this.toFlowParticipant(participant),'score');
     assertScoringPhase(snapshot,['scoring','rescoring'],'Scoring');
+    await this.assertBaselineCurrent(session);
     const {scale}=session.policy.scoring,round=snapshot.phase==='rescoring'?session.debateRound+1:session.debateRound;
-    const errors:FieldError[]=[];
+    const expected=(snapshot.phase==='rescoring'
+      ?this.store.listDebates(session.sessionId).filter(debate=>debate.round===session.debateRound).map(debate=>debate.criterionId)
+      :this.store.listCriteria(session.sessionId).filter(criterion=>criterion.state==='approved').map(criterion=>criterion.criterionId));
+    const submitted=input.scores.map(entry=>entry.criterionId),errors:FieldError[]=[];
+    for(const criterionId of expected)if(!submitted.includes(criterionId))errors.push(fieldError('scores','REQUIRED',`A score for criterion ${criterionId} is required`));
     input.scores.forEach((entry,index)=>{
+      if(!expected.includes(entry.criterionId))errors.push(fieldError(`scores[${index}].criterionId`,'UNEXPECTED',`You do not owe a score for ${entry.criterionId} in this phase`));
+      if(submitted.indexOf(entry.criterionId)!==index)errors.push(fieldError(`scores[${index}].criterionId`,'DUPLICATE','Only one score per criterion is accepted'));
       if(entry.score<scale.min||entry.score>scale.max)errors.push(fieldError(`scores[${index}].score`,'OUT_OF_RANGE',`Score must be between ${scale.min} and ${scale.max}`));
       const quotient=(entry.score-scale.min)/scale.step;
       if(Math.abs(quotient-Math.round(quotient))>1e-9)errors.push(fieldError(`scores[${index}].score`,'NOT_A_MULTIPLE',`Score must be a multiple of ${scale.step}`));
@@ -748,12 +824,42 @@ export class CollabHub {
     assertScoringCapability(this.toFlowParticipant(participant),participant.role==='implementer'?'clarify':'debate');
     if(participant.role==='implementer'&&input.stance!=='clarify')throw flowError(COLLAB_ERRORS.forbidden,'The implementer may only contribute clarifications, not scoring positions',403);
     assertScoringPhase(snapshot,['debating'],'Debating');
+    await this.assertBaselineCurrent(session);
     const debate=this.store.findDebateInSession(session.sessionId,debateId);
     if(!debate||debate.status!=='open')throw flowError(COLLAB_ERRORS.debateNotFound,'Debate not found or already closed',404);
     const argumentId=this.store.addDebateArgument(debateId,{participantId:participant.participantId,stance:input.stance,argument:input.argument,evidence:input.evidence,respondingTo:input.respondingTo});
     const response={argumentId,debateId,criterionId:debate.criterionId};
     this.finish(participant,input.clientRequestId,body,input.usage,response);
     this.record(session.sessionId,'debate_argument',{debateId,criterionId:debate.criterionId,stance:input.stance},participant.participantId);
+    await this.settleScoring(session.sessionId);
+    return response;
+  }
+
+  /** Batched tool counterpart: a reviewer must answer every open debate before ending its turn. */
+  async submitDebateArguments(participant:Participant,body:unknown){
+    const input=parse(debateArgumentsRequest,body),cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
+    const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId);
+    assertScoringCapability(this.toFlowParticipant(participant),'debate');
+    assertScoringPhase(snapshot,['debating'],'Debating');
+    await this.assertBaselineCurrent(session);
+    const expected=this.store.listDebates(session.sessionId).filter(debate=>debate.status==='open'&&debate.round===session.debateRound
+      &&this.store.listScores(session.sessionId).some(score=>score.criterionId===debate.criterionId&&score.participantId===participant.participantId)
+      &&!debate.arguments.some(argument=>argument.participantId===participant.participantId)).map(debate=>debate.debateId);
+    const submitted=input.arguments.map(argument=>argument.debateId),errors:FieldError[]=[];
+    for(const debateId of expected)if(!submitted.includes(debateId))errors.push(fieldError('arguments','REQUIRED',`An argument for debate ${debateId} is required`));
+    for(const [index,debateId] of submitted.entries()){
+      if(!expected.includes(debateId))errors.push(fieldError(`arguments[${index}].debateId`,'UNEXPECTED',`You do not owe an argument for ${debateId}`));
+      if(submitted.indexOf(debateId)!==index)errors.push(fieldError(`arguments[${index}].debateId`,'DUPLICATE','Only one argument per debate is accepted'));
+    }
+    if(errors.length)throw new ValidationError(errors);
+    const accepted=input.arguments.map(entry=>{
+      const debate=this.store.findDebateInSession(session.sessionId,entry.debateId)!;
+      const argumentId=this.store.addDebateArgument(entry.debateId,{participantId:participant.participantId,stance:entry.stance,argument:entry.argument,evidence:entry.evidence,respondingTo:entry.respondingTo});
+      this.record(session.sessionId,'debate_argument',{debateId:entry.debateId,criterionId:debate.criterionId,stance:entry.stance},participant.participantId);
+      return {debateId:entry.debateId,argumentId};
+    });
+    const response={accepted,round:session.debateRound};
+    this.finish(participant,input.clientRequestId,body,input.usage,response);
     await this.settleScoring(session.sessionId);
     return response;
   }
@@ -802,7 +908,7 @@ export class CollabHub {
     const report=finalizeScores(snapshot,rulings);
     // The dispute and the ruling are the same act: leaving the escalation pending would keep the board red forever.
     this.settleScoreDispute(sessionId,'Final scores were set by a human via /finalize',resolvedBy,input.rulings);
-    this.store.updateSession(sessionId,{phase:'finalized',status:'finished',outcome:{...report,rulings:input.rulings,resolvedBy}});
+    this.store.updateSession(sessionId,{phase:'finalized',status:'finished',outcome:{...(session.outcome??{}),...report,rulings:input.rulings,resolvedBy}});
     this.record(sessionId,'session_finished',{outcome:report},resolvedBy);
     this.announceFinish(this.store.getSession(sessionId));
     return report;
@@ -824,8 +930,9 @@ export class CollabHub {
   /** Scoring counterpart of settle(): advance only while the panel has finished the current step. */
   async settleScoring(sessionId:string,forced=false,reason=''){
     for(let guard=0;guard<12;guard++){
-      const session=this.store.getSession(sessionId),snapshot=this.scoringSnapshot(sessionId);
+      const session=this.store.getSession(sessionId);let snapshot=this.scoringSnapshot(sessionId);
       if(session.status!=='active')return;
+      if(session.phase==='consolidating'){this.consolidateCriteria(sessionId);snapshot=this.scoringSnapshot(sessionId)}
       if(!isScoringReadyToAdvance(snapshot)&&!(forced&&guard===0))return;
       const result=nextScoringPhase(snapshot,{forced:forced&&guard===0});
       if(result.phase===snapshot.phase&&result.round===snapshot.round&&result.debateRound===snapshot.debateRound)return;
@@ -837,9 +944,10 @@ export class CollabHub {
       if(result.phase==='debating')for(const criterionId of result.contested??[])this.store.createDebate(sessionId,criterionId,session.debateRound);
       if(result.phase==='rescoring')this.store.closeDebates(sessionId,session.debateRound);
       const finalized=result.phase==='finalized';
+      const rubricOutcome=result.rubric?{...(session.outcome??{}),rubricLockedBy:result.rubric.lockedBy,rubricLockReason:result.rubric.reason}:session.outcome;
       const updated=this.store.updateSession(sessionId,{phase:result.phase,round:result.round,debateRound:result.debateRound,
         status:finalized?'finished':session.status,stalled:undefined,
-        outcome:finalized?{...finalizeScores(this.scoringSnapshot(sessionId)),lockedBy:'panel'}:session.outcome});
+        outcome:finalized?{...(rubricOutcome??{}),...finalizeScores(this.scoringSnapshot(sessionId))}:rubricOutcome});
       this.record(sessionId,'phase_changed',{from:session.phase,to:result.phase,round:result.round,debateRound:result.debateRound,reason:result.reason,
         ...(forced&&guard===0?{forced:true,forceReason:reason,skipped:result.skipped??[]}:{}),...(result.contested?{contested:result.contested}:{})});
       if(result.rubric)this.record(sessionId,'rubric_locked',{lockedBy:result.rubric.lockedBy,reason:result.rubric.reason,criteria:result.rubric.criteria});
@@ -848,7 +956,24 @@ export class CollabHub {
       this.dispatchScoring(sessionId);
     }
   }
-  private applyRubric(sessionId:string,rubric:{criteria:{criterionId:string,weight:number}[],rejected:string[]}){    for(const entry of rubric.criteria)this.store.updateCriterion(entry.criterionId,{state:'approved',weight:entry.weight});
+  /** Deterministically merges only certain duplicates: normalized names must be identical. Ambiguous semantics stay separate for the panel. */
+  private consolidateCriteria(sessionId:string){
+    const candidates=this.store.listCriteria(sessionId).filter(criterion=>criterion.state==='candidate'),groups=new Map<string,typeof candidates>();
+    const key=(name:string)=>name.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu,'');
+    for(const criterion of candidates){const normalized=key(criterion.name);groups.set(normalized,[...(groups.get(normalized)??[]),criterion])}
+    for(const entries of groups.values()){
+      if(entries.length<2)continue;
+      const [primary,...duplicates]=entries;
+      const detailed=[...entries].sort((a,b)=>b.definition.length-a.definition.length||a.createdAt.localeCompare(b.createdAt))[0];
+      const anchored=[...entries].sort((a,b)=>Object.keys(b.anchors??{}).length-Object.keys(a.anchors??{}).length)[0];
+      const sources=entries.flatMap(entry=>Array.isArray((entry.source as any)?.sources)?(entry.source as any).sources:[entry.source].filter(Boolean));
+      this.store.updateCriterion(primary.criterionId,{definition:detailed.definition,anchors:anchored.anchors,source:{sources,mergedCriterionIds:duplicates.map(entry=>entry.criterionId)}});
+      for(const duplicate of duplicates)this.store.updateCriterion(duplicate.criterionId,{state:'rejected'});
+      this.record(sessionId,'criteria_consolidated',{criterionId:primary.criterionId,mergedCriterionIds:duplicates.map(entry=>entry.criterionId),reason:'identical_normalized_name'});
+    }
+  }
+  private applyRubric(sessionId:string,rubric:{criteria:{criterionId:string,weight:number}[],rejected:string[]}){
+    for(const entry of rubric.criteria)this.store.updateCriterion(entry.criterionId,{state:'approved',weight:entry.weight});
     for(const criterionId of rubric.rejected)this.store.updateCriterion(criterionId,{state:'rejected'});
   }
   /** Closes the pending score dispute, whatever ended the wait: a ruling, a forced advance, or a late convergence. */
@@ -878,20 +1003,42 @@ export class CollabHub {
     }
   }
   scoringDigest(participant:Participant){
-    const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId);
+    const session=this.store.getSession(participant.sessionId),snapshot=this.scoringSnapshot(session.sessionId),criteria=this.store.listCriteria(session.sessionId),votes=this.store.listVotes(session.sessionId),scores=this.store.listScores(session.sessionId),debates=this.store.listDebates(session.sessionId);
+    const byId=(ids:string[])=>ids.map(id=>criteria.find(criterion=>criterion.criterionId===id)).filter((entry):entry is NonNullable<typeof entry>=>!!entry);
     const base={sessionId:session.sessionId,kind:session.kind,title:session.title,phase:session.phase,round:session.round,debateRound:session.debateRound,
-      subject:session.subject,you:{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,tokensUsed:participant.tokensUsed,tokenBudget:participant.tokenBudget,state:participant.state},
+      subject:session.subject,baseline:this.store.getBaselineForRound(session.sessionId,1),scoringPolicy:session.policy.scoring,
+      you:{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,tokensUsed:participant.tokensUsed,tokenBudget:participant.tokenBudget,state:participant.state},
       progress:scoringProgress(snapshot),stalled:session.stalled};
-    if(session.phase==='nominating')return {...base,task:'nominate_criteria',yourNominations:this.criteria(session.sessionId,participant),
-      instructions:`Propose scoring criteria with a definition and anchors, then set nominationsComplete=true. You cannot see other panelists' proposals until everyone has finished.`};
-    if(session.phase==='voting')return {...base,task:'vote_on_criteria',candidates:this.store.listCriteria(session.sessionId).filter(criterion=>criterion.state==='candidate'),tallies:votesSealed(snapshot)?undefined:tallyVotes(snapshot),
-      instructions:'Vote approve, reject, or abstain on every candidate and suggest a weight. Rejecting requires a rationale.'};
-    if(session.phase==='scoring'||session.phase==='rescoring')return {...base,task:session.phase==='scoring'?'score_rubric':'rescore_contested',
-      rubric:approvedCriteria(snapshot),analysis:scoresSealed(snapshot)?undefined:analyse(snapshot),
-      instructions:`Score every criterion in the locked rubric on a ${session.policy.scoring.scale.min}-${session.policy.scoring.scale.max} scale. Every score needs a rationale and at least one evidence entry with a file path.${session.phase==='rescoring'?' A rescore must include changeReason, even if the score stays the same.':''}`};
-    if(session.phase==='debating')return {...base,task:'debate_contested_scores',debates:this.store.listDebates(session.sessionId).filter(debate=>debate.status==='open'),analysis:analyse(snapshot),
-      instructions:'Argue your position on each contested criterion with evidence. Use stance "hold" if you stand by your score.'};
-    return {...base,task:'wait',instructions:session.phase==='awaiting_human'?'A human is ruling on the contested criteria.':'Nothing is required from you right now.'};
+    if(session.phase==='nominating'){
+      const previousRound=session.round>1?session.round-1:undefined;
+      return {...base,task:'nominate_criteria',yourNominations:criteria.filter(criterion=>criterion.round===session.round&&(criterion.source as any)?.participantId===participant.participantId),
+        existingCandidates:criteria.filter(criterion=>criterion.state==='candidate'&&criterion.round<session.round),
+        previousRound:previousRound?{round:previousRound,tallies:tallyVotes(snapshot,previousRound),amendments:votes.filter(vote=>vote.round===previousRound&&vote.amendment)}:undefined,
+        instructions:`Propose enough distinct scoring criteria to help the panel reach ${session.policy.scoring.minCriteria}-${session.policy.scoring.maxCriteria} dimensions. Include a definition and concrete score anchors. Your current-round proposals stay blind until every reviewer finishes.`};
+    }
+    if(session.phase==='voting'){
+      const candidates=criteria.filter(criterion=>criterion.state==='candidate'),required=candidates.filter(criterion=>!votes.some(vote=>vote.criterionId===criterion.criterionId&&vote.participantId===participant.participantId&&vote.round===session.round)).map(criterion=>criterion.criterionId),previousRound=session.round>1?session.round-1:undefined;
+      return {...base,task:'vote_on_criteria',candidates,yourRequiredCriterionIds:required,
+        previousRound:previousRound?{round:previousRound,tallies:tallyVotes(snapshot,previousRound),amendments:votes.filter(vote=>vote.round===previousRound&&vote.amendment)}:undefined,
+        instructions:`Vote approve, reject, or abstain on every required candidate. The rubric needs ${session.policy.scoring.minCriteria}-${session.policy.scoring.maxCriteria} dimensions. Suggest a weight for approvals; rejecting requires a rationale.`};
+    }
+    if(session.phase==='scoring'){
+      const rubric=criteria.filter(criterion=>criterion.state==='approved'),required=rubric.filter(criterion=>!scores.some(score=>score.criterionId===criterion.criterionId&&score.participantId===participant.participantId&&score.round===session.debateRound)).map(criterion=>criterion.criterionId);
+      return {...base,task:'score_rubric',rubric,yourRequiredCriterionIds:required,
+        instructions:`Score every required criterion on the ${session.policy.scoring.scale.min}-${session.policy.scoring.scale.max} scale in increments of ${session.policy.scoring.scale.step}. Apply its definition and anchors independently. Every score needs a rationale and file evidence.`};
+    }
+    if(session.phase==='debating'){
+      const open=debates.filter(debate=>debate.status==='open'&&debate.round===session.debateRound),required=open.filter(debate=>scores.some(score=>score.criterionId===debate.criterionId&&score.participantId===participant.participantId)&&!debate.arguments.some(argument=>argument.participantId===participant.participantId)).map(debate=>debate.debateId);
+      return {...base,task:'debate_contested_scores',debates:open.map(debate=>({...debate,criterion:criteria.find(entry=>entry.criterionId===debate.criterionId)})),yourRequiredDebateIds:required,analysis:analyse(snapshot),scoreDetails:scores.filter(score=>open.some(debate=>debate.criterionId===score.criterionId)&&score.round===session.debateRound),
+        instructions:'Address every required debate using the criterion definition, score evidence, and other panelists arguments. Use hold if you keep your score, raise/lower if the evidence changes your position.'};
+    }
+    if(session.phase==='rescoring'){
+      const contested=[...new Set(debates.filter(debate=>debate.round===session.debateRound).map(debate=>debate.criterionId))],nextRound=session.debateRound+1,required=contested.filter(criterionId=>!scores.some(score=>score.criterionId===criterionId&&score.participantId===participant.participantId&&score.round===nextRound));
+      return {...base,task:'rescore_contested',rubric:byId(contested),yourRequiredCriterionIds:required,analysis:analyse(snapshot),
+        debates:debates.filter(debate=>debate.round===session.debateRound).map(debate=>({...debate,criterion:criteria.find(entry=>entry.criterionId===debate.criterionId)})),scoreDetails:scores.filter(score=>contested.includes(score.criterionId)&&score.round<=session.debateRound),
+        instructions:`Rescore every required contested criterion on the ${session.policy.scoring.scale.min}-${session.policy.scoring.scale.max} scale after reading the debate. Evidence and rationale remain mandatory; changeReason must explain both a change and an explicit hold.`};
+    }
+    return {...base,task:'wait',instructions:session.phase==='awaiting_human'?'A human is ruling on the contested criteria. End your turn.':'Nothing is required from you right now. End your turn.'};
   }
 
   // ---------------------------------------------------------------- internals
@@ -946,6 +1093,13 @@ export class CollabHub {
     const baseline=this.store.saveBaseline({sessionId:session.sessionId,round:session.round,...snapshot});
     this.record(session.sessionId,'baseline_captured',{...baseline});
     return baseline;
+  }
+  /** The id names a snapshot, but the live workspace must still match it when a reviewer submits evidence. */
+  private async assertBaselineCurrent(session:CollabSession,baseline=this.store.getBaselineForRound(session.sessionId,session.kind==='scoring'?1:session.round)){
+    if(!baseline||baseline.vcs==='none')return;
+    const current=await this.resolveBaseline({cwd:session.cwd,subject:session.subject,round:baseline.round});
+    if(current.vcs!==baseline.vcs||current.commit!==baseline.commit||current.dirtyHash!==baseline.dirtyHash)
+      throw Object.assign(flowError(COLLAB_ERRORS.staleBaseline,'The workspace changed after this collaboration baseline was captured. Refresh or restart the review against a new baseline.'),{currentBaseline:{...current,round:baseline.round}});
   }
   private issueValidationDigest(session:CollabSession,participant:Participant,snapshot:ReviewSnapshot,base:Record<string,unknown>,early:boolean){
     const all=this.store.listIssues(session.sessionId,{status:['open'],round:session.round}),owed=owedIssueVoteIds(snapshot,participant.participantId);

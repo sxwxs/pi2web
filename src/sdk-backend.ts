@@ -1,7 +1,8 @@
-import {createAgentSession,SessionManager,type AgentSession,type ExtensionUIContext} from '@earendil-works/pi-coding-agent';
+import {createAgentSession,DefaultResourceLoader,getAgentDir,SessionManager,type AgentSession,type ExtensionUIContext} from '@earendil-works/pi-coding-agent';
 import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
-import type {AgentBackend,AgentEvent,AgentState} from './agents.js';
+import type {AgentBackend,AgentEvent,AgentProfile,AgentState} from './agents.js';
+import {createCollabExtension,type CollabToolBridge} from './collab/pi-extension.js';
 
 /** Real in-process Pi SDK backend with session/model/extension controls exposed to remote clients. */
 export class SdkBackend implements AgentBackend {
@@ -9,9 +10,13 @@ export class SdkBackend implements AgentBackend {
   private events=new EventEmitter();
   private pendingUi=new Map<string,{resolve:(value:unknown)=>void,timer:ReturnType<typeof setTimeout>}>();
   private constructor(private readonly session:AgentSession,private readonly agentId:string,private readonly cwd:string){}
-  static async create(agentId:string,cwd:string,sessionFile?:string):Promise<SdkBackend>{
+  static async create(agentId:string,cwd:string,sessionFile?:string,profile:AgentProfile='default',collabBridge?:CollabToolBridge):Promise<SdkBackend>{
     const sessionManager=sessionFile?SessionManager.open(sessionFile):SessionManager.create(cwd);
-    const {session,modelFallbackMessage}=await createAgentSession({cwd,sessionManager});
+    // This factory is deliberately inline instead of auto-discovered: normal Pi and normal pi2web agents
+    // never load the collaboration tools or their collaboration-specific system guidance.
+    const resourceLoader=profile==='collab'&&collabBridge?new DefaultResourceLoader({cwd,agentDir:getAgentDir(),extensionFactories:[{name:'pi2web-collab',factory:createCollabExtension(agentId,collabBridge)}]}):undefined;
+    if(resourceLoader)await resourceLoader.reload();
+    const {session,modelFallbackMessage}=await createAgentSession({cwd,sessionManager,resourceLoader});
     if(modelFallbackMessage&&!session.state.model){session.dispose();throw Object.assign(new Error(modelFallbackMessage),{code:'PI_MODEL_UNAVAILABLE'})}
     const backend=new SdkBackend(session,agentId,cwd);
     await session.bindExtensions({uiContext:backend.extensionUi()});
@@ -54,4 +59,4 @@ export class SdkBackend implements AgentBackend {
     onTerminalInput:()=>()=>{},setFooter:()=>{},setHeader:()=>{},pasteToEditor:()=>{},setEditorText:()=>{},getEditorText:()=>'',addAutocompleteProvider:()=>{},setEditorComponent:()=>{},custom:async()=>{throw Object.assign(new Error('Custom extension components are unsupported'),{code:'EXTENSION_CUSTOM_UI_UNSUPPORTED'})}
   } as unknown as ExtensionUIContext}
 }
-export const createSdkBackend=(agentId:string,cwd:string,sessionFile?:string)=>SdkBackend.create(agentId,cwd,sessionFile);
+export const createSdkBackend=(agentId:string,cwd:string,sessionFile?:string,profile:AgentProfile='default',collabBridge?:CollabToolBridge)=>SdkBackend.create(agentId,cwd,sessionFile,profile,collabBridge);

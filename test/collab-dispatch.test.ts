@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {MetadataStore} from '../src/metadata-store.js';
 import {CollabStore} from '../src/collab/store.js';
 import {CollabHub,type BaselineResolver} from '../src/collab/hub.js';
-import {CollabDispatcher} from '../src/collab/dispatcher.js';
+import {CollabDispatcher,toolBriefing} from '../src/collab/dispatcher.js';
 import {RemotePiServer} from '../src/server.js';
 import {WorkspaceStore} from '../src/workspaces.js';
 import {AgentManager,MockBackend} from '../src/agents.js';
@@ -28,7 +28,6 @@ describe('collab dispatcher',()=>{
     dispatcher=new CollabDispatcher(hub,{
       command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},
       agentStatus:agentId=>statuses.get(agentId),
-      baseUrl:()=>'http://127.0.0.1:11318',
       delayMs:0
     });
     dispatcher.start();
@@ -37,7 +36,18 @@ describe('collab dispatcher',()=>{
 
   const session=async()=>hub.createSession({kind:'review',title:'Payment callback review',workspaceId:'ws-1',subject:{type:'commit_range',value:'HEAD~1..HEAD'}},async()=>dir);
 
-  it('wakes the seat with its own token and skips repeats of the same task',async()=>{
+  it('keeps the Pi collaboration extension wake-up free of raw transport credentials and ids',async()=>{
+    const created=await session(),reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-security',agentId:'agent-1'});
+    const message=toolBriefing({session:created,participant:reviewer.participant,task:'file_findings'});
+    expect(message).toContain('collab_get_task');
+    expect(message).toContain(created.cwd);
+    expect(message).not.toContain(created.sessionId);
+    expect(message).not.toContain(reviewer.token);
+    expect(message).not.toContain('Authorization:');
+    expect(message).not.toContain('http://');
+  });
+
+  it('wakes each seat with the extension-only collaboration prompt and skips repeats',async()=>{
     const created=await session();
     const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-security',agentId:'agent-1'});
     hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
@@ -48,12 +58,11 @@ describe('collab dispatcher',()=>{
     expect(sent.map(entry=>entry.agentId).sort()).toEqual(['agent-1','agent-impl']);
     sent.splice(1);
     expect(sent[0]).toMatchObject({agentId:'agent-1',kind:'prompt'});
-    expect(sent[0].message).toContain(reviewer.token);
-    expect(sent[0].message).toContain('task now due: file_findings');
-    expect(sent[0].message).toContain(created.sessionId);
-    // Agents are pushed to, so the briefing must not invite them to poll anything.
-    expect(sent[0].message).toContain('END YOUR TURN');
-    expect(sent[0].message).not.toContain('inbox');
+    expect(sent[0].message).toContain('action: file_findings');
+    expect(sent[0].message).toContain('collab_get_task');
+    expect(sent[0].message).not.toContain(reviewer.token);
+    expect(sent[0].message).not.toContain(created.sessionId);
+    expect(sent[0].message).not.toContain('Authorization:');
     expect(hub.events(created.sessionId).some(event=>event.type==='agent_dispatched')).toBe(true);
 
     // Re-emitting the very same assignment (same task, phase and round) must not prompt the agent twice.
@@ -72,7 +81,7 @@ describe('collab dispatcher',()=>{
     await hub.submitFindings(a.participant,{clientRequestId:rid(),baselineId,findings:[{title:'First collector correctness issue',severity:'major',category:'correctness',location:{path:'src/a.ts',startLine:1},evidence:'The implementation at line 1 demonstrably violates the required behavior.'}],reviewComplete:true});
     await hub.submitFindings(b.participant,{clientRequestId:rid(),baselineId,findings:[{title:'Second collector correctness issue',severity:'major',category:'correctness',location:{path:'src/b.ts',startLine:2},evidence:'The implementation at line 2 demonstrably violates the required behavior.'}],reviewComplete:true});
     await dispatcher.drain();
-    expect(sent.filter(entry=>entry.message.includes('validate_issues')).map(entry=>entry.agentId).sort()).toEqual(['agent-A','agent-B']);
+    expect(sent.filter(entry=>entry.message.includes('action: validate_issues')).map(entry=>entry.agentId).sort()).toEqual(['agent-A','agent-B']);
     expect(sent.some(entry=>entry.agentId==='agent-C'&&entry.message.includes('validate_issues'))).toBe(false);
   });
 
@@ -87,9 +96,9 @@ describe('collab dispatcher',()=>{
     await hub.submitFindings(reviewer.participant,{clientRequestId:rid(),baselineId:(hub.digest(reviewer.participant) as any).baseline.baselineId,findings:[],reviewComplete:true});
     await dispatcher.drain();
     const closing=sent.at(-1)!;
-    expect(closing.message).toContain('is finished');
-    expect(closing.message).toContain('verdict: approved');
-    expect(closing.message).toContain('END YOUR TURN');
+    expect(closing.message).toContain('finished');
+    expect(closing.message).toContain('Result: approved');
+    expect(closing.message).not.toContain('token');
     // The credential the hub was holding for the managed agent is dropped once the note is delivered.
     expect(store.getDispatchToken(reviewer.participant.participantId)).toBeUndefined();
   });
@@ -109,7 +118,7 @@ describe('collab dispatcher',()=>{
 
   it('records a failure instead of dropping the task when the agent cannot be reached',async()=>{
     const created=await session();
-    dispatcher=new CollabDispatcher(hub,{command:async()=>{throw Error('Agent is not running')},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    dispatcher=new CollabDispatcher(hub,{command:async()=>{throw Error('Agent is not running')},agentStatus:()=>undefined,delayMs:0});
     dispatcher.start();
     hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-dead'});
     hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
@@ -128,7 +137,7 @@ describe('collab dispatcher',()=>{
     await hub.openRound(created.sessionId);
     expect(sent).toHaveLength(0);
 
-    const restarted=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    const restarted=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,delayMs:0});
     restarted.start();
     await restarted.drain();
     await restarted.stop();
@@ -148,7 +157,7 @@ describe('collab dispatcher',()=>{
 
     // Both agents must be told the session is over: retiring the whole session's tokens on the first delivery
     // used to leave the second one without a credential, so its closing note was silently dropped.
-    const closing=sent.filter(entry=>entry.message.includes('is finished'));
+    const closing=sent.filter(entry=>entry.message.includes('collaboration is finished'));
     expect(closing.map(entry=>entry.agentId).sort()).toEqual(['agent-1','agent-2','agent-impl']);
     expect(store.getDispatchToken(first.participant.participantId)).toBeUndefined();
     expect(store.getDispatchToken(second.participant.participantId)).toBeUndefined();
@@ -166,15 +175,15 @@ describe('collab dispatcher',()=>{
     expect(store.getSession(created.sessionId).status).toBe('finished');
     expect(sent).toHaveLength(0);
 
-    const restarted=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    const restarted=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,delayMs:0});
     restarted.start();
     await restarted.drain();
     await restarted.stop();
-    expect(sent.at(-1)?.message).toContain('is finished');
+    expect(sent.at(-1)?.message).toContain('finished');
 
-    // A delivered note is acked, so a later restart must not re-fire it (and must not log NO_DISPATCH_TOKEN).
+    // A delivered note is acked, so a later restart must not re-fire it.
     sent.length=0;
-    const again=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    const again=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,delayMs:0});
     again.start();
     await again.drain();
     await again.stop();
@@ -187,7 +196,7 @@ describe('collab dispatcher',()=>{
     await dispatcher.stop();
     let failing=true;
     const flaky=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{if(failing)throw Error('Agent is not running');sent.push({agentId,kind,message})},
-      agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+      agentStatus:()=>undefined,delayMs:0});
     flaky.start();
     const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-1'});
     hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
@@ -201,17 +210,17 @@ describe('collab dispatcher',()=>{
     expect(store.getDispatchToken(reviewer.participant.participantId)).toBeTruthy();
 
     failing=false;
-    const restarted=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    const restarted=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,delayMs:0});
     restarted.start();
     await restarted.drain();
     await restarted.stop();
-    expect(sent.at(-1)?.message).toContain('is finished');
+    expect(sent.at(-1)?.message).toContain('finished');
     expect(store.getDispatchToken(reviewer.participant.participantId)).toBeUndefined();
   });
 
   it('rebinds a seat whose agent never answered and re-delivers the task it already had',async()=>{
     const created=await hub.createSession({kind:'review',title:'Payment callback review',workspaceId:'ws-1',subject:{type:'commit_range',value:'HEAD~1..HEAD'},policy:{implementationFirst:true}},async()=>dir);
-    const failing=new CollabDispatcher(hub,{command:async()=>{throw Error('Agent is not running')},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    const failing=new CollabDispatcher(hub,{command:async()=>{throw Error('Agent is not running')},agentStatus:()=>undefined,delayMs:0});
     await dispatcher.stop();
     failing.start();
     const impl=hub.addParticipant(created.sessionId,{role:'implementer',displayName:'dev',agentId:'agent-dead'});
@@ -222,15 +231,15 @@ describe('collab dispatcher',()=>{
     expect(sent).toHaveLength(0);
 
     // The queued task survives the failed delivery, so handing the seat to a live agent hands over the work too.
-    dispatcher=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,baseUrl:()=>'http://127.0.0.1:11318',delayMs:0});
+    dispatcher=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,delayMs:0});
     dispatcher.start();
     const rebound=hub.rebindParticipant(created.sessionId,impl.participant.participantId,{agentId:'agent-dev'});
     await dispatcher.drain();
     expect(rebound.participant.agentId).toBe('agent-dev');
     expect(sent).toHaveLength(1);
     expect(sent[0].agentId).toBe('agent-dev');
-    expect(sent[0].message).toContain('task now due: implement');
-    expect(sent[0].message).toContain(rebound.token);        // the rotated token, not the one handed out at registration
+    expect(sent[0].message).toContain('action: implement');
+    expect(sent[0].message).not.toContain(rebound.token);
     expect(store.findParticipantByToken(impl.token)).toBeUndefined();
   });
 
@@ -248,8 +257,8 @@ describe('collab dispatcher',()=>{
     await dispatcher.drain();
     const replacement=sent.filter(entry=>entry.agentId==='agent-2');
     expect(replacement).toHaveLength(1);
-    expect(replacement[0].message).toContain('task now due: file_findings');
-    expect(replacement[0].message).toContain(rebound.token);
+    expect(replacement[0].message).toContain('action: file_findings');
+    expect(replacement[0].message).not.toContain(rebound.token);
   });
 
   it('raises the alarm quickly when a queued task never reaches its agent',async()=>{
@@ -285,15 +294,18 @@ describe('collab dispatcher',()=>{
     expect(timed.checkStalls()[0]?.stalled?.waitingOn).toEqual([reviewer.participantId]);
   });
 
-  it('retires the queue entry once the agent has been told, so a restart does not repeat itself',async()=>{
+  it('retires the durable queue entry only when the extension actually collects the task',async()=>{
     const created=await session();
     const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-reviewer'});
-    hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
+    const implementer=hub.addParticipant(created.sessionId,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
     await hub.openRound(created.sessionId);
     await dispatcher.drain();
     expect(sent).toHaveLength(2);
-    // Nobody acks for itself any more, so an item that stays pending means "the wake-up never landed".
+    // command() may only have queued a follow-up, so dispatch acceptance is not yet durable delivery.
+    expect(store.listInbox(reviewer.participant.participantId)).toHaveLength(1);
+    hub.claimTaskForAgent('agent-reviewer');hub.claimTaskForAgent('agent-impl');
     expect(store.listInbox(reviewer.participant.participantId)).toHaveLength(0);
+    expect(store.listInbox(implementer.participant.participantId)).toHaveLength(0);
     expect(hub.participantsForHuman(created.sessionId).every(entry=>entry.pendingTasks===0)).toBe(true);
   });
 });
@@ -318,21 +330,23 @@ describe('collaboration wiring over HTTP',()=>{
     };
 
     const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
-    const agent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id})).data;
+    const agent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data;
+    const implementerAgent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data;
     const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Managed dispatch review',workspaceId:workspace.id,subject:{type:'free',value:'everything'}})).data.sessionId;
     const managed=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-managed',agentId:agent.agentId})).data;
     expect(managed.participantToken).toMatch(/^cpt_/);
-    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:'agent-impl'})).data;
+    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:implementerAgent.agentId})).data;
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
 
     // The managed reviewer must have been prompted by the hub, with a usable participant token.
     const prompt=await waitFor(async()=>{
       const messages=await agents.messages(agent.agentId) as any[];
-      return messages.map(entry=>String(entry.content??'')).find(text=>text.includes('pi2web collaboration hub'));
+      return messages.map(entry=>String(entry.content??'')).find(text=>text.includes('[pi2web collaboration]'));
     });
-    expect(prompt).toContain(managed.participantToken);
-    expect(prompt).toContain('task now due: file_findings');
-    expect(prompt).toContain(`${base}/api/v1/collab/sessions/${sessionId}`);
+    expect(prompt).toContain('action: file_findings');
+    expect(prompt).toContain('collab_get_task');
+    expect(prompt).not.toContain(managed.participantToken);
+    expect(prompt).not.toContain(sessionId);
 
     const escalation=await call('POST',`/api/v1/collab/sessions/${sessionId}/escalations`,{clientRequestId:rid(),kind:'other',
       summary:'The reviewer and the implementer cannot agree on the callback verification requirement.',

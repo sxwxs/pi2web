@@ -44,9 +44,11 @@ describe('collab hub',()=>{
     return {session,r1:r1.participant,r2:r2.participant,impl:impl.participant,tokens:{r1:r1.token,r2:r2.token,impl:impl.token}};
   };
 
-  it('rejects findings written against an outdated baseline and reports the current one',async()=>{
+  it('rejects findings written against an outdated or changed baseline',async()=>{
     const {r1}=await setup();
     await expect(fileFindings(r1,[finding()],true,'b-stale')).rejects.toMatchObject({code:'STALE_BASELINE'});
+    commit='commit-changed-after-review-start';
+    await expect(fileFindings(r1,[finding()])).rejects.toMatchObject({code:'STALE_BASELINE'});
   });
 
   it('replays an identical submission instead of duplicating issues',async()=>{
@@ -104,11 +106,12 @@ describe('collab hub',()=>{
     expect(hub.digest(exhausted).you).toMatchObject({state:'budget_exhausted'});
   });
 
-  it('refuses to seat the same agent twice and requires an agentId for managed participants',async()=>{
-    const session=await newSession();
+  it('gives each local agent only one active seat globally and requires an agentId',async()=>{
+    const session=await newSession(),other=await newSession();
     hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r1',agentId:'agent-1'});
     expect(()=>hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r2',agentId:'agent-1'})).toThrow(/already registered/);
-    expect(()=>hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r3',binding:{type:'managed'}})).toThrow(ValidationError);
+    expect(()=>hub.addParticipant(other.sessionId,{role:'reviewer',displayName:'r3',agentId:'agent-1'})).toThrow(/active seat/);
+    expect(()=>hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r4',binding:{type:'managed'}})).toThrow(ValidationError);
   });
 
   it('requires a reviewer before a round opens and rejects a second open',async()=>{
@@ -117,6 +120,12 @@ describe('collab hub',()=>{
     addParticipant(session.sessionId,'reviewer','r1');
     await hub.openRound(session.sessionId);
     await expect(hub.openRound(session.sessionId)).rejects.toThrow(/Round already open/);
+  });
+
+  it('allows exactly one implementer to own a shared-workspace implementation wave',async()=>{
+    const session=await newSession({implementationFirst:true});
+    addParticipant(session.sessionId,'reviewer','r1');addParticipant(session.sessionId,'implementer','dev-a');addParticipant(session.sessionId,'implementer','dev-b');
+    await expect(hub.openRound(session.sessionId)).rejects.toThrow(/exactly one active implementer/);
   });
 
   it('authenticates only a known participant token',async()=>{
@@ -270,6 +279,63 @@ describe('collab hub',()=>{
     await hub.submitFindings(store.getParticipant(r2.participantId),{clientRequestId:rid(),baselineId,findings:[],rechecks:[],reviewComplete:true});
     expect(hub.getSession(session.sessionId)).toMatchObject({phase:'finished',status:'finished',round:2,outcome:{verdict:'approved'}});
     expect(store.getIssue(issueId).status).toBe('resolved');
+  });
+
+  it('reports one round section per recheck wave with what was fixed and what is new',async()=>{
+    const {session,r1,r2}=await setup();
+    const submitted=await fileFindings(r1,[finding({externalId:'sec-1'}),finding({externalId:'sec-2',title:'Callback replay window is unbounded',severity:'major'})]);
+    await fileFindings(r2,[]);
+    const [fixed,lingering]=submitted.accepted.map((entry:{issueId:string})=>entry.issueId);
+    commit='commit-2';
+
+    await hub.startRecheck(session.sessionId,{mode:'review_only'});
+    const baselineId=store.getBaselineForRound(session.sessionId,2)!.baselineId;
+    await hub.submitFindings(store.getParticipant(r1.participantId),{clientRequestId:rid(),baselineId,
+      findings:[finding({title:'Refund path now double-credits on retry'})],
+      rechecks:[{issueId:fixed,outcome:'resolved',rationale:'The callback now verifies the merchant HMAC before it marks an order paid.'},
+        {issueId:lingering,outcome:'still_present',rationale:'Timestamps are still accepted without an expiry window, so replays keep working.'}],
+      reviewComplete:true});
+    await hub.submitFindings(store.getParticipant(r2.participantId),{clientRequestId:rid(),baselineId,findings:[],rechecks:[],reviewComplete:true});
+
+    const rounds=hub.reviewRounds(session.sessionId);
+    expect(rounds).toHaveLength(2);
+    expect(rounds[0]).toMatchObject({round:1,mode:'initial',status:'finished',verdict:'changes_required',
+      rechecks:[],counts:{carried:0,resolved:0,stillPresent:0,pending:0,newIssues:2}});
+    // The first round's own findings carry their later verdicts, so a fixed issue does not read as "never a problem".
+    expect(rounds[0].newIssues.find(entry=>entry.issueId===fixed)!.rechecks).toEqual([expect.objectContaining({round:2,outcome:'resolved'})]);
+    expect(rounds[1]).toMatchObject({round:2,mode:'review_only',status:'finished',
+      counts:{carried:2,resolved:1,stillPresent:1,pending:0,newIssues:1}});
+    expect(rounds[1].rechecks).toEqual(expect.arrayContaining([
+      expect.objectContaining({issueId:fixed,outcome:'resolved',foundInRound:1,reviewerId:r1.participantId}),
+      expect.objectContaining({issueId:lingering,outcome:'still_present',foundInRound:1})]));
+    expect(rounds[1].newIssues[0]).toMatchObject({title:'Refund path now double-credits on retry',foundInRound:2});
+    expect(rounds[1].baseline).toMatchObject({round:2,commit:'commit-2'});
+  });
+
+  it('marks a confirmed finding nobody has re-verified yet as pending in the live round',async()=>{
+    const {session,r1,r2}=await setup();
+    const submitted=await fileFindings(r1,[finding(),finding({title:'Refund audit log drops the operator id'})]);
+    await fileFindings(r2,[]);
+    // A finding closed without any recheck message is what the retired respond/adjudicate flow left behind in
+    // existing databases; it must not resurface as an unanswered recheck in every later round.
+    store.updateIssue(submitted.accepted[1].issueId,{status:'resolved'});
+    await hub.startRecheck(session.sessionId,{mode:'review_only'});
+    const rounds=hub.reviewRounds(session.sessionId);
+    expect(rounds[1]).toMatchObject({round:2,status:'in_progress',phase:'collecting',counts:{carried:1,pending:1,resolved:0,newIssues:0}});
+    expect(rounds[1].rechecks[0]).toMatchObject({issueId:submitted.accepted[0].issueId,outcome:'pending'});
+  });
+
+  it('keeps reading round markers out of a timeline longer than one event page',async()=>{
+    const {session,r1,r2}=await setup();
+    await fileFindings(r1,[finding()]);
+    await fileFindings(r2,[]);
+    await hub.startRecheck(session.sessionId,{mode:'review_only'});
+    // listEvents() caps a page at 2000 rows, and the reopen/finish markers of the newest round sit at the end.
+    for(let index=0;index<2100;index++)store.appendEvent(session.sessionId,'noise',{index});
+    const rounds=hub.reviewRounds(session.sessionId);
+    expect(rounds[0]).toMatchObject({verdict:'changes_required'});
+    expect(rounds[1]).toMatchObject({round:2,mode:'review_only'});
+    expect(rounds[1].startedAt).toBeTruthy();
   });
 
 });

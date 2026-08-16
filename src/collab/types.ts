@@ -19,7 +19,7 @@ export const ROLES:Role[]=['implementer','reviewer','moderator','human'];
  * code, and a `human`-role participant token would hold nominate/vote/score capabilities while
  * `scoringPanel()` never waits for it — its submissions would move a tally nobody is waiting on.
  */
-export const REGISTRABLE_ROLES:Role[]=['implementer','reviewer','moderator'];
+export const REGISTRABLE_ROLES:Role[]=['implementer','reviewer'];
 /** Permissions are capability-based so symmetric (reverse) review needs no second code path. */
 export type Capability='file_finding'|'ready'|'withdraw'|'nominate'|'vote'|'score'|'debate'|'clarify'|'merge'|'escalate';
 export const CAPABILITIES:Record<Role,Capability[]>={
@@ -69,17 +69,15 @@ export type CollabPolicy={
   consensusReview:boolean;
   /** Number of supporter/rejecter discussion cycles before unresolved issue votes go to a human. */
   maxConsensusRounds:number;
-  /** Build-then-review: the session opens in `implementing` and the reviewers are only called once the code is ready. */
+  /** Build-then-review: the session opens in `implementing` and the reviewers are only called once the code is explicitly submitted as ready. */
   implementationFirst:boolean;
-  /** With implementationFirst, a managed implementer going idle after its `implement` task counts as "ready". */
-  autoReviewOnAgentIdle:boolean;
   tokenBudgetPerParticipant:number;
   scoring:ScoringPolicy;
 };
 /** approvalThreshold is "two thirds" with a little headroom, so an exact 2-of-3 vote passes. */
 export const DEFAULT_POLICY:CollabPolicy={
   maxIssueRounds:3,maxTotalRounds:6,overdueWarningSec:1800,autoEscalateOnDeadlock:true,blindFindings:true,
-  consensusReview:false,maxConsensusRounds:3,implementationFirst:false,autoReviewOnAgentIdle:true,
+  consensusReview:false,maxConsensusRounds:3,implementationFirst:false,
   tokenBudgetPerParticipant:600_000,
   scoring:{minCriteria:4,maxCriteria:8,approvalThreshold:0.66,maxVotingRounds:3,scale:{min:0,max:10,step:0.5},convergenceRange:2,maxDebateRounds:2,blindScoring:true}
 };
@@ -127,7 +125,7 @@ export type Vote={voteId:string;sessionId:string;criterionId:string;participantI
 export type Score={scoreId:string;sessionId:string;criterionId:string;participantId:string;round:number;score:number;rationale:string;evidence:unknown[];confidence?:number;changeReason?:string;createdAt:string};
 export type DebateArgument={argumentId:string;debateId:string;participantId:string;stance:DebateStance;argument:string;evidence:unknown[];respondingTo?:string;createdAt:string};
 export type Debate={debateId:string;sessionId:string;criterionId:string;round:number;status:'open'|'closed';arguments:DebateArgument[];createdAt:string};
-/** A queued wake-up. It is acked as soon as the hub has told the agent about it. */
+/** A durable wake-up. Normal work is acked only when the inline extension actually collects it. */
 export type InboxItem={itemId:string;sessionId:string;participantId:string;type:string;payload:Record<string,unknown>;createdAt:string;ackedAt?:string};
 
 /** Error codes returned to agents. Keep them stable: agents branch on these strings. */

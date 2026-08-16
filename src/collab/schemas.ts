@@ -105,7 +105,6 @@ export const policyPatch=obj({
   consensusReview:optional(bool()),
   maxConsensusRounds:optional(num({integer:true,min:1,max:10})),
   implementationFirst:optional(bool()),
-  autoReviewOnAgentIdle:optional(bool()),
   tokenBudgetPerParticipant:optional(num({integer:true,min:1000,max:100_000_000})),
   scoring:optional(scoringPolicyPatch)
 });
@@ -223,6 +222,19 @@ export const debateArgumentRequest=obj({
   argument:str({min:20,max:4000}),
   evidence:withDefault(arr(evidenceItem(),{max:20}),()=>[]),
   respondingTo:optional(str({max:100})),
+  usage:usage()
+});
+
+/** The Pi tool submits every debate position owed by one reviewer as one logical operation. */
+export const debateArgumentsRequest=obj({
+  clientRequestId:clientRequestId(),
+  arguments:arr(obj({
+    debateId:str({min:1,max:100}),
+    stance:oneOf(DEBATE_STANCES),
+    argument:str({min:20,max:4000}),
+    evidence:withDefault(arr(evidenceItem(),{max:20}),()=>[]),
+    respondingTo:optional(str({max:100}))
+  }),{min:1,max:40}),
   usage:usage()
 });
 

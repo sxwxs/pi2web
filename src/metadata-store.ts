@@ -36,6 +36,7 @@ export class MetadataStore {
         session_name TEXT,
         cwd TEXT NOT NULL,
         status TEXT NOT NULL,
+        profile TEXT NOT NULL DEFAULT 'default',
         created_at INTEGER NOT NULL,
         last_active_at INTEGER NOT NULL,
         archived_at INTEGER,
@@ -68,6 +69,9 @@ export class MetadataStore {
       CREATE INDEX IF NOT EXISTS sessions_workspace_active_recent ON sessions(workspace_id,last_active_at DESC,session_id DESC) WHERE archived_at IS NULL;
       CREATE INDEX IF NOT EXISTS sessions_cwd_active_recent ON sessions(cwd,last_active_at DESC,session_id DESC) WHERE archived_at IS NULL;
     `);
+    // Additive migration: old normal Agents stay normal after an upgrade.
+    const agentColumns=db.prepare('PRAGMA table_info(agents)').all() as {name:string}[];
+    if(!agentColumns.some(column=>column.name==='profile'))db.exec("ALTER TABLE agents ADD COLUMN profile TEXT NOT NULL DEFAULT 'default'");
     // Only stamp the initial version: later migrations (collaboration tables) raise it and must not be reset on restart.
     if(Number(db.pragma('user_version',{simple:true}))<1)db.pragma('user_version = 1');
     this.archivedAgents=new Set((db.prepare('SELECT id FROM agents WHERE archived_at IS NOT NULL').all() as {id:string}[]).map(row=>row.id));
@@ -79,8 +83,8 @@ export class MetadataStore {
   setSetting(key:string,value:unknown){this.database.prepare('INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').run(key,JSON.stringify(value),Date.now())}
   listWorkspaces():Workspace[]{return (this.database.prepare('SELECT id,label,root_path,created_at FROM workspaces ORDER BY created_at,id').all() as any[]).map(row=>({id:row.id,label:row.label,rootPath:row.root_path,createdAt:new Date(row.created_at).toISOString()}))}
   saveWorkspace(workspace:Workspace){this.database.prepare(`INSERT INTO workspaces(id,label,root_path,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label,root_path=excluded.root_path`).run(workspace.id,workspace.label,workspace.rootPath,asTime(workspace.createdAt))}
-  listAgents():AgentRecord[]{return (this.database.prepare('SELECT * FROM agents WHERE archived_at IS NULL ORDER BY last_active_at DESC,id DESC').all() as any[]).map(row=>({agentId:row.id,workspaceId:row.workspace_id,sessionId:row.session_id,sessionFile:row.session_file??undefined,sessionName:row.session_name??undefined,cwd:row.cwd,status:row.status,createdAt:new Date(row.created_at).toISOString(),lastActiveAt:new Date(row.last_active_at).toISOString()}))}
-  private writeAgent(record:AgentRecord,archivedAt:number|null){this.database.prepare(`INSERT INTO agents(id,workspace_id,session_id,session_file,session_name,cwd,status,created_at,last_active_at,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id,session_id=excluded.session_id,session_file=excluded.session_file,session_name=excluded.session_name,cwd=excluded.cwd,status=excluded.status,last_active_at=excluded.last_active_at,archived_at=excluded.archived_at`).run(record.agentId,record.workspaceId,record.sessionId,record.sessionFile??null,record.sessionName??null,record.cwd,record.status,asTime(record.createdAt),asTime(record.lastActiveAt),archivedAt)}
+  listAgents():AgentRecord[]{return (this.database.prepare('SELECT * FROM agents WHERE archived_at IS NULL ORDER BY last_active_at DESC,id DESC').all() as any[]).map(row=>({agentId:row.id,workspaceId:row.workspace_id,sessionId:row.session_id,sessionFile:row.session_file??undefined,sessionName:row.session_name??undefined,cwd:row.cwd,status:row.status,profile:row.profile==='collab'?'collab':'default',createdAt:new Date(row.created_at).toISOString(),lastActiveAt:new Date(row.last_active_at).toISOString()}))}
+  private writeAgent(record:AgentRecord,archivedAt:number|null){this.database.prepare(`INSERT INTO agents(id,workspace_id,session_id,session_file,session_name,cwd,status,profile,created_at,last_active_at,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id,session_id=excluded.session_id,session_file=excluded.session_file,session_name=excluded.session_name,cwd=excluded.cwd,status=excluded.status,profile=excluded.profile,last_active_at=excluded.last_active_at,archived_at=excluded.archived_at`).run(record.agentId,record.workspaceId,record.sessionId,record.sessionFile??null,record.sessionName??null,record.cwd,record.status,record.profile??'default',asTime(record.createdAt),asTime(record.lastActiveAt),archivedAt)}
   saveAgent(record:AgentRecord){if(this.archivedAgents.has(record.agentId))return;this.pendingAgents.delete(record.agentId);this.writeAgent(record,null)}
   scheduleAgent(record:AgentRecord){if(this.archivedAgents.has(record.agentId))return;this.pendingAgents.set(record.agentId,{...record});if(!this.flushTimer)this.flushTimer=setTimeout(()=>this.flush(),1000)}
   archiveAgent(record:AgentRecord){this.archivedAgents.add(record.agentId);this.pendingAgents.delete(record.agentId);this.writeAgent(record,Date.now())}

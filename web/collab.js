@@ -87,15 +87,16 @@
   }
   async function loadDetail(sessionId) {
     const session = await api(`/api/v1/collab/sessions/${sessionId}`);
-    const [issues, events, escalations, criteria, consensus] = await Promise.all([
+    const [issues, events, escalations, criteria, consensus, rounds] = await Promise.all([
       api(`/api/v1/collab/sessions/${sessionId}/issues`).catch(() => []),
       // `tail` asks for the newest events; paging from sequence 0 would freeze the timeline after 200 events.
       api(`/api/v1/collab/sessions/${sessionId}/events?tail=200`).catch(() => []),
       api(`/api/v1/collab/escalations?sessionId=${sessionId}`).catch(() => []),
       session.kind === 'scoring' ? api(`/api/v1/collab/sessions/${sessionId}/criteria`).catch(() => []) : Promise.resolve([]),
-      session.kind === 'review' ? api(`/api/v1/collab/sessions/${sessionId}/review-consensus`).catch(() => ({issueVotes:[],mergeProposals:[],discussions:[],issueConsensus:[]})) : Promise.resolve(null)
+      session.kind === 'review' ? api(`/api/v1/collab/sessions/${sessionId}/review-consensus`).catch(() => ({issueVotes:[],mergeProposals:[],discussions:[],issueConsensus:[]})) : Promise.resolve(null),
+      session.kind === 'review' ? api(`/api/v1/collab/sessions/${sessionId}/review-rounds`).catch(() => []) : Promise.resolve([])
     ]);
-    return {session, issues, events, escalations, criteria, consensus};
+    return {session, issues, events, escalations, criteria, consensus, rounds};
   }
   const select = async sessionId => {
     state.sessionId = sessionId; state.lastToken = null;
@@ -143,6 +144,45 @@
         ${implementers.length?'':'<small class="muted">请先在下方参与者区域新增一个 implementer Agent。</small>'}</div>
     </div>`;
   };
+  /** 每一轮评审 / 复核一个 section：老问题这轮到底修没修好，以及这轮新冒出来的问题。 */
+  const RECHECK_OUTCOME = {resolved: {label: '已修复', tone: 'green'}, still_present: {label: '仍然存在', tone: 'red'}, pending: {label: '本轮未复核', tone: 'yellow'}};
+  const ROUND_MODE = {initial: '初次评审', review_only: '直接复核当前代码', fix_then_review: '开发修复 → 复核'};
+  const issueCell = (session, entry) => `<b title="${esc(entry.issueId)}">#${esc(entry.number || '?')}</b> ${esc(entry.title)}<br>
+    <small class="muted">${esc(entry.location?.path || '')}${entry.location?.startLine ? `:${entry.location.startLine}` : ''} · ${esc(participantName(session, entry.reporterId))}</small>`;
+  const severityPill = severity => `<span class="pill ${['blocker','critical'].includes(severity) ? 'red' : severity === 'major' ? 'yellow' : ''}">${esc(severity)}</span>`;
+  function roundSection(session, round, latest) {
+    const counts = round.counts, mode = ROUND_MODE[round.mode] || round.mode, running = round.status !== 'finished';
+    const heading = round.round === 1 ? '第 1 轮 · 初次评审' : `第 ${round.round} 轮 · 复核`;
+    const verdict = round.verdict ? `<span class="pill ${round.verdict === 'approved' ? 'green' : round.verdict === 'changes_required' ? 'red' : 'yellow'}">${esc(round.verdict)}</span>` : '';
+    const rechecks = round.rechecks.length ? `<table><thead><tr><th>此前确认的问题</th><th>严重程度</th><th>本轮结论</th><th>复核人 / 理由</th></tr></thead><tbody>
+      ${round.rechecks.map(entry => {const outcome = RECHECK_OUTCOME[entry.outcome] || {label: entry.outcome, tone: ''};
+        return `<tr><td>${issueCell(session, entry)}<br><small class="muted">首次发现于第 ${esc(entry.foundInRound)} 轮</small></td>
+          <td>${severityPill(entry.severity)}</td>
+          <td><span class="pill ${outcome.tone}">${esc(outcome.label)}</span></td>
+          <td>${esc(participantName(session, entry.reviewerId))}${entry.rationale ? `<br><small>${esc(entry.rationale)}</small>` : entry.outcome === 'pending' ? '<br><small class="muted">尚未回报复核结果</small>' : ''}</td></tr>`}).join('')}
+      </tbody></table>` : `<p class="muted">${round.round === 1 ? '首轮没有需要复核的历史问题。' : '上一轮没有留下需要复核的确认问题。'}</p>`;
+    const found = round.newIssues.length ? `<table><thead><tr><th>本轮新发现</th><th>严重程度</th><th>当前状态</th><th>后续复核</th></tr></thead><tbody>
+      ${round.newIssues.map(entry => `<tr><td>${issueCell(session, entry)}</td><td>${severityPill(entry.severity)}</td><td>${esc(entry.status)}</td>
+        <td>${entry.rechecks.length ? entry.rechecks.map(item => {const outcome = RECHECK_OUTCOME[item.outcome] || {label: item.outcome, tone: ''};
+          return `<span class="pill ${outcome.tone}">第 ${esc(item.round)} 轮 ${esc(outcome.label)}</span>`}).join(' ') : '<span class="muted">—</span>'}</td></tr>`).join('')}
+      </tbody></table>` : `<p class="muted">${running ? '本轮暂时还没有新问题被提交。' : '本轮没有发现新问题。'}</p>`;
+    return `<details class="round-section"${latest ? ' open' : ''}>
+      <summary><b>${esc(heading)}</b> <span class="pill">${esc(mode)}</span>
+        <span class="pill ${running ? 'blue' : 'green'}">${running ? `进行中 · ${esc(round.phase)}` : '已完成'}</span>${verdict}
+        <span class="round-stats"><span class="pill green">修好 ${counts.resolved}</span><span class="pill red">仍存在 ${counts.stillPresent}</span>${counts.pending ? `<span class="pill yellow">未复核 ${counts.pending}</span>` : ''}<span class="pill ${counts.newIssues ? 'yellow' : ''}">新问题 ${counts.newIssues}</span></span>
+      </summary>
+      <div class="muted" style="margin:6px 0">${round.startedAt ? `开始 ${esc(round.startedAt.slice(0, 19).replace('T', ' '))}` : ''}${round.finishedAt ? ` · 结束 ${esc(round.finishedAt.slice(0, 19).replace('T', ' '))}` : ''}${round.baseline ? ` · baseline ${esc(round.baseline.commit ? round.baseline.commit.slice(0, 10) : round.baseline.baselineId.slice(0, 12))}${round.baseline.dirtyHash ? '（含未提交改动）' : ''}` : ''}</div>
+      ${rechecks}${found}
+    </details>`;
+  }
+  /** 复核是叠加的：每多一轮就多一个 section，最新的一轮排在最上面并默认展开。 */
+  function reviewRoundsCard(session, rounds) {
+    if (session.kind !== 'review' || !rounds.length) return '';
+    const last = rounds[rounds.length - 1];
+    return `<div class="card"><h3>各轮评审 / 复核结果（${rounds.length} 轮）<span class="grow"></span>
+      <span class="pill">最新一轮：修好 ${last.counts.resolved} · 仍存在 ${last.counts.stillPresent} · 新问题 ${last.counts.newIssues}</span></h3>
+      ${[...rounds].reverse().map((round, index) => roundSection(session, round, index === 0)).join('')}</div>`;
+  }
   function renderSessions() {
     $('escalationBadge').innerHTML = state.escalations.length
       ? `<span class="pill red">${state.escalations.length} 项待人工裁定</span>` : '<span class="muted">无待裁定项</span>';
@@ -171,7 +211,8 @@
   /** Local agents that may still take a seat: the hub rejects the same agentId twice in one session. */
   const availableAgents = session => {
     const taken = new Set((session.participants || []).map(participant => participant.agentId).filter(Boolean));
-    return state.agents.filter(agent => !taken.has(agent.agentId));
+    // Collaboration tools are loaded only in dedicated profile=collab Pi sessions; never turn a normal session into one implicitly.
+    return state.agents.filter(agent => agent.profile === 'collab' && !taken.has(agent.agentId));
   };
   /** innerHTML 重建会清空正在填写的表单；刷新由每条 hub 事件触发，所以必须显式保存草稿。 */
   const PARTICIPANT_FIELDS = ['pRole', 'pAgent', 'pNewModel'];
@@ -292,7 +333,7 @@
   function renderDetail() {
     if (!state.detail) {$('detail').innerHTML = '<p class="muted">选择左侧的协作会话，或先创建一个。</p>'; return}
     const draft = readParticipantDraft();
-    const {session, issues, events, escalations, criteria, consensus} = state.detail;
+    const {session, issues, events, escalations, criteria, consensus, rounds} = state.detail;
     const progress = session.progress || {};
     const pending = escalations.filter(entry => entry.status === 'pending'), waitingDetails = waitingAgentDetails(session), crossVoteIds = progress.pendingCrossVotes || [], allRunning = waitingDetails.length > 0 && waitingDetails.every(entry => entry.activelyRunning), retryableWaiting = waitingDetails.filter(entry => entry.retryable);
     const displayedVerdict=session.kind==='review'?(consensus?.summary?.verdict||session.outcome?.verdict):session.outcome?.verdict;
@@ -320,6 +361,7 @@
 
       ${reviewFlowChart(session)}
       ${recheckCard(session, issues)}
+      ${reviewRoundsCard(session, rounds || [])}
 
       <div class="card">
         <h3>参与者 <span class="grow"></span></h3>
@@ -335,13 +377,13 @@
             <td>${participant.pendingTasks ? `<span class="pill red">${participant.pendingTasks} 未送达</span>` : '<span class="muted">-</span>'}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">还没有参与者</td></tr>'}
         </tbody></table>
         <form id="participantForm" class="row" style="margin-top:10px">
-          <label>角色<select id="pRole">${session.status === 'finished' && session.kind === 'review' ? '<option value="implementer">开发 implementer</option>' : '<option value="reviewer">评审 reviewer</option><option value="implementer">开发 implementer</option><option value="moderator">协调 moderator</option>'}</select></label>
+          <label>角色<select id="pRole">${session.status === 'finished' && session.kind === 'review' ? '<option value="implementer">开发 implementer</option>' : '<option value="reviewer">评审 reviewer</option><option value="implementer">开发 implementer</option>'}</select></label>
           <label>Agent<select id="pAgent" required><option value="__new__">＋ 新建 Agent</option>${availableAgents(session).map(agent => `<option value="${esc(agent.agentId)}">${esc(agent.sessionName || agent.agentId)}${agent.status ? ` (${esc(agent.status)})` : ''}</option>`).join('')}</select></label>
           <label id="pNewModelWrap" class="participant-config">新 Agent 使用的模型<select id="pNewModel" required>${modelOptionsHtml(session)}</select><small class="field-help">只列出 Pi 当前已配置凭据、在这个项目中实际可用的模型。</small></label>
           <span id="pAgentHint" class="field-help">新 Agent 的名称会根据会话和角色自动生成；模型标注会从实际模型自动填写。</span>
           <button id="participantSubmit" type="submit">新建并加入</button>
         </form>
-        ${state.lastToken ? `<div class="token-box">participantToken（只显示一次；中枢已自存一份，唤醒该 Agent 时会带上它）：<br>${esc(state.lastToken)}</div>` : ''}
+        ${state.lastToken ? `<div class="token-box">participantToken（仅供 HTTP 兼容调用；内置协作 Agent 使用进程内工具，不会接触此 token）：<br>${esc(state.lastToken)}</div>` : ''}
       </div>
 
       ${pending.length ? `<div class="card">
@@ -495,7 +537,7 @@
         displayName = generatedAgentName(session, role);
         createdAgent = await post('/api/v1/agents', {
           workspaceId: session.workspaceId, relativeCwd: relativeCwdFor(session),
-          model: {provider, modelId}, sessionName: displayName
+          model: {provider, modelId}, sessionName: displayName, profile: 'collab'
         });
         agentId = createdAgent.agentId; actualModel = `${provider}/${modelId}`;
       } else {
@@ -522,19 +564,27 @@
       toast(`“${displayName}”已加入；中枢会在有任务时自动唤醒它`);
     });
     for (const button of $('detail').querySelectorAll('.rebind')) button.onclick = guard(async () => {
-      const session = state.detail.session, choices = availableAgents(session);
-      if (!choices.length) throw Error('没有空闲的本机 Agent 可以接手这个座位');
+      const session = state.detail.session, choices = availableAgents(session), participant = session.participants.find(entry => entry.participantId === button.dataset.participant);
       const answer = prompt([
-        '把这个座位交给哪个本机 Agent？输入序号：',
+        '把这个座位交给哪个协作专用 Agent？输入序号：',
+        '0. 新建协作专用 Agent（沿用当前座位的模型；推荐迁移旧 Agent）',
         ...choices.map((agent, index) => `${index + 1}. ${agent.sessionName || agent.agentId}${agent.status ? ` (${agent.status})` : ''}`)
-      ].join('\n'), '');
+      ].join('\n'), choices.length ? '' : '0');
       if (answer === null) return;
-      const picked = choices[Number(answer.trim()) - 1];
+      let picked = choices[Number(answer.trim()) - 1];
+      if (answer.trim() === '0') {
+        const current = state.agents.find(agent => agent.agentId === participant?.agentId);
+        if (!current) throw Error('找不到当前座位的 Agent，无法推断要使用的模型');
+        const capabilities = await agentCapabilities(current.agentId, true), model = capabilities.model;
+        if (!model?.provider || !model?.id) throw Error('当前 Agent 未报告可复用的模型；请先新建协作 Agent 后再改绑');
+        const name = `${participant?.displayName || '协作'} · 专用 Agent`.slice(0, 100);
+        picked = await post('/api/v1/agents', {workspaceId: session.workspaceId, relativeCwd: relativeCwdFor(session), model: {provider: model.provider, modelId: model.id}, sessionName: name, profile: 'collab'});
+      }
       if (!picked) throw Error('序号无效');
       const capabilities = await agentCapabilities(picked.agentId, true), actualModel = modelLabel(capabilities.model);
       await post(`/api/v1/collab/sessions/${sessionId}/participants/${button.dataset.participant}/binding`, {agentId: picked.agentId, ...(actualModel ? {model: actualModel} : {})});
-      state.lastToken = null;
-      toast('已改绑，待办任务会立即推送给新的 Agent（旧 token 已失效）');
+      state.agentCapabilities.delete(picked.agentId); state.lastToken = null;
+      toast('已改绑为协作专用 Agent；待办任务会立即推送（旧 token 已失效）');
     });
     for (const button of $('detail').querySelectorAll('.raise-budget')) button.onclick = guard(async () => {
       const used = Number(button.dataset.used || 0);

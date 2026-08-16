@@ -42,9 +42,18 @@ describe('panel scoring over HTTP',()=>{
 
     const voting=(await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data;
     expect(voting.phase).toBe('voting');
-    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`,undefined,a.participantToken)).data;
-    expect(candidates).toHaveLength(3);
+    const allCriteria=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`,undefined,a.participantToken)).data;
+    const candidates=allCriteria.filter((criterion:any)=>criterion.state==='candidate');
+    expect(candidates).toHaveLength(2);
+    expect(allCriteria.filter((criterion:any)=>criterion.state==='rejected')).toHaveLength(1);
+    expect(candidates.find((criterion:any)=>criterion.name==='security').source.sources).toHaveLength(2);
+    const votingTask=(await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,a.participantToken)).data;
+    expect(votingTask.task).toBe('vote_on_criteria');
+    expect(votingTask.candidates).toEqual(expect.arrayContaining([expect.objectContaining({definition:expect.stringContaining('security')})]));
+    expect(votingTask.yourRequiredCriterionIds).toHaveLength(2);
 
+    const partialVote=await call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),votes:[{criterionId:candidates[0].criterionId,stance:'approve',weight:0.5}]},a.participantToken);
+    expect(partialVote.status).toBe(422);expect(partialVote.error.fieldErrors[0]).toMatchObject({path:'votes',code:'REQUIRED'});
     const vote=(token:string,stances:Record<string,string>)=>call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),
       votes:candidates.map((criterion:any,index:number)=>({criterionId:criterion.criterionId,stance:stances[String(index)],weight:0.5,
         ...(stances[String(index)]==='reject'?{rationale:'Duplicate of another criterion.'}:{})}))},token);
@@ -77,15 +86,17 @@ describe('panel scoring over HTTP',()=>{
     const recused=await argue(impl.participantToken,'raise');
     expect(recused.status).toBe(403);
     expect((await argue(impl.participantToken,'clarify')).status).toBe(201);
-    await argue(a.participantToken,'hold');
-    await argue(b.participantToken,'lower');
+    await server!.collab.submitDebateArguments(a.participant,{clientRequestId:rid(),arguments:[{debateId:debates[0].debateId,stance:'hold',argument:'The reachable unsigned callback justifies retaining the lower score.',evidence}]});
+    await server!.collab.submitDebateArguments(b.participant,{clientRequestId:rid(),arguments:[{debateId:debates[0].debateId,stance:'lower',argument:'The missing replay guard supports lowering the optimistic score.',evidence}]});
     expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.phase).toBe('rescoring');
 
-    const missingReason=await score(a.participantToken,[4,8]);
+    const rescore=(token:string,value:number,changeReason?:string)=>call('POST',`/api/v1/collab/sessions/${sessionId}/scores`,{clientRequestId:rid(),scores:[{
+      criterionId:rubric[0].criterionId,score:value,rationale:'Anchored on the callback handler and its tests.',evidence,...(changeReason?{changeReason}:{})}]},token);
+    const missingReason=await rescore(a.participantToken,4);
     expect(missingReason.status).toBe(422);
     expect(missingReason.error.fieldErrors[0]).toMatchObject({code:'REQUIRED',path:'scores[0].changeReason'});
-    await score(a.participantToken,[4,8],{changeReason:'The retry path is guarded in staging, so the risk is lower than I first assumed.'});
-    await score(b.participantToken,[5,8],{changeReason:'I accept that the retry path is reachable at all, so I lowered my score.'});
+    await rescore(a.participantToken,4,'The retry path is guarded in staging, so the risk is lower than I first assumed.');
+    await rescore(b.participantToken,5,'I accept that the retry path is reachable at all, so I lowered my score.');
 
     const finished=(await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data;
     expect(finished).toMatchObject({phase:'finalized',status:'finished'});
@@ -99,7 +110,7 @@ describe('panel scoring over HTTP',()=>{
     const a=await seat('reviewer','reviewer-a'),b=await seat('reviewer','reviewer-b'),impl=await seat('implementer','implementer');
     for(const token of [a.participantToken,b.participantToken])
       await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security')],nominationsComplete:true},token);
-    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data;
+    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.filter((criterion:any)=>criterion.state==='candidate');
     for(const token of [a.participantToken,b.participantToken])
       await call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),votes:candidates.map((criterion:any)=>({criterionId:criterion.criterionId,stance:'approve',weight:0.5}))},token);
     const criterionId=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.find((criterion:any)=>criterion.state==='approved').criterionId;
@@ -123,8 +134,8 @@ describe('panel scoring over HTTP',()=>{
     const {call,sessionId,seat}=await boot({scoring:{minCriteria:1,maxCriteria:2,convergenceRange:1,maxDebateRounds:0}});
     const a=await seat('reviewer','reviewer-a'),b=await seat('reviewer','reviewer-b');
     for(const token of [a.participantToken,b.participantToken])
-      await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security')],nominationsComplete:true},token);
-    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data;
+      await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security'),nomination('tests')],nominationsComplete:true},token);
+    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.filter((criterion:any)=>criterion.state==='candidate');
     for(const token of [a.participantToken,b.participantToken])
       await call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),votes:candidates.map((criterion:any)=>({criterionId:criterion.criterionId,stance:'approve',weight:0.5}))},token);
     const rubric=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.filter((criterion:any)=>criterion.state==='approved');
@@ -160,8 +171,8 @@ describe('panel scoring over HTTP',()=>{
     const {call,sessionId,seat}=await boot({scoring:{minCriteria:2,maxCriteria:2,convergenceRange:1,maxDebateRounds:1}});
     const a=await seat('reviewer','reviewer-a'),b=await seat('reviewer','reviewer-b');
     for(const token of [a.participantToken,b.participantToken])
-      await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security')],nominationsComplete:true},token);
-    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data;
+      await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security'),nomination('tests')],nominationsComplete:true},token);
+    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.filter((criterion:any)=>criterion.state==='candidate');
     for(const token of [a.participantToken,b.participantToken])
       await call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),votes:candidates.map((criterion:any)=>({criterionId:criterion.criterionId,stance:'approve',weight:0.5}))},token);
     const rubric=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.filter((criterion:any)=>criterion.state==='approved');
@@ -194,7 +205,7 @@ describe('panel scoring over HTTP',()=>{
     const a=await seat('reviewer','reviewer-a'),b=await seat('reviewer','reviewer-b');
     for(const token of [a.participantToken,b.participantToken])
       await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security')],nominationsComplete:true},token);
-    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data;
+    const candidates=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.filter((criterion:any)=>criterion.state==='candidate');
     for(const token of [a.participantToken,b.participantToken])
       await call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),votes:candidates.map((criterion:any)=>({criterionId:criterion.criterionId,stance:'approve',weight:0.5}))},token);
     const rubric=(await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`)).data.filter((criterion:any)=>criterion.state==='approved');
