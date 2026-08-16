@@ -6,7 +6,10 @@ export type CollabRouteResult={status:number,payload:unknown,authFailed?:boolean
 export type CollabRouterDeps={
   resolveCwd:(workspaceId:string,relativeCwd:string)=>Promise<string>,
   /** True when the caller presented the Remote Pi pairing code, which means "a human is acting". */
-  verifyHuman:(token:string)=>Promise<boolean>
+  verifyHuman:(token:string)=>Promise<boolean>,
+  /** Collaboration seats must use the dedicated Pi profile that owns the inline collaboration extension. */
+  /** undefined means the caller refers to an externally managed/unknown Agent; false is a known normal Agent. */
+  isCollabAgent:(agentId:string)=>boolean|undefined
 };
 
 const ok=(payload:unknown,status=200):CollabRouteResult=>({status,payload:{data:payload}});
@@ -38,6 +41,7 @@ export class CollabRouter {
     const human=(action:string)=>{if(!isHuman)throw Object.assign(new Error(`${action} is reserved for humans`),{code:COLLAB_ERRORS.humanOnly,httpStatus:403})};
     const asParticipant=():Participant=>{if(!participant)throw Object.assign(new Error('This endpoint requires a participant token'),{code:COLLAB_ERRORS.forbidden,httpStatus:403});return participant};
     const scoped=(sessionId:string)=>{if(participant&&participant.sessionId!==sessionId)throw Object.assign(new Error('Collaboration session not found'),{code:COLLAB_ERRORS.sessionNotFound,httpStatus:404})};
+    const collabAgent=(agentId:unknown)=>{if(typeof agentId!=='string'||this.deps.isCollabAgent(agentId)===false)throw Object.assign(new Error('A collaboration seat requires a dedicated collaboration Agent. Create one from the collaboration board or rebind this seat.'),{code:COLLAB_ERRORS.forbidden,httpStatus:403})};
     const number=(name:string,fallback:number)=>{const raw=url.searchParams.get(name);const value=raw===null?fallback:Number(raw);return Number.isFinite(value)?value:fallback};
 
     // /api/v1/collab/escalations[/{id}/resolve]
@@ -69,7 +73,8 @@ export class CollabRouter {
       // .../participants/{participantId}/binding — repairs a seat that was registered with the wrong binding.
       if(method==='POST'&&sub&&parts[7]==='binding'){
         human('Rebinding a participant');
-        const {participant:bound,token}=this.hub.rebindParticipant(sessionId,sub,await ctx.body());
+        const body=await ctx.body();if(typeof (body as any)?.agentId==='string')collabAgent((body as any).agentId);
+        const {participant:bound,token}=this.hub.rebindParticipant(sessionId,sub,body);
         return ok({participant:bound,participantToken:token});
       }
       // .../participants/{participantId}/budget — un-blocks a seat that spent its budget, at any time.
@@ -81,7 +86,8 @@ export class CollabRouter {
       if(sub)return undefined;
       if(method==='POST'){
         human('Registering a participant');
-        const {participant:created,token}=this.hub.addParticipant(sessionId,await ctx.body());
+        const body=await ctx.body();if(typeof (body as any)?.agentId==='string')collabAgent((body as any).agentId);
+        const {participant:created,token}=this.hub.addParticipant(sessionId,body);
         // The plaintext token is returned exactly once; only its hash is stored.
         return ok({participant:created,participantToken:token,briefing:this.hub.digest(created)},201);
       }
@@ -100,6 +106,9 @@ export class CollabRouter {
     if(method==='GET'&&tail==='issues'&&sub)return ok(this.hub.issueDetail(sessionId,sub,participant));
     if(method==='POST'&&tail==='issues'&&parts[7]==='withdraw')return ok(await this.hub.withdrawIssue(asParticipant(),sub));
     if(method==='GET'&&tail==='review-consensus')return ok(this.hub.reviewConsensus(sessionId,participant));
+    // Round history is a close-out view over every wave's findings; a participant token reading it during a live
+    // round would see the other reviewers' sealed issues, so it stays human-only like /report.
+    if(method==='GET'&&tail==='review-rounds'){human('Reading the round history');return ok(this.hub.reviewRounds(sessionId))}
     if(method==='POST'&&tail==='issue-votes')return ok(await this.hub.submitIssueVotes(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='merge-votes')return ok(await this.hub.submitMergeVotes(asParticipant(),await ctx.body()));
     if(method==='POST'&&tail==='issue-discussions')return ok(await this.hub.submitIssueDiscussions(asParticipant(),await ctx.body()));

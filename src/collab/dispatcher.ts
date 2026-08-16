@@ -5,21 +5,21 @@ import type {CollabEvent,CollabSession,Participant} from './types.js';
  * Wakes the agent behind a seat. Every participant is a local pi2web agent that cannot poll anything, so the
  * hub pushes the task into its conversation via AgentManager.command(). This is the only delivery path.
  *
- * The wake-up message is a briefing, never a decision: the agent still has to talk to the HTTP API,
- * and every rule (baseline, evidence, phase) is enforced there.
+ * The wake-up message only tells the Pi extension to fetch its task. The extension owns transport and
+ * submission details; every rule (baseline, evidence, phase) is enforced by the hub.
  */
 export type DispatchDeps={
   command:(agentId:string,kind:'prompt'|'follow-up',message:string)=>Promise<unknown>,
   /** Current agent status; a busy agent is queued with `follow-up` instead of a fresh `prompt`. */
   agentStatus:(agentId:string)=>string|undefined,
-  baseUrl:()=>string,
+  /** Dedicated Pi sessions are the only sessions with collab_get_task and typed collab_submit_* tools. */
+  isCollabAgent?:(agentId:string)=>boolean,
   /** Coalescing window: one phase change assigns several tasks to the same agent. */
   delayMs?:number,
   log?:(message:string)=>void
 };
 
 const BUSY_STATES=['starting','streaming','waiting_for_user','stopping'];
-const MAX_DIGEST_CHARS=8000;
 /** How long after a session finished a still-undelivered closing note is worth retrying. */
 const CLOSING_NOTE_RETRY_WINDOW_MS=24*3600_000;
 
@@ -110,6 +110,11 @@ export class CollabDispatcher {
       return;
     }
     if(participant.state!=='active')return;                              // left or out of budget: a human has to act
+    if(this.deps.isCollabAgent&&!this.deps.isCollabAgent(agentId)){
+      this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,agentId,task,reason:'COLLAB_PROFILE_REQUIRED'});
+      this.deps.log?.(`Collab dispatch skipped for ${participant.displayName}: the Agent is not profile=collab.`);
+      return;
+    }
     const session=this.hub.store.findSession(sessionId);
     // A human may reopen a review while the previous closing note is still scheduled. Never deliver that stale
     // "finished" message into a new active cycle, and do not retire the freshly rotated credential with it.
@@ -120,27 +125,18 @@ export class CollabDispatcher {
     // The bound agent is part of the identity of a delivery: after a rebind the *new* agent has received
     // nothing, so a key without it matches the old delivery and leaves the replacement agent idle.
     const key=`${agentId}:${task}:${session.phase}:${session.round}:${session.debateRound}`;
-    // Already told this agent about exactly this task: the queue entry is redundant, so retire it instead of
-    // leaving it pending forever (a pending entry is what the "never delivered" alarm and the restart resume read).
-    if(this.delivered.get(participantId)===key){this.hub.completeDelivery(participantId,task);return}
-    const token=this.hub.store.getDispatchToken(participantId);
-    if(!token){
-      this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,agentId,task,reason:'NO_DISPATCH_TOKEN'});
-      this.deps.log?.(`Collab dispatch skipped for ${participant.displayName}: no stored participant token (re-register the participant).`);
-      return;
-    }
-    let digest:unknown;
-    try{digest=this.hub.digest(participant)}catch{digest=undefined}
+    // The prompt was already accepted in this process. Keep the durable item until collab_get_task actually
+    // collects it: followUp() only queues work and may be lost if the process stops before the next turn.
+    if(this.delivered.get(participantId)===key)return;
     const status=this.deps.agentStatus(agentId);
     const kind=status&&BUSY_STATES.includes(status)?'follow-up':'prompt';
     try{
-      await this.deps.command(agentId,kind,briefing({baseUrl:this.deps.baseUrl(),session,participant,task,token,digest}));
+      await this.deps.command(agentId,kind,toolBriefing({session,participant,task}));
       this.delivered.set(participantId,key);
       this.hub.logDispatch(sessionId,'agent_dispatched',{participantId,agentId,task,kind,phase:session.phase,round:session.round});
-      // The task reached the agent: retire the queue entry (nobody acks for itself) so a restart does not re-send
-      // it, and drop the closing note's credential now that it has served its only purpose.
-      this.hub.completeDelivery(participantId,task);
-      if(terminal){this.delivered.delete(participantId);this.hub.retireDispatchToken(participantId)}
+      // Normal work is acknowledged by collab_get_task, not here: followUp() returning means queued, not run.
+      // A closing note has no tool collection step, so successful completion remains its acknowledgement.
+      if(terminal){this.hub.completeDelivery(participantId,task);this.delivered.delete(participantId);this.hub.retireDispatchToken(participantId)}
     }catch(error){
       this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,agentId,task,reason:(error as Error).message});
       this.deps.log?.(`Collab dispatch to agent ${agentId} failed: ${(error as Error).message}`);
@@ -150,111 +146,16 @@ export class CollabDispatcher {
   }
 }
 
-const clip=(value:string,max:number)=>value.length<=max?value:`${value.slice(0,max)}\n… (truncated; call GET /digest for the full task package)`;
-
-/**
- * The rule that keeps an agent from burning its turn (and its budget) on `sleep`+poll loops: this hub is
- * push-based. Whoever is waiting on someone else must end the turn; the hub sends a new message when it is
- * their turn again. Repeated in every briefing because agents only reliably obey what is in the last prompt.
- */
-const HAND_BACK=[
-  'When you have nothing left to submit, END YOUR TURN.',
-  'Do NOT sleep, poll, retry in a loop, or wait for the other agents: the hub pushes you a new message the',
-  'moment something needs you (review comments, a ruling, or the final result). Waiting here only wastes budget.'
-];
-
-export function briefing(input:{baseUrl:string,session:CollabSession,participant:Participant,task:string,token:string,digest:unknown}):string{
-  if(input.task==='implement')return workOrder(input);
-  if(input.task==='session_result')return closingNote(input);
-  return protocolBriefing(input);
-}
-
-/**
- * First contact with a developer agent. Deliberately *not* the full protocol: at this point the agent only has to
- * build the thing, and a wall of review-API detail is what tempts it to start polling for review feedback.
- */
-function workOrder(input:{baseUrl:string,session:CollabSession,participant:Participant,token:string,digest:unknown}):string{
-  const {baseUrl,session,participant,token}=input;
-  const api=`${baseUrl.replace(/\/$/,'')}/api/v1/collab/sessions/${session.sessionId}`;
-  const carried=(input.digest as any)?.issues as unknown[]|undefined;
+/** The only dispatcher prompt. Credentials, URLs, opaque ids, and task JSON are deliberately confined to the Pi extension. */
+export function toolBriefing(input:{session:CollabSession,participant:Participant,task:string}):string{
+  if(input.task==='session_result'){
+    const verdict=typeof input.session.outcome?.verdict==='string'?` Result: ${input.session.outcome.verdict}.`:'';
+    return `[pi2web collaboration] This local code collaboration is finished.${verdict} Nothing further is required; end your turn.`;
+  }
   return [
-    `[pi2web collaboration hub] Development task in collaboration session "${session.title}".`,
-    '',
-    `you: ${participant.displayName} (role=implementer)`,
-    'task now due: implement',
-    `working directory: ${session.cwd}`,
-    '',
-    'What to build:',
-    `  ${session.subject.type}: ${session.subject.value}`,
-    ...(session.subject.notes?[`  notes: ${session.subject.notes}`]:[]),
-    ...(carried?.length?['',`${carried.length} issue(s) from the previous round are still open; GET ${api}/digest for their text.`]:[]),
-    '',
-    'When the code is finished, report it once:',
-    `  curl -X POST ${api}/ready \\`,
-    `    -H "Authorization: Bearer ${token}" -H 'content-type: application/json' \\`,
-    `    -d '{"clientRequestId":"<unique>","summary":"<what you changed and why>","changes":[{"path":"src/…","summary":"…"}],"codeRef":{"commit":"<sha or dirty>"}}'`,
-    '',
-    'That call pins the baseline the reviewers will read, so make it your last action: anything you edit afterwards',
-    'is outside the review. Then stop.',
-    '',
-    ...HAND_BACK,
-    'The reviewers are called by the hub, not by you. You will be prompted again with their findings (or with the',
-    'final result if they had none), and only then do you answer them.'
-  ].join('\n');
-}
-
-/** The session is over; say so plainly so the agent stops watching for something that will never arrive. */
-function closingNote(input:{session:CollabSession,participant:Participant}):string{
-  const {session,participant}=input;
-  const outcome=session.outcome as any;
-  return [
-    `[pi2web collaboration hub] Collaboration session "${session.title}" is finished.`,
-    '',
-    `you: ${participant.displayName} (role=${participant.role})`,
-    ...(outcome?.verdict?[`verdict: ${outcome.verdict}`]:[]),
-    ...(outcome?[`outcome: ${clip(JSON.stringify(outcome),2000)}`]:[]),
-    '',
-    'Nothing further is required from you and your participant token is no longer needed.',
-    'END YOUR TURN. Do not poll the hub again for this session.'
-  ].join('\n');
-}
-
-/** Full protocol package for the phases where an agent really does have to talk to the API. */
-function protocolBriefing(input:{baseUrl:string,session:CollabSession,participant:Participant,task:string,token:string,digest:unknown}):string{
-  const {baseUrl,session,participant,task,token}=input;
-  const api=`${baseUrl.replace(/\/$/,'')}/api/v1/collab/sessions/${session.sessionId}`;
-  const digest=input.digest===undefined?'(unavailable, call GET /digest)':clip(JSON.stringify(input.digest,null,2),MAX_DIGEST_CHARS);
-  const submit=session.kind==='review'
-    ? `POST ${api}/findings | ${api}/issue-votes | ${api}/merge-votes | ${api}/issue-discussions`
-    : `POST ${api}/nominations | ${api}/votes | ${api}/scores | ${api}/debates/{debateId}/arguments`;
-  return [
-    `[pi2web collaboration hub] You have a task in collaboration session "${session.title}".`,
-    '',
-    `sessionId: ${session.sessionId} (kind=${session.kind}, phase=${session.phase}, round=${session.round})`,
-    `you: ${participant.displayName} (participantId=${participant.participantId}, role=${participant.role})`,
-    `task now due: ${task}`,
-    '',
-    'Work only through the hub HTTP API. Never message the other agents directly; they cannot see your chat.',
-    `Authorization header for every call: Authorization: Bearer ${token}`,
-    '',
-    'Endpoints:',
-    `  GET  ${api}/digest                 what you owe right now (authoritative)`,
-    `  ${submit}`,
-    `  POST ${api}/escalations            ask for human judgment early (use refId for an issue)`,
-    ...(session.kind==='review'?[`  POST ${api}/issues/{issueId}/withdraw  reporter explicitly retracts an issue`]:[]),
-    '',
-    ...HAND_BACK,
-    '',
-    'Rules:',
-    '  - every submission needs a unique clientRequestId (retries with the same id replay the first result);',
-    '  - review findings must carry location.path plus real evidence, and must target the pinned baselineId;',
-    '  - scores need a rationale and at least one evidence entry pointing at a file;',
-    '  - on HTTP 422 read error.fieldErrors, repair the payload and retry;',
-    '  - on HTTP 409 STALE_BASELINE re-read the code at error.currentBaseline and resubmit.',
-    '',
-    'Current task package:',
-    '```json',
-    digest,
-    '```'
+    '[pi2web collaboration] You have a local code collaboration task.',
+    `role: ${input.participant.role}; action: ${input.task}; working directory: ${input.session.cwd}`,
+    'Call collab_get_task first. It activates the exact collab_submit_* tool for this task; use that tool to record the complete result.',
+    'Do not use curl, construct URLs, handle credentials, contact other agents, sleep, or poll. End your turn after submitting.'
   ].join('\n');
 }

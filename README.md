@@ -171,19 +171,21 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 两个场景：
 
 - **Review Loop**（`kind:"review"`）：盲审提 Issue → 全体交叉投票 / 重复项合并投票 → 分轮讨论收敛 → 直接输出报告。确认的问题成为 `confirmed` Action Items；人可从 finished 状态直接复核，或指定开发 Agent 先修复再由原 Reviewer 复核。Web 看板新建的 Review 默认开启 `policy.consensusReview:true`；首次流程可选**先开发后评审**（`policy.implementationFirst:true`）。
-- **Panel Scoring**（`kind:"scoring"`）：提名维度 → 投票锁 rubric → 盲打分 → 辩论收敛 → 出分。
+- **Panel Scoring**（`kind:"scoring"`）：盲提名维度 → 确定性重复项归并 → 投票锁 rubric → 盲打分 → 辩论与争议维度复评分 → 出分。下一轮会带回上一轮 tally/amendment；rubric、分数分布和辩论上下文通过强类型工具完整交给 Agent。
 
 两种凭证：**配对码**代表人，可以建会话、登记参与者、强制推进、裁定升级；**participantToken** 代表一个 Agent，只能操作自己所在的会话。会话和参与者只能由人创建，Agent 无法自助加入。
 
-参与者通常只在 `draft` / `implementing` / `collecting`——scoring 会话则是 `nominating`——阶段登记，中枢会当场派发当前任务。Review finished 后还允许追加 `implementer`，为下一次“修复后复核”做准备；Reviewer Panel 保持不变。`role` 只能是 `implementer` / `reviewer` / `moderator`，人使用配对码而不是参与者席位。
+参与者通常只在 `draft` / `implementing` / `collecting`——scoring 会话则是 `nominating`——阶段登记，中枢会当场派发当前任务。Review finished 后还允许追加 `implementer`，为下一次“修复后复核”做准备；Reviewer Panel 保持不变。`role` 只能是 `implementer` / `reviewer`，人使用配对码而不是参与者席位。
 
-每个座位都绑定一个**本机 pi2web Agent**（`agentId` 必填；同一个 Agent 在一个会话里只能占一个座位，否则同一个模型能投两票）。轮到它干活时，中枢直接把任务包 prompt 给该 Agent（忙碌时用 follow-up 排队）。**没有自助参与，也没有任何轮询接口**：Agent 不需要（也无法）盯着中枢等活儿；participantToken 由中枢保管并写进唤醒消息，会话结束后清除保管的明文副本。
+每个座位都绑定一个**本机 pi2web Agent**（`agentId` 必填）；同一个协作 Agent 在任意时刻只能占一个 active seat，避免进程内工具无法确定它代表哪个会话。每个 implementation wave 也只允许一个 implementer，因为所有 Agent 仍共享同一工作区。轮到它干活时，中枢直接 prompt（忙碌时用 follow-up 排队）。任务会一直保留在持久化队列中，直到 Agent 真正调用 `collab_get_task` 领取，而不是在 follow-up 刚入队时就当成已送达。
 
-绑错了 Agent（或该 Agent 被删了、卡死了）就改绑：`POST /sessions/{sessionId}/participants/{participantId}/binding -d '{"agentId":"agent-..."}'`——改绑会轮换 participantToken，并把这个座位当前欠的任务重新推给新 Agent（即使旧 Agent 已经收到过）。任务队列在中枢侧持久化，且只有“已告知对应 Agent”的条目才会销掉；所以看板上的“N 未送达”就是“唤醒没成功”，超过两分钟会直接报警。
+协作座位要用**协作 Agent**：`POST /api/v1/agents -d '{...,"profile":"collab"}'`（看板新建 Agent 时自动带上）。它先调用 `collab_get_task`，扩展再按当前任务只激活一个强类型提交工具，例如 `collab_submit_findings`、`collab_submit_votes` 或 `collab_submit_scores`。工具在进程内直连中枢，自动补全 baseline 与幂等键，模型上下文里不会出现 URL、令牌或内部 ID；Review/Scoring 任务会禁用 `edit`/`write`，只有 `implement` 任务可以修改文件。`profile` 缺省是 `default`，普通 Agent 不受影响。
+
+绑错了 Agent（或该 Agent 被删了、卡死了）就改绑：`POST /sessions/{sessionId}/participants/{participantId}/binding -d '{"agentId":"agent-..."}'`——改绑会轮换 participantToken，并把这个座位当前欠的任务重新推给新 Agent（即使旧 Agent 已经收到过）。任务队列在中枢侧持久化，且只有 Agent 实际调用 `collab_get_task` 领取后条目才会销掉；所以看板上的“N 未送达”表示任务尚未被扩展领取，超过两分钟会直接报警。
 
 **中枢是推送式的**：任何一方交完自己的活就应当结束回合，绝不要 sleep 轮询。正常 Review 不会回头要求开发方逐条回应；会话结束时中枢推送 `session_result`。人启动 `fix_then_review` 后，中枢才把全部 confirmed Action Items 推给选定开发 Agent；开发 `/ready` 后再主动唤醒原 Reviewer。
 
-> 安全提示：座位的 participantToken 会以明文存在 `remote-pi.db`（0600）并出现在被唤醒 Agent 的会话记录里；它的权限仅限该协作会话，会话结束后中枢会丢弃自己保管的副本。
+> 兼容提示：座位的 participantToken 仍以明文存在 `remote-pi.db`（0600），供 HTTP 兼容接口和恢复流程使用；内置 Pi 协作扩展走进程内 bridge，不会把 token 写进模型上下文或 Agent 会话。会话结束后中枢丢弃自己保管的副本。
 
 最小流程（review）：
 
@@ -199,26 +201,27 @@ curl -H "Authorization: Bearer $PTOKEN" $B/sessions/$SID/digest                 
 ### Review 与人工触发的修复—复核
 
 ```
-draft ──advance──▶ [implementing] ──POST /ready / Agent 空闲──▶ collecting ──▶ validating / merge / discussion ──▶ finished
+draft ──advance──▶ [implementing] ──显式 POST /ready──▶ collecting ──▶ validating / merge / discussion ──▶ finished
                                                                                                                        │
 finished ── recheck(review_only) ───────────────────────────────────────────────────────────────────────▶ collecting ◀─┤
 finished ── recheck(fix_then_review) ──▶ implementing ──POST /ready─────────────────────────────────────▶ collecting   │
                                                                                                                        └─ round+1
 ```
 
-- 首次勾选 `implementationFirst` 时，开发 Agent 先收到 `implement` 工单；`/ready` 或持有该任务的托管 Agent `agent_settled` 会固定 baseline 并召集 Reviewer。
+- 首次勾选 `implementationFirst` 时，唯一的开发 Agent 先收到 `implement` 工单；只有强类型工具显式提交 `/ready` 才会固定 baseline 并召集 Reviewer。Agent 进入 idle 不再被当作完成，避免失败或漏交被误判为可评审。
 - `collecting` 是盲审。每个 Reviewer 必须提交 `reviewComplete=true`；新 Finding 强制带 `location.path`、evidence 和当前 baselineId。
 - 共识阶段中，每个 Reviewer 对本轮其他人的新 Finding 投 approve/reject，可提出重复项合并；合并必须全票通过。争议经过 `issue_discussing ↔ issue_reconsidering`，达到 `maxConsensusRounds` 仍不一致才升级人工。
 - 共识完成后直接 `finished`。有效 Finding 从临时 `open` 转成 `confirmed`，不会触发开发方回应；报告结论为 `approved`、`follow_up_required` 或 `changes_required`。
 - finished 看板提供两个入口：**复核当前代码**调用 `POST /recheck {"mode":"review_only"}`；**推进到修复 → 复核**先选择一个已存在或新添加的 implementer，再调用 `POST /recheck {"mode":"fix_then_review","implementerParticipantIds":[...]}`。
 - 修复 Agent 收到全部 confirmed Action Items，完成后统一 `/ready`。原 Reviewer 在新 baseline 上收到 `issuesToRecheck`，并在 `/findings` 中提交 `rechecks:[{"issueId":"...","outcome":"resolved|still_present","rationale":"..."}]`；同时仍可发现新的 Finding。
+- 每多一轮复核就多一段档案：`GET /sessions/:id/review-rounds`（**仅人**）按轮返回该轮复核了哪些老问题（`resolved` / `still_present` / 尚未回报的 `pending`）、该轮新发现了哪些问题，以及该轮的 baseline 与结论。看板把它渲染成“各轮评审 / 复核结果”，最新一轮在最上面。
 - 每轮 finished 都发送 `session_result`。重新开启时，中枢会轮换参与者凭证并主动推送新任务，旧的结束消息不会污染新一轮。
 
 人用 `GET /report` 查看每轮结果。校验失败返回 `422` 且带 `fieldErrors`，基线过期返回 `409 STALE_BASELINE`，预算耗尽返回 `429`；所有 Agent 提交都需要 `clientRequestId` 做幂等。
 
 人工升级（escalation）进入 `GET /api/v1/collab/escalations`，用 `POST /api/v1/collab/escalations/:id/resolve` 裁定；裁定会真的落地：`issue_dispute` 必须给 `issueDecision`，`budget_exhausted` 传 `extra.tokenBudget` 就提额并解封该参与者，`other`（轮次封顶死锁）传 `extra.maxTotalRounds` 就抬高轮次上限——参数不合法（字符串、比已用量还小、没比现有上限高）直接 422，不会“看似成功实则什么都没做”地用掉那一次机会；裁定事件里的 `applied` 记录实际生效的变更。预算也可以事后单独提：`POST /sessions/:id/participants/:pid/budget -d '{"tokenBudget":600000}'`。`score_dispute` 不走裁定接口，而是用 `POST /sessions/:id/finalize` 一次性给出每个争议维度的分数（该调用同时关掉这条升级；若人工强推跳过了结算，中枢也会自动关掉它，并把这些维度标为 `method:"forced"` 而不是“已收敛”）。**评分会话里只要还有未裁定的升级，面板就停在当前阶段**（不会被下一阶段越过，否则会出现“会话已结束、问题还挂在人手上”），裁定后自动继续；不想等就用 `POST /advance -d '{"force":true,"reason":"..."}'`。配置了 MailDispatch 时，升级和会话停滞会立即发信（不参与聚合，可在配置对话框关闭；同一会话 5 分钟内最多一封，避免 Agent 连续升级刷爆邮箱）。
 
-Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与创建、参与者登记、Review 动态流程图、Issue 投票 / 合并 / discussion、待裁定队列、事件时间线，以及 finished 后的“直接复核”和“开发修复后复核”入口，并通过 WebSocket `subscribe_collab` 实时刷新。Review 总结按严重程度列出 confirmed Action Items、文件位置和修复建议。等待状态会同时显示本机 Agent 生命周期：`streaming` / `starting` 表示仍在执行，超过提醒阈值也不判为漏交；只有 `idle` / `unloaded` / `error` 且阶段 API 尚未提交时才适合用 `/retry-waiting` 重新唤醒。`waiting_for_user` 要先处理 Agent 交互；`advance force=true` 会真正跳过未提交结果。
+Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与创建、参与者登记、Review 动态流程图、逐轮复核档案（每轮一个 section：老问题修好了没有、有没有新问题）、Issue 投票 / 合并 / discussion、待裁定队列、事件时间线，以及 finished 后的“直接复核”和“开发修复后复核”入口，并通过 WebSocket `subscribe_collab` 实时刷新。Review 总结按严重程度列出 confirmed Action Items、文件位置和修复建议。等待状态会同时显示本机 Agent 生命周期：`streaming` / `starting` 表示仍在执行，超过提醒阈值也不判为漏交；只有 `idle` / `unloaded` / `error` 且阶段 API 尚未提交时才适合用 `/retry-waiting` 重新唤醒。`waiting_for_user` 要先处理 Agent 交互；`advance force=true` 会真正跳过未提交结果。
 
 ## API
 
@@ -231,9 +234,9 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET/POST /api/v1/workspaces`
 - `GET /api/v1/workspaces/:id/tree|file|stat`
 - `GET /api/v1/sessions`
-- `GET/POST /api/v1/agents`
+- `GET/POST /api/v1/agents`（创建时可带 `profile`：`default`（默认）或 `collab`；`collab` 会加载协作工具，供协作看板占座使用）
 - `GET/DELETE /api/v1/agents/:id`
-- `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/recheck`（**仅人**）、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/issue-votes`、`/merge-votes`、`/issue-discussions`、`/review-consensus`、`/retry-waiting`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
+- `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/recheck`（**仅人**）、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/issue-votes`、`/merge-votes`、`/issue-discussions`、`/review-consensus`、`/review-rounds`（**仅人**）、`/retry-waiting`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
 - `GET /api/v1/collab/escalations`、`POST /api/v1/collab/escalations/:id/resolve`
 - `GET/POST /api/v1/terminals`
 - `GET/DELETE /api/v1/terminals/:id`

@@ -230,6 +230,7 @@ export class CollabStore {
     return row?participantFrom(row):undefined;
   }
   listParticipants(sessionId:string):Participant[]{return (this.db.prepare('SELECT * FROM collab_participants WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[]).map(participantFrom)}
+  findActiveParticipantsByAgent(agentId:string):Participant[]{return (this.db.prepare(`SELECT p.* FROM collab_participants p JOIN collab_sessions s ON s.id=p.session_id WHERE p.agent_id=? AND p.state='active' AND s.status='active' ORDER BY p.created_at,p.rowid`).all(agentId) as any[]).map(participantFrom)}
   /**
    * Hands the seat to another local agent. The token is rotated because the old one is already in the old
    * agent's conversation, and the hub keeps the new plaintext copy: it is what the next wake-up carries.
@@ -284,6 +285,16 @@ export class CollabStore {
   listRecentEvents(sessionId:string,limit=200):CollabEvent[]{
     const rows=this.db.prepare('SELECT * FROM collab_events WHERE session_id=? ORDER BY sequence DESC LIMIT ?').all(sessionId,Math.min(2000,Math.max(1,Math.trunc(limit)))) as any[];
     return rows.reverse().map(eventFrom);
+  }
+  /**
+   * Type-filtered timeline, unpaged. Round history needs a handful of markers (reopen, finish) that sit at the
+   * *end* of a log which can outgrow any page limit, so paging from sequence 0 would drop exactly the newest
+   * rounds — the ones a human is looking at.
+   */
+  listEventsByType(sessionId:string,types:string[]):CollabEvent[]{
+    if(!types.length)return [];
+    const rows=this.db.prepare(`SELECT * FROM collab_events WHERE session_id=? AND type IN (${types.map(()=>'?').join(',')}) ORDER BY sequence`).all(sessionId,...types) as any[];
+    return rows.map(eventFrom);
   }
 
   // ---- baselines ----
@@ -398,7 +409,7 @@ export class CollabStore {
     return this.getEscalation(escalationId);
   }
 
-  // ---- inbox: the durable wake-up queue (acked once the hub has told the agent) ----
+  // ---- inbox: durable wake-up queue (acked when the extension collects normal work) ----
   pushInbox(sessionId:string,participantId:string,type:string,payload:Record<string,unknown>):InboxItem{
     const itemId=`in-${randomUUID()}`,timestamp=now();
     this.db.prepare('INSERT INTO collab_inbox(id,session_id,participant_id,type,payload_json,created_at) VALUES(?,?,?,?,?,?)').run(itemId,sessionId,participantId,type,JSON.stringify(payload),timestamp);
@@ -427,10 +438,12 @@ export class CollabStore {
     return row?criterionFrom(row):undefined;
   }
   listCriteria(sessionId:string):Criterion[]{return (this.db.prepare('SELECT * FROM collab_criteria WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[]).map(criterionFrom)}
-  updateCriterion(criterionId:string,patch:{state?:CriterionState,weight?:number,definition?:string,name?:string}){
+  updateCriterion(criterionId:string,patch:{state?:CriterionState,weight?:number,definition?:string,name?:string,anchors?:Record<string,string>,source?:Record<string,unknown>}){
     const current=this.getCriterion(criterionId);
-    this.db.prepare('UPDATE collab_criteria SET state=?,weight=?,definition=?,name=? WHERE id=?')
-      .run(patch.state??current.state,patch.weight??current.weight??null,patch.definition??current.definition,patch.name??current.name,criterionId);
+    this.db.prepare('UPDATE collab_criteria SET state=?,weight=?,definition=?,name=?,anchors_json=?,source_json=? WHERE id=?')
+      .run(patch.state??current.state,patch.weight??current.weight??null,patch.definition??current.definition,patch.name??current.name,
+        'anchors' in patch?(patch.anchors?JSON.stringify(patch.anchors):null):(current.anchors?JSON.stringify(current.anchors):null),
+        'source' in patch?(patch.source?JSON.stringify(patch.source):null):(current.source?JSON.stringify(current.source):null),criterionId);
     return this.getCriterion(criterionId);
   }
   saveVote(input:{sessionId:string,criterionId:string,participantId:string,round:number,stance:VoteStance,weight?:number,amendment?:string,rationale?:string}):Vote{

@@ -62,18 +62,27 @@ describe('build, review, and explicit remediation',()=>{
     expect(recheck).toMatchObject({task:'file_findings',round:2,issuesToRecheck:[expect.objectContaining({issueId})]});
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:recheck.baseline.baselineId,findings:[],rechecks:[{issueId,outcome:'resolved',rationale:'The retry path now supplies a stable order idempotency key.'}],reviewComplete:true},reviewerToken);
     expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data).toMatchObject({phase:'finished',round:2,status:'finished',outcome:{verdict:'approved'}});
+
+    // The board draws one section per wave, so every round must report its own fixed / still-open / new numbers.
+    const rounds=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/review-rounds`)).data;
+    expect(rounds).toHaveLength(2);
+    expect(rounds[0]).toMatchObject({round:1,mode:'initial',counts:{newIssues:1,resolved:0}});
+    expect(rounds[1]).toMatchObject({round:2,mode:'fix_then_review',status:'finished',verdict:'approved',counts:{carried:1,resolved:1,stillPresent:0,pending:0,newIssues:0}});
+    expect(rounds[1].rechecks[0]).toMatchObject({issueId,outcome:'resolved',foundInRound:1});
+    // A participant token would read every other reviewer's findings through this view, so it stays human-only.
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}/review-rounds`,undefined,reviewerToken)).status).toBe(403);
   });
 
-  it('still hands initial implementation to reviewers automatically when a managed developer settles',async()=>{
-    class SettlingBackend extends MockBackend {async prompt(message:string){await super.prompt(message);(this as any).emit({type:'agent_settled'})}}
-    const {call,workspace,agents}=await boot((id,cwd)=>new SettlingBackend(id,cwd));
-    const agent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id})).data;
-    const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Auto hand-off',workspaceId:workspace.id,subject:{type:'free',value:'x'},policy:{implementationFirst:true}})).data;
-    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:agent.agentId});
+  it('hands initial implementation to reviewers only after the developer explicitly submits ready',async()=>{
+    const {call,workspace,agents}=await boot((id,cwd)=>new MockBackend(id,cwd));
+    const agent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data;
+    const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Explicit hand-off',workspaceId:workspace.id,subject:{type:'free',value:'x'},policy:{implementationFirst:true}})).data;
+    const developer=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:agent.agentId})).data;
     const reviewer=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'reviewer',agentId:'agent-reviewer'})).data;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
-    await waitUntil(async()=>((await agents.messages(agent.agentId)) as any[]).some(entry=>String(entry.content??'').includes('task now due: implement')));
-    await agents.command(agent.agentId,'prompt','implementation finished');
+    await waitUntil(async()=>((await agents.messages(agent.agentId)) as any[]).some(entry=>String(entry.content??'').includes('action: implement')));
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data.phase).toBe('implementing');
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/ready`,{clientRequestId:rid(),summary:'Implemented the requested change and verified the affected path.',changes:[]},developer.participantToken);
     await waitUntil(async()=>(await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data.phase==='collecting');
     const token=server!.collab.store.getDispatchToken(reviewer.participant.participantId)!;
     expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,token)).data.task).toBe('file_findings');
