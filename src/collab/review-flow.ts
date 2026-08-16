@@ -52,6 +52,14 @@ export function issueConsensus(snapshot:ReviewSnapshot,options:{includeFinal?:bo
 }
 export const contestedIssueIds=(snapshot:ReviewSnapshot)=>issueConsensus(snapshot).filter(entry=>entry.rejecters.length>0).map(entry=>entry.issueId);
 const currentMergeProposals=(snapshot:ReviewSnapshot)=>(snapshot.mergeProposals??[]).filter(proposal=>proposal.round===snapshot.round);
+const collectedThisRound=(snapshot:ReviewSnapshot)=>new Set(snapshot.completions.filter(entry=>entry.phase==='collecting'&&entry.round===snapshot.round).map(entry=>entry.participantId));
+/** Reviewers who already closed their own blind review but still owe votes on other reviewers' already-filed issues. */
+export function pendingCrossVoters(snapshot:ReviewSnapshot):string[]{
+  if(snapshot.phase!=='collecting'||!snapshot.policy.consensusReview)return [];
+  const collected=collectedThisRound(snapshot);
+  return unique(issueConsensus(snapshot).flatMap(entry=>entry.missing)).filter(participantId=>collected.has(participantId));
+}
+export const owedIssueVoteIds=(snapshot:ReviewSnapshot,participantId:string)=>issueConsensus(snapshot).filter(entry=>entry.missing.includes(participantId)).map(entry=>entry.issueId);
 
 /** Statuses nobody may move again without a human: rulings are final. */
 export const FINAL_ISSUE_STATUSES:IssueStatus[]=['human_ruled','wontfix','closed','duplicate','withdrawn'];
@@ -230,6 +238,7 @@ export function sessionProgress(snapshot:ReviewSnapshot){
     openIssues:snapshot.issues.filter(isOpenIssue).length,
     byStatus:Object.fromEntries(counts) as Partial<Record<IssueStatus,number>>,
     waitingOn:waitingOn(snapshot),
+    pendingCrossVotes:pendingCrossVoters(snapshot),
     readyToAdvance:isReadyToAdvance(snapshot)
   };
 }

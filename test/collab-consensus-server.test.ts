@@ -108,4 +108,32 @@ describe('review consensus over HTTP',()=>{
     const raised=await call('POST',`/api/v1/collab/sessions/${session.sessionId}/escalations`,{clientRequestId:rid(),kind:'issue_dispute',refId:issueId,summary:'A reviewer requests domain expert judgment before spending three unproductive debate rounds.',question:'Does this behavior violate the external protocol contract?',options:['yes','no','investigate'],urgency:'normal'},dissenter.participantToken);
     expect(raised.status).toBe(202);expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data.phase).toBe('awaiting_human');
   });
+
+  it('lets finished collectors cross-vote while a slower reviewer is still filing',async()=>{
+    const {call,workspace}=await boot();
+    const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Overlap votes',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true}})).data;
+    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:'agent-A'})).data;
+    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:'agent-B'})).data;
+    const c=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'C',agentId:'agent-C'})).data;
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
+    const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,a.participantToken)).data.baseline.baselineId;
+    const one=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[finding('First collector correctness issue',10)],reviewComplete:true},a.participantToken)).data.accepted[0].issueId;
+    const two=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[finding('Second collector correctness issue',20)],reviewComplete:true},b.participantToken)).data.accepted[0].issueId;
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data).toMatchObject({phase:'collecting',progress:{waitingOn:[c.participant.participantId],pendingCrossVotes:expect.arrayContaining([a.participant.participantId,b.participant.participantId])}});
+    const tooEarly=await call('POST',`/api/v1/collab/sessions/${session.sessionId}/issue-votes`,{clientRequestId:rid(),votes:[{issueId:one,stance:'approve'}],complete:true},c.participantToken);
+    expect(tooEarly.status).toBe(409);
+    const aDigest=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,a.participantToken)).data;
+    expect(aDigest.task).toBe('validate_issues');expect(aDigest.yourRequiredIssueIds).toEqual([two]);
+    expect((await call('POST',`/api/v1/collab/sessions/${session.sessionId}/issue-votes`,{clientRequestId:rid(),votes:[{issueId:two,stance:'approve'}],complete:true},a.participantToken)).status).toBe(200);
+    expect((await call('POST',`/api/v1/collab/sessions/${session.sessionId}/issue-votes`,{clientRequestId:rid(),votes:[{issueId:one,stance:'approve'}],complete:true},b.participantToken)).status).toBe(200);
+    const consensus=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/review-consensus`)).data;
+    expect(consensus.issueConsensus.find((entry:any)=>entry.issueId===one).positions.filter((position:any)=>position.stance==='approve')).toHaveLength(2);
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data.phase).toBe('collecting');
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[],reviewComplete:true},c.participantToken);
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data.phase).toBe('validating');
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/issue-votes`,{clientRequestId:rid(),votes:[{issueId:one,stance:'approve'},{issueId:two,stance:'approve'}],complete:true},c.participantToken);
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/issue-votes`,{clientRequestId:rid(),votes:[],complete:true},a.participantToken);
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/issue-votes`,{clientRequestId:rid(),votes:[],complete:true},b.participantToken);
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data).toMatchObject({phase:'finished',status:'finished'});
+  });
 });
