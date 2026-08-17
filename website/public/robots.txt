@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://pi2web.es2q.com/sitemap.xml

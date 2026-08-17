@@ -122,6 +122,15 @@ export class CollabDispatcher {
     if(!session)return;
     if(terminal&&session.status!=='finished'){this.hub.completeDelivery(participantId,task);return}
     if(!terminal&&session.status!=='active')return;
+    // Delivery is serialised per seat and a `command()` only resolves when the agent's turn ends, so a wake-up
+    // queued at the start of a phase can arrive after the panel has already moved past it. Waking an agent to
+    // tell it "nothing to do" costs a full model turn, so the queued item is retired instead.
+    if(!terminal&&this.hub.currentTaskFor(participantId)==='wait'){
+      this.hub.completeDelivery(participantId,task);
+      this.delivered.delete(participantId);
+      this.hub.logDispatch(sessionId,'dispatch_skipped',{participantId,agentId,task,reason:'NOTHING_OWED',phase:session.phase,round:session.round});
+      return;
+    }
     // The bound agent is part of the identity of a delivery: after a rebind the *new* agent has received
     // nothing, so a key without it matches the old delivery and leaves the replacement agent idle.
     const key=`${agentId}:${task}:${session.phase}:${session.round}:${session.debateRound}`;

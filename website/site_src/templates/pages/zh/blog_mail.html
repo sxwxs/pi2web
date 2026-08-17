@@ -1,0 +1,45 @@
+{% extends "blog_article.html" %}{% block kicker %}EMAIL NOTIFICATIONS{% endblock %}{% block deck %}离开电脑时，用一封邮件知道 Agent 已经跑完。pi2web 通过 MailDispatch 提交事务邮件，可配置聚合等待时间与正文内容。{% endblock %}{% block toc %}<a href="#when">触发时机</a><a href="#config">启动参数</a><a href="#ui">在 Web UI 中调整</a><a href="#body">邮件内容</a><a href="#failure">失败处理</a>{% endblock %}{% block article %}
+<h2 id="when">1. 什么时候发邮件</h2>
+<p>Pi 发出 <code>agent_settled</code> 时触发，也就是该 Agent 不会再自动重试、自动 compact 或执行排队的 follow-up。此时任务真的告一段落，适合提醒你回来查看。</p>
+<p>pi2web 只负责把邮件提交给 MailDispatch。MailDispatch 返回 <code>202</code> 后邮件进入其持久队列，实际投递由 MailDispatch 的 worker 完成。</p>
+
+<h2 id="config">2. 启动参数</h2>
+<p>三个参数必须同时提供，否则 pi2web 会拒绝启动：endpoint、API key 环境变量名和收件人。</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'"><span class="copy-label">复制</span></button></div><pre><code>export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
+pi2web \
+  --maildispatch-endpoint https://mail.example.com/api/v1/messages \
+  --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
+  --maildispatch-notify-to owner@example.com \
+  --maildispatch-sender-id system</code></pre></div>
+<table class="article-table"><thead><tr><th>参数</th><th>是否必需</th><th>说明</th></tr></thead><tbody>
+<tr><td><code>--maildispatch-endpoint</code></td><td>必需</td><td>MailDispatch 消息 API 地址，必须是 http 或 https URL。</td></tr>
+<tr><td><code>--maildispatch-api-key-env</code></td><td>必需</td><td>存放 API key 的<strong>环境变量名</strong>，而不是 key 本身。</td></tr>
+<tr><td><code>--maildispatch-notify-to</code></td><td>必需</td><td>接收通知的邮箱地址。</td></tr>
+<tr><td><code>--maildispatch-sender-id</code></td><td>可选</td><td>指定 sender；省略时由 MailDispatch 按 API key 与服务配置选择。</td></tr>
+</tbody></table>
+<div class="article-callout"><strong>API key 只从环境变量读取。</strong><p>这样密钥不会出现在命令行参数和进程列表中。该 key 至少需要 MailDispatch 的 <code>mail:send</code> scope。</p></div>
+
+<h2 id="ui">3. 在 Web UI 中调整</h2>
+<p>导航栏的“配置”窗口可以启用或关闭邮件通知，并设置：</p>
+<ul>
+<li><strong>聚合等待时间</strong>：首个任务完成后等待指定秒数，期间完成的其他任务合并进同一封邮件；<code>0</code> 表示立即发送。</li>
+<li><strong>是否包含 Agent 最终回复。</strong></li>
+<li><strong>是否包含 Session 名称和工作路径。</strong></li>
+</ul>
+<p>这些设置保存在 pi2web 的 SQLite 元数据数据库中，对所有浏览器客户端和 Agent 生效，服务重启后继续保留。</p>
+
+<h2 id="body">4. 邮件内容</h2>
+<p>如果关闭了“包含最终回复”和“包含 Session 信息”，邮件正文只说明一个或多个 Agent 任务已经完成，不含任何项目细节。</p>
+<div class="article-callout warning"><strong>注意内容敏感性。</strong><p>Agent 的最终回复可能包含代码片段、路径或内部信息。邮件会离开你的机器，请按收件邮箱的可信程度决定是否开启这两项。</p></div>
+
+<h2 id="failure">5. 失败处理</h2>
+<p>邮件通知失败只写入 pi2web 的标准错误输出，不会改变 Agent 任务状态，也不会阻塞后续运行。排查时可以按这个顺序检查：</p>
+<ol>
+<li>启动日志里是否有参数校验错误（三个必需参数是否齐全、endpoint 是否为合法 URL）。</li>
+<li>环境变量是否在启动 pi2web 的那个 Shell 中真的存在。</li>
+<li>API key 是否具备 <code>mail:send</code> scope，以及是否被撤销。</li>
+<li>MailDispatch 是否返回 <code>202</code>；若返回其他状态码，错误信息会打印在 pi2web 的 stderr 中。</li>
+<li>邮件已入队但没收到时，检查 MailDispatch 侧的投递日志与收件箱垃圾邮件过滤。</li>
+</ol>
+<p class="article-source">参考：<a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a></p>
+{% endblock %}

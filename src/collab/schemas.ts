@@ -56,7 +56,9 @@ export const mergeVotesRequest=obj({
 });
 export const issueDiscussionsRequest=obj({
   clientRequestId:clientRequestId(),
-  discussions:arr(obj({issueId:str({min:1,max:100}),argument:str({min:20,max:4000}),respondingTo:optional(str({max:100}))}),{max:200}),
+  discussions:withDefault(arr(obj({issueId:str({min:1,max:100}),argument:str({min:20,max:4000}),respondingTo:optional(str({max:100}))}),{max:200}),()=>[]),
+  /** The reporter's way out of a finding it no longer stands by, in the same call that defends the rest. */
+  withdrawals:withDefault(arr(obj({issueId:str({min:1,max:100}),rationale:str({min:10,max:4000})}),{max:200}),()=>[]),
   complete:withDefault(bool(),()=>true),
   usage:usage()
 });

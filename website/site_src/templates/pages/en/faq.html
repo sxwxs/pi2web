@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-hero section-pad"><div class="content-shell narrow reveal"><span class="section-kicker">FAQ</span><h1>Frequently asked<br><span>pi2web questions.</span></h1><p>Installation, pairing codes, security boundaries, data storage, and platform support. If your question is missing, open a GitHub issue.</p><div class="page-hero-actions"><a class="button button-primary" href="/en/blog/install-and-configure/">Setup guide</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web/issues" rel="noreferrer">Open an issue ↗</a></div></div></section>
+<section class="section-pad faq-page"><div class="content-shell faq-layout">
+{% for question, answer in faq_items %}
+  <article class="faq-item reveal"><h2>{{ question }}</h2><p>{{ answer }}</p></article>
+{% endfor %}
+  <div class="faq-more reveal">
+    <h2>Still stuck?</h2>
+    <p>The guides go deeper on CLI options, remote access options, voice, and email notifications.</p>
+    <div class="hero-actions center-actions"><a class="button button-primary" href="/en/blog/">Browse all guides</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub ↗</a></div>
+  </div>
+</div></section>
+{% endblock %}

@@ -1,4 +1,4 @@
-import {execFile} from 'node:child_process';
+import {execFile,execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
@@ -8,9 +8,31 @@ import {CollabStore,type CreateSessionInput} from './store.js';
 import {ValidationError,parse,type FieldError} from './validate.js';
 import {advanceRequest,createParticipantRequest,createSessionRequest,debateArgumentRequest,debateArgumentsRequest,escalationRequest,findingsRequest,finalizeRequest,nominationsRequest,participantBudgetRequest,policyPatch,readyRequest,rebindParticipantRequest,recheckRequest,resolveEscalationRequest,scoresRequest,votesRequest,issueVotesRequest,mergeVotesRequest,issueDiscussionsRequest,retryWaitingRequest} from './schemas.js';
 import {analyse,assertScoringCapability,assertScoringPhase,contestedCriteria,finalizeScores,isScoringReadyToAdvance,nextScoringPhase,nominationsSealed,scoresSealed,scoringPanel,scoringProgress,scoringWaitingOn,tallyVotes,votesSealed,type ScoringSnapshot} from './scoring-flow.js';
-import {applyEscalation,applyHumanRuling,applyWithdraw,approvalSummary,assertCanFileFinding,assertCapability,canSeeOthersFindings,flowError,isReadyToAdvance,nextPhase,sessionProgress,stallCheck,waitingOn,currentIssueVotes,issueConsensus,contestedIssueIds,pendingCrossVoters,owedIssueVoteIds,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from './review-flow.js';
+import {applyEscalation,applyHumanRuling,applyWithdraw,approvalSummary,assertCanFileFinding,assertCapability,canSeeOthersFindings,flowError,isOpenIssue,isReadyToAdvance,nextPhase,sessionProgress,stallCheck,waitingOn,currentIssueVotes,issueConsensus,activeContestedIssueIds,pendingCrossVoters,owedIssueVoteIds,type AdvanceResult,type ContestedResolution,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from './review-flow.js';
 
 const run=promisify(execFile);
+
+/**
+ * Shared rulebook handed to every seat. A reviewer that does not know the panel size, the vote semantics, or
+ * what happens to a contested finding cannot calibrate anything: the first live panels produced one reviewer
+ * filing twelve findings against another's two, and votes that mixed "this is factually wrong" with "this is
+ * out of scope". None of that was in the prompt, so none of it could be agreed on.
+ */
+const SEVERITY_GUIDE={
+  blocker:'Ships broken or unsafe: data loss, security hole, or the feature cannot work at all.',
+  critical:'Fails for a realistic input or breaks an existing caller; no acceptable workaround.',
+  major:'Wrong or missing behaviour a user or operator will hit, with a workaround.',
+  minor:'Narrow or unlikely impact; correctness or clarity gap worth fixing.',
+  nit:'Style, naming, or wording. Never blocks a merge.'
+} as const;
+const REQUIRED_ACTION_GUIDE={
+  must_fix:'Must not merge with this unfixed.',should_fix:'Fix in this change unless there is a reason not to.',
+  discuss:'A judgment call that needs a decision, not necessarily a code change.',fyi:'Recorded for awareness only.'
+} as const;
+const VOTE_GUIDE={
+  approve:'The finding is factually correct at this baseline and in scope for this review. Approve even if you would have rated the severity lower; say so in the rationale.',
+  reject:'Only when the finding is factually wrong, already handled elsewhere in the code, or outside this review\'s subject. A different severity or a matter of taste is not a reject.'
+} as const;
 
 /** How long a queued task may sit undelivered before the human is told that the wake-up is not landing. */
 const UNDELIVERED_TASK_WARNING_MS=120_000;
@@ -84,8 +106,19 @@ export class CollabHub {
     return items.length;
   }
   /** Public so the dispatcher can log a wake-up attempt on the session timeline without reaching into internals. */
-  logDispatch(sessionId:string,type:'agent_dispatched'|'dispatch_failed',payload:Record<string,unknown>){
+  logDispatch(sessionId:string,type:'agent_dispatched'|'dispatch_failed'|'dispatch_skipped',payload:Record<string,unknown>){
     try{this.record(sessionId,type,payload)}catch{/* the session may have been removed while a wake-up was in flight */}
+  }
+  /**
+   * What this seat owes *now*. A wake-up is queued when a phase opens but delivered only once the agent's
+   * previous turn ends, so by then the panel may have moved on: waking it anyway costs a full model turn to
+   * learn there is nothing to do.
+   */
+  currentTaskFor(participantId:string):string{
+    // Fails open on purpose: 'wait' retires a durable inbox item, so answering 'wait' for a transient throw
+    // (a busy database, a session read mid-delete) would silently drop real work and leave the phase waiting on
+    // a seat that is never woken again. An unnecessary wake-up costs one turn; a dropped one costs the session.
+    try{return String(this.digest(this.store.getParticipant(participantId)).task??'wait')}catch{return 'unknown'}
   }
 
   // ---------------------------------------------------------------- human operations
@@ -453,31 +486,66 @@ export class CollabHub {
       if(!session.policy.consensusReview)throw flowError(COLLAB_ERRORS.wrongPhase,'Issue votes are only accepted after collection when consensus review is enabled');
       if(!collected)throw flowError(COLLAB_ERRORS.wrongPhase,'Issue votes start after this reviewer finishes the blind review');
     }else if(!['validating','issue_reconsidering'].includes(session.phase))throw flowError(COLLAB_ERRORS.wrongPhase,`Issue votes are only accepted in validating or issue_reconsidering, but the session is in ${session.phase}`);
-    const consensus=issueConsensus(snapshot),expected=session.phase==='issue_reconsidering'
-      ?consensus.filter(entry=>entry.rejecters.includes(participant.participantId)).map(entry=>entry.issueId)
+    const consensus=issueConsensus(snapshot),owedNow=session.phase==='issue_reconsidering'
+      ?consensus.filter(entry=>activeContestedIssueIds(snapshot).includes(entry.issueId)&&entry.rejecters.includes(participant.participantId)).map(entry=>entry.issueId)
       :owedIssueVoteIds(snapshot,participant.participantId);
-    const votable=session.phase==='issue_reconsidering'?expected:this.store.listIssues(session.sessionId,{status:['open'],round:session.round}).filter(issue=>issue.reporterId!==participant.participantId).map(issue=>issue.issueId);
-    const submitted=input.votes.map(vote=>vote.issueId),errors:FieldError[]=[];
-    for(const issueId of expected)if(!submitted.includes(issueId))errors.push(fieldError('votes','REQUIRED',`A vote for issue ${issueId} is required`));
+    const votable=session.phase==='issue_reconsidering'?owedNow:this.store.listIssues(session.sessionId,{status:['open'],round:session.round}).filter(issue=>issue.reporterId!==participant.participantId).map(issue=>issue.issueId);
+    const submitted=input.votes.map(vote=>vote.issueId),errors:FieldError[]=[],dropped=new Set<string>();
+    // A missing vote is not a bad request. Findings keep arriving while a reviewer reads code, so the owed set
+    // grows underneath it and demanding the set as it stands at submit time threw away a whole turn of work
+    // (observed: twelve REQUIRED errors against a reviewer that had voted on everything it was shown). The panel
+    // is protected by the phase not completing below, and the hub simply calls this seat back for the rest.
+    if(!input.votes.length&&owedNow.length)errors.push(fieldError('votes','REQUIRED','Submit a vote for every finding in yourRequiredIssueIds'));
     for(const [index,vote] of input.votes.entries()){
-      if(!votable.includes(vote.issueId))errors.push(fieldError(`votes[${index}].issueId`,'UNEXPECTED',`You do not owe a vote for ${vote.issueId}`));
+      const known=this.store.findIssueInSession(session.sessionId,vote.issueId);
+      // A finding can leave the votable set between this reviewer's wake-up and its submission: another
+      // rejecter voting first can freeze a contested issue (stale), and its reporter can withdraw it. Failing
+      // the batch for that throws away every other ballot in the same call - the exact failure the vote
+      // relaxation above was introduced to remove - so a no-longer-votable id is dropped instead, the way
+      // submitIssueDiscussions drops arguments for findings that closed underneath it.
+      if(!known)errors.push(fieldError(`votes[${index}].issueId`,'UNEXPECTED',`${vote.issueId} is not a finding in this session`));
+      else if(!votable.includes(vote.issueId)){dropped.add(vote.issueId);continue}
       if(submitted.indexOf(vote.issueId)!==index)errors.push(fieldError(`votes[${index}].issueId`,'DUPLICATE','Only one vote per issue is accepted'));
       if(vote.stance==='reject'&&(vote.rationale??'').trim().length<20)errors.push(fieldError(`votes[${index}].rationale`,'REQUIRED','Rejecting an issue requires a rationale of at least 20 characters'));
     }
     if(session.phase!=='validating'&&input.mergeProposals.length)errors.push(fieldError('mergeProposals','WRONG_PHASE','Merge proposals are only accepted during initial issue validation'));
     if(errors.length)throw new ValidationError(errors);
-    for(const vote of input.votes)this.store.saveIssueVote({sessionId:session.sessionId,issueId:vote.issueId,participantId:participant.participantId,round:session.round,consensusRound:session.phase==='validating'?0:session.debateRound,stance:vote.stance,rationale:vote.rationale});
+    const counted=input.votes.filter(vote=>!dropped.has(vote.issueId)),acceptedIds=counted.map(vote=>vote.issueId);
+    for(const vote of counted)this.store.saveIssueVote({sessionId:session.sessionId,issueId:vote.issueId,participantId:participant.participantId,round:session.round,consensusRound:session.phase==='validating'?0:session.debateRound,stance:vote.stance,rationale:vote.rationale});
     const proposalIds:string[]=[];
     for(const proposal of input.mergeProposals){
       const issueIds=[...new Set(proposal.issueIds)];
       if(issueIds.length<2||issueIds.some(issueId=>!this.store.findIssueInSession(session.sessionId,issueId)))throw new ValidationError([fieldError('mergeProposals','UNKNOWN_ISSUE','Every merge proposal needs at least two issues from this session')]);
       proposalIds.push(this.store.createMergeProposal({sessionId:session.sessionId,round:session.round,issueIds,participantId:participant.participantId,rationale:proposal.rationale}).proposalId);
     }
-    if(input.complete)this.store.markPhaseComplete(session.sessionId,session.round,session.phase==='issue_reconsidering'?`issue_reconsidering:${session.debateRound}`:session.phase,participant.participantId);
-    const response={accepted:submitted,mergeProposals:proposalIds,complete:input.complete,consensusRound:session.debateRound};
+    // Completion is measured against the ballot box, not against the request: a reviewer is done when nothing
+    // is owed any more, whichever call finally covered it.
+    const remaining=this.owedVotesAfter(session,participant,acceptedIds,owedNow);
+    if(input.complete&&!remaining.length&&session.phase!=='collecting')this.store.markPhaseComplete(session.sessionId,session.round,session.phase==='issue_reconsidering'?`issue_reconsidering:${session.debateRound}`:session.phase,participant.participantId);
+    const response={accepted:acceptedIds,dropped:[...dropped],mergeProposals:proposalIds,complete:input.complete&&!remaining.length,stillOwed:remaining,consensusRound:session.debateRound};
     this.finish(participant,input.clientRequestId,body,input.usage,response);
-    this.record(session.sessionId,'issue_votes_submitted',{count:submitted.length,mergeProposals:proposalIds,phase:session.phase,consensusRound:session.debateRound},participant.participantId);
-    await this.settle(session.sessionId);return response;
+    this.record(session.sessionId,'issue_votes_submitted',{count:acceptedIds.length,dropped:dropped.size,mergeProposals:proposalIds,phase:session.phase,consensusRound:session.debateRound,stillOwed:remaining.length},participant.participantId);
+    await this.settle(session.sessionId);
+    // Whatever this seat still owes has to come back to it as a task, or the session waits on a reviewer that
+    // believes it is finished.
+    if(remaining.length)this.requeueVotes(session.sessionId,participant.participantId,remaining.length);
+    return response;
+  }
+  /** Findings this participant still owes a ballot on once the votes in this request are counted. */
+  private owedVotesAfter(session:CollabSession,participant:Participant,submitted:string[],owedNow:string[]){
+    const covered=new Set(submitted);
+    return owedNow.filter(issueId=>!covered.has(issueId));
+  }
+  private requeueVotes(sessionId:string,participantId:string,owed:number){
+    const session=this.store.findSession(sessionId);
+    if(!session||session.status!=='active'||!['collecting','validating','issue_reconsidering'].includes(session.phase))return;
+    const prefix=session.phase==='issue_reconsidering'?'reconsider_issue_votes':'validate_issues';
+    const task=`${prefix}#${owed}`;
+    // Dedup on the prefix, not on the whole type: the owed count is part of the type only as a hint, so
+    // `validate_issues#3` and `validate_issues#5` would otherwise pile up as two wake-ups for the same seat.
+    if(this.store.listInbox(participantId).some(item=>item.type.split('#')[0]===prefix))return;
+    this.push(sessionId,participantId,task,{phase:session.phase,round:session.round,owed});
+    this.record(sessionId,'task_assigned',{participantId,task,phase:session.phase,round:session.round,remainder:true});
   }
 
   async submitMergeVotes(participant:Participant,body:unknown){
@@ -500,17 +568,60 @@ export class CollabHub {
 
   async submitIssueDiscussions(participant:Participant,body:unknown){
     const input=parse(issueDiscussionsRequest,body),cached=this.replay(participant,input.clientRequestId);if(cached)return cached;
-    const session=this.store.getSession(participant.sessionId),snapshot=this.snapshot(session.sessionId);
+    const session=this.store.getSession(participant.sessionId),snapshot=this.snapshot(participant.sessionId);
     assertCapability(this.toFlowParticipant(participant),'debate');
     if(session.phase!=='issue_discussing')throw flowError(COLLAB_ERRORS.wrongPhase,`Issue discussions are only accepted in phase issue_discussing, but the session is in ${session.phase}`);
-    const expected=issueConsensus(snapshot).filter(entry=>entry.rejecters.length&&entry.supporters.includes(participant.participantId)).map(entry=>entry.issueId),submitted=input.discussions.map(entry=>entry.issueId),errors:FieldError[]=[];
-    for(const issueId of expected)if(!submitted.includes(issueId))errors.push(fieldError('discussions','REQUIRED',`A supporter argument for issue ${issueId} is required`));
-    for(const [index,entry] of input.discussions.entries())if(!expected.includes(entry.issueId))errors.push(fieldError(`discussions[${index}].issueId`,'UNEXPECTED',`You are not currently a supporter of ${entry.issueId}`));
+    const active=new Set(activeContestedIssueIds(snapshot));
+    const expected=issueConsensus(snapshot).filter(entry=>active.has(entry.issueId)&&entry.supporters.includes(participant.participantId)).map(entry=>entry.issueId);
+    const errors:FieldError[]=[];
+    // Withdrawals are validated and applied first: a reporter that no longer stands by a finding must be able to
+    // say so in the same call that defends the rest. Two calls are impossible for an agent, because the
+    // submission tool ends its turn - which is exactly how three rounds of "I am withdrawing this" prose still
+    // reached a human as an unresolved dispute.
+    const withdrawn=new Set<string>(),alreadyClosed=new Set<string>();
+    for(const [index,entry] of input.withdrawals.entries()){
+      const issue=this.store.findIssueInSession(session.sessionId,entry.issueId);
+      if(!issue){errors.push(fieldError(`withdrawals[${index}].issueId`,'UNEXPECTED',`${entry.issueId} is not a finding in this session`));continue}
+      if(issue.reporterId!==participant.participantId){errors.push(fieldError(`withdrawals[${index}].issueId`,'FORBIDDEN','Only the reporter of a finding may withdraw it; argue it in discussions[] instead'));continue}
+      // collab_withdraw_issue does not end the turn, so a model can withdraw standalone and then repeat the id
+      // here. Its own finding is already gone: that is the outcome it asked for, not a bad request, and
+      // rejecting the batch over it would strand every other finding in the same call.
+      if(!expected.includes(entry.issueId)){
+        if(!isOpenIssue(this.toFlowIssue(issue))){alreadyClosed.add(entry.issueId);continue}
+        errors.push(fieldError(`withdrawals[${index}].issueId`,'UNEXPECTED',`${entry.issueId} is not one of the findings you were asked about`));continue;
+      }
+      withdrawn.add(entry.issueId);
+    }
+    const submitted=input.discussions.map(entry=>entry.issueId);
+    for(const issueId of expected)if(!submitted.includes(issueId)&&!withdrawn.has(issueId))errors.push(fieldError('discussions','REQUIRED',`Argue or withdraw finding ${issueId}`));
+    for(const [index,entry] of input.discussions.entries()){
+      // An argument for something already closed (withdrawn here, or by the standalone tool earlier in the same
+      // turn) is dropped, not rejected: failing the batch would strand every other finding in it.
+      if(withdrawn.has(entry.issueId)||alreadyClosed.has(entry.issueId))continue;
+      const known=this.store.findIssueInSession(session.sessionId,entry.issueId);
+      if(known&&!expected.includes(entry.issueId)&&!isOpenIssue(this.toFlowIssue(known)))continue;
+      if(!expected.includes(entry.issueId))errors.push(fieldError(`discussions[${index}].issueId`,'UNEXPECTED',`You are not currently a supporter of ${entry.issueId}`));
+      if(submitted.indexOf(entry.issueId)!==index)errors.push(fieldError(`discussions[${index}].issueId`,'DUPLICATE','Only one argument per finding is accepted'));
+    }
+    if(!input.discussions.length&&!withdrawn.size&&!alreadyClosed.size)errors.push(fieldError('discussions','REQUIRED','Submit an argument for every finding you still stand by, or withdraw it'));
     if(errors.length)throw new ValidationError(errors);
-    for(const entry of input.discussions)this.store.addIssueMessage(entry.issueId,session.round,participant.participantId,'discussion',{argument:entry.argument,respondingTo:entry.respondingTo,consensusRound:session.debateRound});
+    const accepted:string[]=[];
+    for(const entry of input.withdrawals){
+      if(!withdrawn.has(entry.issueId))continue;
+      const issue=this.store.getIssue(entry.issueId);
+      const outcome=applyWithdraw({issue:this.toFlowIssue(issue),actor:this.toFlowParticipant(participant)});
+      this.store.updateIssue(issue.issueId,{status:outcome.status});
+      this.store.addIssueMessage(issue.issueId,session.round,participant.participantId,'discussion',{argument:`Withdrawn by the reporter: ${entry.rationale}`,withdrawn:true,consensusRound:session.debateRound});
+      this.record(session.sessionId,'issue_withdrawn',{issueId:issue.issueId,rationale:entry.rationale,consensusRound:session.debateRound},participant.participantId);
+    }
+    for(const entry of input.discussions){
+      if(withdrawn.has(entry.issueId)||!expected.includes(entry.issueId))continue;
+      this.store.addIssueMessage(entry.issueId,session.round,participant.participantId,'discussion',{argument:entry.argument,respondingTo:entry.respondingTo,consensusRound:session.debateRound});
+      accepted.push(entry.issueId);
+    }
     if(input.complete)this.store.markPhaseComplete(session.sessionId,session.round,`issue_discussing:${session.debateRound}`,participant.participantId);
-    const response={accepted:submitted,complete:input.complete,consensusRound:session.debateRound};this.finish(participant,input.clientRequestId,body,input.usage,response);
-    this.record(session.sessionId,'issue_discussions_submitted',{count:submitted.length,consensusRound:session.debateRound},participant.participantId);await this.settle(session.sessionId);return response;
+    const response={accepted,withdrawn:[...withdrawn],alreadyWithdrawn:[...alreadyClosed],complete:input.complete,consensusRound:session.debateRound};this.finish(participant,input.clientRequestId,body,input.usage,response);
+    this.record(session.sessionId,'issue_discussions_submitted',{count:accepted.length,withdrawn:withdrawn.size,alreadyWithdrawn:alreadyClosed.size,consensusRound:session.debateRound},participant.participantId);await this.settle(session.sessionId);return response;
   }
 
   async withdrawIssue(participant:Participant,issueId:string){
@@ -557,49 +668,126 @@ export class CollabHub {
     if(session.kind==='scoring')return this.scoringDigest(participant);
     const snapshot=this.snapshot(session.sessionId);
     const baseline=this.store.getBaselineForRound(session.sessionId,session.round);
+    const panel=this.store.listParticipants(session.sessionId).filter(entry=>entry.state!=='left')
+      .map(entry=>({participantId:entry.participantId,role:entry.role,displayName:entry.displayName,model:entry.model,isYou:entry.participantId===participant.participantId}));
     const base={sessionId:session.sessionId,kind:session.kind,title:session.title,phase:session.phase,round:session.round,subject:session.subject,
-      baseline,you:{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,tokensUsed:participant.tokensUsed,tokenBudget:participant.tokenBudget,state:participant.state},
+      baseline:baseline?{...baseline,...this.reviewScope(session,baseline)}:baseline,panel,
+      you:{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,tokensUsed:participant.tokensUsed,tokenBudget:participant.tokenBudget,state:participant.state},
       progress:sessionProgress(snapshot),stalled:session.stalled};
     if(session.phase==='implementing'){
-      if(participant.role!=='implementer'||!waitingOn(snapshot).includes(participant.participantId))return {...base,task:'wait',instructions:'Another implementer is working. You will be called if this seat has a later task.'};
+      if(participant.role!=='implementer'||!waitingOn(snapshot).includes(participant.participantId))return this.waitDigest(session,base,'Another implementer is working. Nothing is required from you; end your turn.');
       // A remediation seat may be a newly added developer, so it receives the whole confirmed action list rather
       // than only findings that originally targeted an older implementer seat.
       const carried=this.store.listIssues(session.sessionId,{status:['confirmed','open']});
       const initial=session.round===1&&session.policy.implementationFirst&&!carried.length;
       return {...base,task:'implement',issues:carried.map(issue=>this.withHistory(issue)),
         instructions:initial
-          ?`Implement the requested subject in ${session.cwd}. When the code is ready, POST /api/v1/collab/sessions/${session.sessionId}/ready with a summary, changed files and a codeRef, then end your turn. The hub pins the baseline and calls the reviewers.`
-          :`Fix the confirmed review findings in ${session.cwd}. When the code is ready, POST /api/v1/collab/sessions/${session.sessionId}/ready with a summary, changed files and a codeRef (commit or dirtyHash), then end your turn. The hub pins the new baseline and calls the reviewers; there is no per-issue response stage.`};
+          ?`Implement the requested subject in ${session.cwd}. When the code is ready, call collab_submit_ready with a summary, the changed files and a codeRef (commit or dirtyHash), then end your turn. The hub pins the baseline and calls the reviewers.`
+          :`Fix the confirmed review findings listed in issues[] in ${session.cwd}. When the code is ready, call collab_submit_ready with a summary, the changed files and a codeRef (commit or dirtyHash), then end your turn. The hub pins the new baseline and calls the reviewers; there is no per-issue response stage.`};
     }
     if(session.phase==='collecting'){
       const collected=snapshot.completions.some(entry=>entry.phase==='collecting'&&entry.round===session.round&&entry.participantId===participant.participantId);
       if(collected){
         if(session.policy.consensusReview&&owedIssueVoteIds(snapshot,participant.participantId).length)return this.issueValidationDigest(session,participant,snapshot,base,true);
-        return {...base,task:'wait',instructions:'You finished the blind review. End your turn; the hub will prompt you if later findings need a vote or the panel moves on.'};
+        return this.waitDigest(session,base,'You finished the blind review. End your turn; the hub will prompt you if later findings need a vote or the panel moves on.');
       }
       const own=this.store.listIssues(session.sessionId,{reporterId:participant.participantId,round:session.round});
       const issuesToRecheck=this.store.listIssues(session.sessionId,{status:['confirmed'],reporterId:participant.participantId}).filter(issue=>issue.round<session.round).map(issue=>this.withHistory(issue));
-      const required=participant.role==='reviewer';
+      const required=participant.role==='reviewer',reviewerCount=panel.filter(entry=>entry.role==='reviewer').length;
       return {...base,task:required?'file_findings':'file_findings_optional',yourFindings:own,issuesToRecheck,
-        instructions:`Review the code at the pinned baseline and POST every new finding to /api/v1/collab/sessions/${session.sessionId}/findings with baselineId="${baseline?.baselineId??''}". For every issuesToRecheck entry, include rechecks[] with outcome "resolved" or "still_present" and a rationale. Set reviewComplete=true on your final call. location.path and evidence are mandatory for new findings.`};
+        rules:{...this.consensusRules(session),severity:SEVERITY_GUIDE,requiredAction:REQUIRED_ACTION_GUIDE,
+          blind:`This is a blind review by ${reviewerCount} reviewer(s). You cannot see anyone else's findings yet, and they cannot see yours. Afterwards each of you votes on the others' findings.`,
+          scope:'Review exactly the subject, and when baseline.changedFiles is present, those files. Reporting something outside that scope is what the other reviewers vote down.'},
+        instructions:`Review the code at the pinned baseline in ${session.cwd} and report every finding in ONE call to collab_submit_findings; that call closes your blind review and ends your turn, so gather everything first. location.path and evidence are mandatory, and evidence must be something you verified in this checkout. ${issuesToRecheck.length?`Also include one rechecks[] entry (outcome resolved or still_present, with a rationale) for each of the ${issuesToRecheck.length} issuesToRecheck entries. `:''}Rate severity and requiredAction by rules.severity and rules.requiredAction, not by how important the finding feels.`};
     }
     if(session.phase==='validating')return this.issueValidationDigest(session,participant,snapshot,base,false);
     if(session.phase==='merge_voting'){
       const proposals=this.store.listMergeProposals(session.sessionId),owed=proposals.filter(proposal=>!proposal.votes.some(vote=>vote.participantId===participant.participantId));
-      return {...base,task:owed.length?'vote_on_merges':'wait',mergeProposals:proposals,yourRequiredProposalIds:owed.map(entry=>entry.proposalId),
-        instructions:`Vote on every merge proposal you did not make via POST /api/v1/collab/sessions/${session.sessionId}/merge-votes. A merge is applied only with approval from every reviewer; rejecting requires a rationale.`};
+      if(!owed.length)return this.waitDigest(session,base);
+      return {...base,task:'vote_on_merges',mergeProposals:proposals,yourRequiredProposalIds:owed.map(entry=>entry.proposalId),
+        instructions:'Call collab_submit_merge_votes once with a vote on every proposal in yourRequiredProposalIds. A merge is applied only if every reviewer approves it, so reject anything that would fold two genuinely different findings into one; rejecting requires a rationale.'};
     }
     if(session.phase==='issue_discussing'){
-      const consensus=issueConsensus(snapshot),owed=consensus.filter(entry=>entry.rejecters.length&&entry.supporters.includes(participant.participantId));
-      return {...base,task:owed.length?'defend_approved_issues':'wait',consensus,issues:owed.map(entry=>this.withHistory(this.store.getIssue(entry.issueId))),
-        instructions:`Some reviewers rejected these issues. As a current supporter, answer each rejection with evidence via POST /api/v1/collab/sessions/${session.sessionId}/issue-discussions, then end your turn. If you are the reporter and no longer stand by an issue, do not merely say "withdraw" in prose: POST /issues/{issueId}/withdraw. Any reviewer may POST /escalations with refId to request human intervention before all ${session.policy.maxConsensusRounds} rounds finish.`};
+      const consensus=this.annotatedConsensus(session,snapshot),active=new Set(activeContestedIssueIds(snapshot));
+      const owed=consensus.filter(entry=>active.has(entry.issueId)&&entry.supporters.includes(participant.participantId));
+      if(!owed.length)return this.waitDigest(session,base);
+      const alone=owed.filter(entry=>entry.reporterId===participant.participantId&&entry.panelRejected).length;
+      return {...base,task:'defend_approved_issues',consensus,issues:owed.map(entry=>this.withHistory(this.store.getIssue(entry.issueId))),
+        yourRequiredIssueIds:owed.map(entry=>entry.issueId),rules:this.consensusRules(session),
+        instructions:`Reviewers rejected the findings in yourRequiredIssueIds and you are a current supporter of each. Call collab_submit_issue_discussions ONCE; it ends your turn, so put everything into that single call. For each finding either answer the rejection with evidence in discussions[], or, if you are its reporter and no longer stand by it, drop it in withdrawals[] with the reason${alone?` — ${alone===1?'one of them is':`${alone} of them are`} now rejected by every other reviewer, so withdrawing is the expected outcome unless you have new evidence`:''}. consensus[].positions holds what the rejecters actually argued. If this genuinely needs the human operator, call collab_escalate first: it does not end your turn.`};
     }
     if(session.phase==='issue_reconsidering'){
-      const consensus=issueConsensus(snapshot),owed=consensus.filter(entry=>entry.rejecters.includes(participant.participantId));
-      return {...base,task:owed.length?'reconsider_issue_votes':'wait',consensus,issues:owed.map(entry=>this.withHistory(this.store.getIssue(entry.issueId))),
-        instructions:`Read the supporters' latest discussion, then POST a revised approve/reject vote for every issue you currently reject to /api/v1/collab/sessions/${session.sessionId}/issue-votes. Keeping reject still requires a rationale. If human judgment is needed now, POST /escalations with the issue refId instead of waiting for all ${session.policy.maxConsensusRounds} rounds.`};
+      const consensus=this.annotatedConsensus(session,snapshot),active=new Set(activeContestedIssueIds(snapshot));
+      const owed=consensus.filter(entry=>active.has(entry.issueId)&&entry.rejecters.includes(participant.participantId));
+      if(!owed.length)return this.waitDigest(session,base);
+      return {...base,task:'reconsider_issue_votes',consensus,issues:owed.map(entry=>this.withHistory(this.store.getIssue(entry.issueId))),
+        yourRequiredIssueIds:owed.map(entry=>entry.issueId),rules:this.consensusRules(session),
+        instructions:'Read the supporters\' latest arguments in issues[].history, then call collab_submit_issue_votes once with a vote for every finding in yourRequiredIssueIds. Switch to approve if the argument answered your objection; keeping reject still requires a rationale that engages with what was argued. A rationale that only repeats your previous one ends the discussion for that finding.'};
     }
-    return {...base,task:'wait',instructions:session.phase==='awaiting_human'?'A human ruling is pending. Do not resubmit and do not poll; you will be prompted when it is your turn again.':'Nothing is required from you right now. End your turn; the hub prompts you when something needs you.'};
+    return this.waitDigest(session,base);
+  }
+  /** The panel's own rules, in the prompt, so a vote is cast against a known standard instead of a guess. */
+  private consensusRules(session:CollabSession){
+    return {vote:VOTE_GUIDE,
+      contested:`Any reject makes a finding contested: its supporters answer with evidence, then the rejecters vote again, for at most ${session.policy.maxConsensusRounds} round(s).`,
+      outcome:'Still contested at the end: a finding every other reviewer rejected is dropped, a split panel is decided by majority, and only a blocker/critical dispute reaches the human operator.',
+      withdraw:'The reporter of a finding may withdraw it at any time (collab_withdraw_issue, or withdrawals[] in collab_submit_issue_discussions). Withdrawing something you no longer stand by is a normal, expected move, not a failure.'};
+  }
+  /** Consensus board plus the two facts a defender needs: who filed it, and whether anybody else still agrees. */
+  private annotatedConsensus(session:CollabSession,snapshot:ReviewSnapshot){
+    const panel=this.store.listParticipants(session.sessionId).filter(entry=>entry.role==='reviewer'&&entry.state!=='left');
+    return issueConsensus(snapshot).map(entry=>{
+      const issue=this.store.getIssue(entry.issueId),voters=panel.filter(reviewer=>reviewer.participantId!==issue.reporterId);
+      return {...entry,reporterId:issue.reporterId,severity:issue.severity,title:issue.title,
+        panelRejected:voters.length>0&&voters.every(reviewer=>entry.rejecters.includes(reviewer.participantId))};
+    });
+  }
+  /** A seat with nothing to do must be told exactly that: a stale phase blurb reads as work that was not done. */
+  private waitDigest(session:CollabSession,base:Record<string,unknown>,reason?:string){
+    return {...base,task:'wait',instructions:reason??(session.phase==='awaiting_human'
+      ?'A human ruling is pending. Nothing is required from you. Do not resubmit and do not poll; end your turn.'
+      :'Nothing is required from you right now. Do not submit anything; end your turn. The hub prompts you when something needs you.')};
+  }
+  /**
+   * The concrete file list behind a review subject. Without it every reviewer re-derives the scope from prose
+   * like "git diff master", they end up reviewing different code, and the divergence surfaces later as
+   * disagreement about findings rather than about scope. Derived, never persisted: a function of the pinned commit.
+   */
+  private scopeCache=new Map<string,{changedFiles?:string[],changedFilesTruncated?:boolean}>();
+  private scopeKey(session:CollabSession,baseline:{commit?:string,dirtyHash?:string}){return `${session.sessionId}:${baseline.commit??''}:${baseline.dirtyHash??''}`}
+  /** Only bare refs/ranges are forwarded, never flags: in the `free` case the value is human-authored prose. */
+  private scopeArgs(session:CollabSession){
+    const tokens=session.subject.value.split(/\s+/).filter(token=>token&&!token.startsWith('-')&&!['git','diff','log','show'].includes(token)).slice(0,2);
+    return ['diff','--name-only',...(tokens.length?tokens:['HEAD'])];
+  }
+  private toScope(stdout:string){
+    const files=stdout.split('\n').map(line=>line.trim()).filter(Boolean);
+    return {changedFiles:files.slice(0,200),changedFilesTruncated:files.length>200};
+  }
+  private reviewScope(session:CollabSession,baseline:{vcs:string,commit?:string,dirtyHash?:string,paths:string[]}){
+    if(baseline.vcs!=='git')return {};
+    if(session.subject.type==='paths'&&baseline.paths.length)return {changedFiles:baseline.paths,changedFilesTruncated:false};
+    const key=this.scopeKey(session,baseline),cached=this.scopeCache.get(key);
+    if(cached)return cached;
+    // Failures are cached too. A `free` subject is prose ("current branch"), so `git diff --name-only current
+    // branch` fails on the *common* path, and an uncached failure re-forked git synchronously - blocking the
+    // event loop - on every digest, which currentTaskFor now triggers on every dispatch attempt as well.
+    let scope:{changedFiles?:string[],changedFilesTruncated?:boolean}={};
+    try{scope=this.toScope(execFileSync('git',this.scopeArgs(session),{cwd:session.cwd,encoding:'utf8',timeout:10_000,maxBuffer:4*1024*1024,stdio:['ignore','pipe','ignore']}))}
+    catch{scope={}}
+    this.scopeCache.set(key,scope);
+    return scope;
+  }
+  /**
+   * Computes the scope where it belongs: once, asynchronously, when the baseline is pinned. The digest then only
+   * reads the cache; the synchronous fallback above survives for restarts, where the cache is empty.
+   */
+  private async warmReviewScope(session:CollabSession,baseline:{vcs:string,commit?:string,dirtyHash?:string,paths:string[]}){
+    if(baseline.vcs!=='git'||(session.subject.type==='paths'&&baseline.paths.length))return;
+    const key=this.scopeKey(session,baseline);
+    if(this.scopeCache.has(key))return;
+    try{this.scopeCache.set(key,this.toScope((await run('git',this.scopeArgs(session),{cwd:session.cwd,timeout:10_000,maxBuffer:4*1024*1024})).stdout))}
+    catch{this.scopeCache.set(key,{})}
   }
 
   reviewSummary(sessionId:string){
@@ -1062,7 +1250,7 @@ export class CollabHub {
       await this.applyPhase(session,result,{});
     }
   }
-  private async applyPhase(session:CollabSession,result:{phase:ReviewPhase,round:number,reason:string,debateRound?:number,escalateDeadlock?:boolean,escalateConsensus?:boolean,skipped?:string[]},context:{forced?:boolean,reason?:string,actor?:string}){
+  private async applyPhase(session:CollabSession,result:AdvanceResult,context:{forced?:boolean,reason?:string,actor?:string}){
     const finished=result.phase==='finished';
     if(context.forced&&result.skipped?.length){
       const completionPhase=['issue_discussing','issue_reconsidering'].includes(session.phase)?`${session.phase}:${session.debateRound}`:session.phase;
@@ -1070,7 +1258,7 @@ export class CollabHub {
       if(session.phase==='merge_voting')for(const proposal of this.store.listMergeProposals(session.sessionId).filter(entry=>entry.round===session.round))for(const participantId of result.skipped)if(!proposal.votes.some(vote=>vote.participantId===participantId))this.store.saveMergeVote({proposalId:proposal.proposalId,participantId,stance:'reject',rationale:`Skipped by forced advance: ${context.reason||'no reason given'}`});
     }
     if(session.phase==='merge_voting'&&result.phase==='consolidating')this.applyApprovedMerges(session.sessionId);
-    if(result.escalateConsensus)this.raiseConsensusEscalations(session);
+    if(result.resolutions?.length)this.applyContestedResolutions(session,result.resolutions);
     // Pin the baseline *before* the phase is visible: otherwise a reviewer that polls in between sees
     // `collecting` with no baseline and its findings bounce off with STALE_BASELINE.
     if(result.phase==='collecting'&&(result.round!==session.round||session.phase==='implementing'))await this.captureBaseline({...session,phase:result.phase,round:result.round});
@@ -1092,6 +1280,7 @@ export class CollabHub {
     const snapshot=await this.resolveBaseline({cwd:session.cwd,subject:session.subject,round:session.round});
     const baseline=this.store.saveBaseline({sessionId:session.sessionId,round:session.round,...snapshot});
     this.record(session.sessionId,'baseline_captured',{...baseline});
+    await this.warmReviewScope(session,baseline);
     return baseline;
   }
   /** The id names a snapshot, but the live workspace must still match it when a reviewer submits evidence. */
@@ -1104,9 +1293,10 @@ export class CollabHub {
   private issueValidationDigest(session:CollabSession,participant:Participant,snapshot:ReviewSnapshot,base:Record<string,unknown>,early:boolean){
     const all=this.store.listIssues(session.sessionId,{status:['open'],round:session.round}),owed=owedIssueVoteIds(snapshot,participant.participantId);
     return {...base,task:'validate_issues',issues:all.map(issue=>this.withHistory(issue)),yourRequiredIssueIds:owed,currentVotes:currentIssueVotes(snapshot),mergeProposals:this.store.listMergeProposals(session.sessionId),
+      rules:{...this.consensusRules(session),severity:SEVERITY_GUIDE},
       instructions:early
-        ?`You finished the blind review. Other reviewers may still be filing. Vote approve/reject on every issue you did not report that is already on the table via POST /api/v1/collab/sessions/${session.sessionId}/issue-votes. A reject needs a rationale. Do not wait, sleep, or poll; the hub will call you again if later findings need a vote. Merge proposals wait until every reviewer has filed.`
-        :`All reviewers have finished the blind review. Validate this round's new issues, then POST one approve/reject vote for every issue you did not report to /api/v1/collab/sessions/${session.sessionId}/issue-votes. A reject needs a rationale. Include duplicate groups in mergeProposals. After consensus the review finishes; fixing is a separate human-triggered cycle.`};
+        ?'You finished your blind review; other reviewers are still filing. Verify each finding in yourRequiredIssueIds against the code yourself, then call collab_submit_issue_votes once with a vote for every one of them. Voting on the set you were given is enough: the hub calls you again for findings that arrive later. A reject needs a rationale. Do not wait, sleep or poll. Merge proposals wait until every reviewer has filed.'
+        :'Every reviewer has finished the blind review. Verify each finding in yourRequiredIssueIds against the code yourself - approve and reject are claims about the code, not impressions - then call collab_submit_issue_votes once with a vote for each. A reject needs a rationale of at least 20 characters. Put findings that are genuinely the same defect into mergeProposals. Fixing is a separate, human-triggered cycle; this review ends at consensus.'};
   }
   /**
    * Cross-votes should not wait for the slowest collector. As soon as two reviewers have closed their own
@@ -1118,7 +1308,9 @@ export class CollabHub {
     const snapshot=this.snapshot(sessionId),assigned:string[]=[];
     for(const participantId of pendingCrossVoters(snapshot)){
       const owed=owedIssueVoteIds(snapshot,participantId),task=`validate_issues#${owed.length}`;
-      if(!owed.length||this.store.listInbox(participantId).some(item=>item.type===task))continue;
+      // Findings arrive one wave at a time, so the owed count grows: dedup on the prefix or the same seat
+      // collects validate_issues#2, #5, #9 as separate durable items and separate wake-ups.
+      if(!owed.length||this.store.listInbox(participantId).some(item=>item.type.split('#')[0]==='validate_issues'))continue;
       this.push(sessionId,participantId,task,{phase:session.phase,round:session.round,owed:owed.length});
       this.record(sessionId,'task_assigned',{participantId,task,phase:session.phase,round:session.round,early:true});
       assigned.push(participantId);
@@ -1161,17 +1353,39 @@ export class CollabHub {
     }
     this.store.markPhaseComplete(sessionId,session.round,'merge_voting','system');
   }
-  private raiseConsensusEscalations(session:CollabSession){
-    const snapshot=this.snapshot(session.sessionId),votes=currentIssueVotes(snapshot);
-    for(const issueId of contestedIssueIds(snapshot)){
-      const issue=this.store.getIssue(issueId);if(this.store.findPendingEscalation(session.sessionId,'issue_dispute',issueId))continue;
-      this.store.updateIssue(issueId,{status:'escalated'});
-      const current=issueConsensus(snapshot).find(entry=>entry.issueId===issueId);
-      const voteHistory=this.store.listIssueVotes(session.sessionId).filter(vote=>vote.issueId===issueId).map(vote=>({participantId:vote.participantId,stance:`vote round ${vote.consensusRound}: ${vote.stance}`,rationale:vote.rationale??'approved without an additional rationale'}));
-      const discussions=this.store.listIssueMessages(issueId).filter(message=>message.kind==='discussion').map(message=>({participantId:message.authorId,stance:`discussion round ${message.payload.consensusRound??'?'}`,rationale:String(message.payload.argument??'')}));
-      const implicit=(current?.positions??[]).filter(position=>position.implicit).map(position=>({participantId:position.participantId,stance:'initial approve (reporter)',rationale:'issue reporter implicitly approves'})),positions=[...implicit,...voteHistory,...discussions];
-      const escalation=this.store.createEscalation({sessionId:session.sessionId,kind:'issue_dispute',refId:issueId,raisedBy:'system',summary:`The review panel did not reach unanimous agreement on whether this is a valid issue after ${session.policy.maxConsensusRounds} discussion round(s): ${issue.title}`,positions,question:`Should "${issue.title}" proceed to implementation?`,options:['valid issue','not an issue','needs more investigation'],urgency:issue.severity==='blocker'||issue.severity==='critical'?'high':'normal'});
-      this.record(session.sessionId,'escalation_raised',{escalationId:escalation.escalationId,kind:'issue_dispute',refId:issueId,reason:'issue_consensus_exhausted',votes:votes.filter(vote=>vote.issueId===issueId)});
+  /**
+   * Final disposition of every finding the panel could not agree on. Only a genuine judgment call reaches the
+   * human: a serious finding with a split panel, or a serious finding the whole panel rejected over its
+   * reporter's objection. The rest is decided here and recorded, because handing a person six "is this an issue?"
+   * questions per review is the same as having no panel at all.
+   */
+  private applyContestedResolutions(session:CollabSession,resolutions:ContestedResolution[]){
+    const snapshot=this.snapshot(session.sessionId);
+    for(const resolution of resolutions){
+      const issue=this.store.getIssue(resolution.issueId);
+      if(resolution.disposition!=='escalate'){
+        const status=resolution.disposition==='majority_confirmed'?'confirmed':'wontfix';
+        this.store.updateIssue(issue.issueId,{status});
+        this.store.addIssueMessage(issue.issueId,session.round,'system','ruling',{decision:resolution.disposition,rationale:resolution.reason,
+          supporters:resolution.supporters,rejecters:resolution.rejecters,consensusRound:session.debateRound});
+        this.record(session.sessionId,'issue_panel_ruled',{issueId:issue.issueId,disposition:resolution.disposition,reason:resolution.reason,status,
+          severity:issue.severity,supporters:resolution.supporters,rejecters:resolution.rejecters});
+        continue;
+      }
+      if(this.store.findPendingEscalation(session.sessionId,'issue_dispute',issue.issueId))continue;
+      this.store.updateIssue(issue.issueId,{status:'escalated'});
+      const voteHistory=this.store.listIssueVotes(session.sessionId).filter(vote=>vote.issueId===issue.issueId).map(vote=>({participantId:vote.participantId,stance:`vote round ${vote.consensusRound}: ${vote.stance}`,rationale:vote.rationale??'approved without an additional rationale'}));
+      const discussions=this.store.listIssueMessages(issue.issueId).filter(message=>message.kind==='discussion').map(message=>({participantId:message.authorId,stance:`discussion round ${message.payload.consensusRound??'?'}`,rationale:String(message.payload.argument??'')}));
+      const current=issueConsensus(snapshot).find(entry=>entry.issueId===issue.issueId);
+      const implicit=(current?.positions??[]).filter(position=>position.implicit).map(position=>({participantId:position.participantId,stance:'initial approve (reporter)',rationale:'issue reporter implicitly approves'}));
+      const escalation=this.store.createEscalation({sessionId:session.sessionId,kind:'issue_dispute',refId:issue.issueId,raisedBy:'system',
+        summary:resolution.reason==='panel_unanimously_rejected'
+          ?`Every other reviewer rejected this ${issue.severity} finding, but its reporter did not withdraw it: ${issue.title}`
+          :`The panel split on this ${issue.severity} finding and did not converge in ${session.debateRound} discussion round(s): ${issue.title}`,
+        positions:[...implicit,...voteHistory,...discussions],question:`Should "${issue.title}" proceed to implementation?`,
+        options:['valid issue','not an issue','needs more investigation'],urgency:issue.severity==='blocker'||issue.severity==='critical'?'high':'normal'});
+      this.record(session.sessionId,'escalation_raised',{escalationId:escalation.escalationId,kind:'issue_dispute',refId:issue.issueId,reason:resolution.reason,
+        supporters:resolution.supporters,rejecters:resolution.rejecters});
     }
   }
   private raiseDeadlockEscalation(session:CollabSession){
@@ -1310,7 +1524,7 @@ export class CollabHub {
     return updated;
   }
   private toFlowParticipant(participant:Participant):FlowParticipant{return {participantId:participant.participantId,role:participant.role,state:participant.state}}
-  private toFlowIssue(issue:Issue):FlowIssue{return {issueId:issue.issueId,reporterId:issue.reporterId,targetParticipantId:issue.targetParticipantId,status:issue.status,round:issue.round}}
+  private toFlowIssue(issue:Issue):FlowIssue{return {issueId:issue.issueId,reporterId:issue.reporterId,targetParticipantId:issue.targetParticipantId,status:issue.status,round:issue.round,severity:issue.severity}}
 }
 
 const words=(value:string)=>new Set(value.toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/).filter(token=>token.length>1));

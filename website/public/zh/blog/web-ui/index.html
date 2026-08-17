@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pi2web Web UI 使用说明</title>
+  <meta name="description" content="在浏览器中创建 Workspace 与 Agent、发送 Prompt 与 steer、使用 Terminal、@ 引用文件、切换模型与 Thinking level、Fork/Undo 与 Compact。">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/zh/blog/web-ui/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/blog/web-ui/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/blog/web-ui/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/blog/web-ui/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="pi2web Web UI 使用说明">
+  <meta property="og:description" content="在浏览器中创建 Workspace 与 Agent、发送 Prompt 与 steer、使用 Terminal、@ 引用文件、切换模型与 Thinking level、Fork/Undo 与 Compact。">
+  <meta property="og:url" content="https://pi2web.es2q.com/zh/blog/web-ui/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="article:published_time" content="2026-07-25">
+  <meta property="article:modified_time" content="2026-07-25">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="pi2web Web UI 使用说明">
+  <meta name="twitter:description" content="在浏览器中创建 Workspace 与 Agent、发送 Prompt 与 steer、使用 Terminal、@ 引用文件、切换模型与 Thinking level、Fork/Undo 与 Compact。">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"pi2web Web UI \u4f7f\u7528\u8bf4\u660e","description":"\u5728\u6d4f\u89c8\u5668\u4e2d\u521b\u5efa Workspace \u4e0e Agent\u3001\u53d1\u9001 Prompt \u4e0e steer\u3001\u4f7f\u7528 Terminal\u3001@ \u5f15\u7528\u6587\u4ef6\u3001\u5207\u6362\u6a21\u578b\u4e0e Thinking level\u3001Fork/Undo \u4e0e Compact\u3002","url":"https://pi2web.es2q.com/zh/blog/web-ui/","inLanguage":"zh-CN","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"},"datePublished":"2026-07-25","dateModified":"2026-07-25","author":{"@type":"Person","name":"sxwxs"},"publisher":{"@type":"Organization","name":"pi2web"},"about":{"@type":"SoftwareApplication","name":"pi2web","applicationCategory":"DeveloperApplication"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"pi2web","item":"https://pi2web.es2q.com/zh/"},{"@type":"ListItem","position":2,"name":"\u4f7f\u7528\u6307\u5357","item":"https://pi2web.es2q.com/zh/blog/"},{"@type":"ListItem","position":3,"name":"pi2web Web UI \u4f7f\u7528\u8bf4\u660e","item":"https://pi2web.es2q.com/zh/blog/web-ui/"}]}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="blog_webui">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/zh/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/zh/features/">产品能力</a>
+        <a href="/zh/blog/" aria-current="page">使用指南</a>
+        <a href="/zh/faq/">常见问题</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/en/blog/web-ui/" lang="en" aria-label="Switch to English">EN</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<article class="article-page">
+<header class="article-hero section-pad"><div class="content-shell article-shell reveal"><nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/zh/">pi2web</a><span>/</span><a href="/zh/blog/">使用指南</a></nav><span class="section-kicker">WEB UI</span><h1>pi2web Web UI 使用说明</h1><p class="article-deck">配对成功后，浏览器就是完整的 Agent 工作台。这篇说明覆盖 Workspace、Agent、对话控制、文件引用、Terminal，以及断线恢复与通知设置。</p><div class="article-meta"><time datetime="2026-07-25">2026-07-25</time><span>pi2web</span><span>实践指南</span></div></div></header>
+<div class="content-shell article-layout"><aside class="article-toc"><strong>本文目录</strong><a href="#connect">连接与配对</a><a href="#workspace">Workspace</a><a href="#agent">创建与管理 Agent</a><a href="#chat">对话与干预</a><a href="#session">Session 分支与 Compact</a><a href="#terminal">Terminal</a><a href="#notify">通知与语音</a><a href="#recovery">断线恢复</a></aside><div class="article-body"><h2 id="connect">1. 连接与配对</h2>
+<p>打开服务地址（默认 <code>http://127.0.0.1:11318</code>）后，页面要求手动输入配对码。配对码不会从 URL 参数读取，也不会由服务端注入。连接成功后页面会询问是否保存到 <code>localStorage</code>：只有你确认才写入，未确认时配对码仅存在于当前页面的 JS 内存里，刷新即失效。</p>
+<p>服务地址、当前 Workspace/Agent 和事件 sequence cursor 会保存在 <code>localStorage</code>，用于刷新后快速恢复视图。</p>
+
+<h2 id="workspace">2. Workspace</h2>
+<p>Workspace 是一个本机目录加一个名称，用于给 Agent 提供初始工作目录并支持文件浏览。</p>
+<ul>
+<li>添加 Workspace 后可以浏览目录树，读取文本文件（分页显示），二进制文件会给出明确提示。</li>
+<li>在输入框输入 <code>@</code> 可以浏览并引用 Workspace 内的文件或目录，引用会直接带入 Prompt。</li>
+<li>右键目录可以在交互式 Terminal 中打开该路径。</li>
+</ul>
+<div class="article-callout warning"><strong>Workspace 不是沙箱。</strong><p>它只决定初始 cwd。Terminal 与 Agent 都以 pi2web 进程用户身份运行，可以访问 Workspace 之外的文件。</p></div>
+
+<h2 id="agent">3. 创建与管理 Agent</h2>
+<p>在 Workspace 下创建 Agent 时可以选择新建 Session 或恢复已有 Session。Agent 与 Terminal 显示在同一个列表中，方便在一个视图里切换。</p>
+<ul>
+<li><strong>按需启动</strong>：服务重启后 Agent 状态为 <code>unloaded</code>，读取消息或发送命令时才会真正创建 Pi Session；并发请求共享同一次启动。</li>
+<li><strong>停止 Agent</strong>：只释放运行中的 Session，保留元数据，下次使用会自动重新启动。</li>
+<li><strong>Archive</strong>：右键 Agent 可 Archive，只设置数据库中的 <code>archived_at</code>，不会移动、重命名或删除任何 Pi Session 文件。</li>
+</ul>
+
+<h2 id="chat">4. 对话与干预</h2>
+<p>输入框支持三类操作，对应 Pi 的原生语义：</p>
+<table class="article-table"><thead><tr><th>操作</th><th>作用</th><th>典型场景</th></tr></thead><tbody>
+<tr><td>Prompt</td><td>开始一次新的 Agent 运行。</td><td>提出任务或问题。</td></tr>
+<tr><td>Steer</td><td>在运行过程中插入指示。</td><td>发现方向偏了，立即纠正。</td></tr>
+<tr><td>Follow-up</td><td>排队等待当前运行结束后执行。</td><td>先让它跑完，再做下一步。</td></tr>
+<tr><td>Abort</td><td>中止当前运行。</td><td>需求变了或明显跑偏。</td></tr>
+</tbody></table>
+<p>消息流中的 Thinking、Tool 调用、Retry 与 Extension UI 事件都可以折叠展开，长对话不会被工具输出淹没。模型和 Thinking level 可以随时切换，作用于之后的运行。</p>
+
+<h2 id="session">5. Session 分支与 Compact</h2>
+<p>Web UI 提供与 Pi 一致的 Session 操作：</p>
+<ul>
+<li><strong>Session 命名</strong>：给会话起名后，列表、通知和语音播报都会使用该名称。</li>
+<li><strong>Tree Navigate</strong>：浏览会话的历史节点。</li>
+<li><strong>Undo / Fork</strong>：回到某个节点重来，或从该节点分叉出新的分支。</li>
+<li><strong>Compact</strong>：压缩上下文，缓解长会话的上下文膨胀。</li>
+</ul>
+<p>这些操作作用于 Pi 的 JSONL Session 文件，pi2web 的 SQLite 只维护可重建的索引。</p>
+
+<h2 id="terminal">6. Terminal</h2>
+<p>Terminal 基于 node-pty 与 xterm.js，是完整的宿主机 Shell。</p>
+<ul>
+<li>支持输入、窗口 resize、清屏、关闭，以及刷新浏览器后的重连。</li>
+<li>每个终端保留最近 512 KiB 输出用于重连重放。</li>
+<li>每个服务进程最多同时运行 8 个终端。</li>
+<li>终端只保存在服务进程内存中，pi2web 退出或重启时全部结束。</li>
+</ul>
+
+<h2 id="notify">7. 通知与语音</h2>
+<p>导航栏的“配置”窗口可以启用或关闭邮件通知，并设置聚合等待时间、是否包含 Agent 最终回复、是否包含 Session 名称与工作路径。这些设置保存在服务端数据库中，对所有客户端生效。</p>
+<p>浏览器通知需要授权，并且要求 HTTPS 安全上下文（<code>localhost</code> 例外）；授权后对所有已知 Agent 提供完成通知。若服务端配置了语音，页面上会出现“启用语音”按钮，点击后播放服务端推送的 PCM16 或 MP3 音频；配置了 STT 模型时还会显示麦克风按钮，识别结果只插入输入框，不会自动发送。</p>
+<div class="guide-link-grid">
+  <a href="/zh/blog/voice/"><strong>配置语音摘要 →</strong><span>摘要 LLM、TTS/STT 服务与播报队列</span></a>
+  <a href="/zh/blog/mail-notifications/"><strong>配置邮件通知 →</strong><span>MailDispatch 参数与正文内容</span></a>
+</div>
+
+<h2 id="recovery">8. 断线恢复</h2>
+<p>Web UI 通过 WebSocket 接收事件，并按 sequence 去重。断线后使用指数退避重连，并根据本地保存的 cursor 请求增量 replay 或 snapshot，因此短暂断网、切换 Wi-Fi 或手机休眠都不会丢失中间输出。</p>
+<div class="article-callout"><strong>浏览器与 Android 的差异。</strong><p>自定义 Pi TUI Component 无法在浏览器中通用渲染；Android 客户端目前也尚未接入流式 PCM 播放与录音 UI。</p></div>
+<p class="article-source">参考：<a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a></p>
+<div class="article-end"><strong>下一步</strong><p>在把服务开放给其他设备之前，先了解 pi2web 的威胁模型和安全远程访问方式。</p><a class="button button-secondary" href="/zh/blog/remote-access/">阅读安全远程访问指南 →</a></div></div></div>
+</article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/zh/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>在你自己的机器上运行 Pi Coding Agent，用浏览器和 Android 手机安全地远程操作。</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/zh/features/">产品能力</a>
+          <a href="/zh/blog/">使用指南</a>
+          <a href="/zh/faq/">常见问题</a>
+          <a href="/zh/privacy/">隐私说明</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web 不提供任何 LLM、推理服务或模型额度。模型、Provider 认证和用量全部来自你本机的 Pi 配置。</strong></p>
+        <p>© 2026 pi2web · MIT License · 独立开源项目<br>与 Pi、GitHub、Google 及其他相关厂商不存在隶属或背书关系；相关商标归各自所有者。</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

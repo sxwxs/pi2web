@@ -210,10 +210,13 @@ finished ── recheck(fix_then_review) ──▶ implementing ──POST /read
 
 - 首次勾选 `implementationFirst` 时，唯一的开发 Agent 先收到 `implement` 工单；只有强类型工具显式提交 `/ready` 才会固定 baseline 并召集 Reviewer。Agent 进入 idle 不再被当作完成，避免失败或漏交被误判为可评审。
 - `collecting` 是盲审。每个 Reviewer 必须提交 `reviewComplete=true`；新 Finding 强制带 `location.path`、evidence 和当前 baselineId。
-- 共识阶段中，每个 Reviewer 对本轮其他人的新 Finding 投 approve/reject，可提出重复项合并；合并必须全票通过。争议经过 `issue_discussing ↔ issue_reconsidering`，达到 `maxConsensusRounds` 仍不一致才升级人工。
+- 共识阶段中，每个 Reviewer 对本轮其他人的新 Finding 投 approve/reject，可提出重复项合并；合并必须全票通过。争议经过 `issue_discussing ↔ issue_reconsidering` 收敛。**争议的终局不再一律甩给人**：讨论结束（用满 `maxConsensusRounds`，或某条 Finding 的票型连续两轮完全没变而提前判定“已经吵不动了”）后，中枢按严重度裁决——除报告人外全员 reject 的问题直接 `wontfix`（`blocker`/`critical` 除外）、panel 分裂的 `major` 及以上升级人工、`minor`/`nit` 按多数决，平票保留。只有真正需要判断的分歧才进人工队列。
+- 报告人随时可以撤回自己不再坚持的 Finding：`collab_withdraw_issue`，或在 `collab_submit_issue_discussions` 的 `withdrawals[]` 里和其余答辩一次提交（提交工具会结束回合，所以两者必须同一次调用）。撤回是正常动作，不是失败。
+- Reviewer 的投票允许**分批**：只投当前工单列出的那些 Finding 即可，别人后来才提交的 Finding 会由中枢重新派工单回来，不会因为“集合在你读代码时变大了”而整批 422。
 - 共识完成后直接 `finished`。有效 Finding 从临时 `open` 转成 `confirmed`，不会触发开发方回应；报告结论为 `approved`、`follow_up_required` 或 `changes_required`。
 - finished 看板提供两个入口：**复核当前代码**调用 `POST /recheck {"mode":"review_only"}`；**推进到修复 → 复核**先选择一个已存在或新添加的 implementer，再调用 `POST /recheck {"mode":"fix_then_review","implementerParticipantIds":[...]}`。
 - 修复 Agent 收到全部 confirmed Action Items，完成后统一 `/ready`。原 Reviewer 在新 baseline 上收到 `issuesToRecheck`，并在 `/findings` 中提交 `rechecks:[{"issueId":"...","outcome":"resolved|still_present","rationale":"..."}]`；同时仍可发现新的 Finding。
+- 每个工单都带上**panel 名单、评分/严重度口径、共识与撤回规则、以及本次评审的 `baseline.changedFiles` 范围**：Reviewer 不知道同伴是谁、不知道 `major` 和 `minor` 的界线、不知道一票 reject 的后果时，投出来的票就没有共同标准。工单里的指令只出现工具名，不出现 HTTP 端点。
 - 每多一轮复核就多一段档案：`GET /sessions/:id/review-rounds`（**仅人**）按轮返回该轮复核了哪些老问题（`resolved` / `still_present` / 尚未回报的 `pending`）、该轮新发现了哪些问题，以及该轮的 baseline 与结论。看板把它渲染成“各轮评审 / 复核结果”，最新一轮在最上面。
 - 每轮 finished 都发送 `session_result`。重新开启时，中枢会轮换参与者凭证并主动推送新任务，旧的结束消息不会污染新一轮。
 
