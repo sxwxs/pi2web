@@ -1,4 +1,4 @@
-import {COLLAB_ERRORS,OPEN_ISSUE_STATUSES,can,type Capability,type CollabPolicy,type IssueStatus,type Participant,type ReviewPhase,type Role,type SessionStatus,type IssueVote,type MergeProposal} from './types.js';
+import {COLLAB_ERRORS,OPEN_ISSUE_STATUSES,can,type Capability,type CollabPolicy,type IssueStatus,type Participant,type ReviewPhase,type Role,type SessionStatus,type Severity,type IssueVote,type MergeProposal} from './types.js';
 
 /**
  * Pure review state machine. It performs no IO, so every rule below is directly unit-testable.
@@ -10,7 +10,7 @@ import {COLLAB_ERRORS,OPEN_ISSUE_STATUSES,can,type Capability,type CollabPolicy,
  */
 
 export type FlowParticipant=Pick<Participant,'participantId'|'role'|'state'>;
-export type FlowIssue={issueId:string,reporterId:string,targetParticipantId:string,status:IssueStatus,round:number};
+export type FlowIssue={issueId:string,reporterId:string,targetParticipantId:string,status:IssueStatus,round:number,severity?:Severity};
 export type PhaseCompletion={phase:ReviewPhase,round:number,participantId:string};
 export type ReviewSnapshot={
   phase:ReviewPhase,round:number,policy:CollabPolicy,status:SessionStatus,
@@ -51,6 +51,68 @@ export function issueConsensus(snapshot:ReviewSnapshot,options:{includeFinal?:bo
   });
 }
 export const contestedIssueIds=(snapshot:ReviewSnapshot)=>issueConsensus(snapshot).filter(entry=>entry.rejecters.length>0).map(entry=>entry.issueId);
+
+/** Latest ballot per reviewer for one issue as it stood at the end of consensus round `consensusRound`. */
+function stancesAt(snapshot:ReviewSnapshot,issueId:string,consensusRound:number){
+  const latest=new Map<string,IssueVote>();
+  for(const vote of snapshot.issueVotes??[]){
+    if(vote.issueId!==issueId||vote.round!==snapshot.round||vote.consensusRound>consensusRound)continue;
+    const previous=latest.get(vote.participantId);
+    if(!previous||vote.consensusRound>previous.consensusRound||(vote.consensusRound===previous.consensusRound&&vote.createdAt>previous.createdAt))latest.set(vote.participantId,vote);
+  }
+  return [...latest.entries()].map(([participantId,vote])=>`${participantId}:${vote.stance}`).sort().join('|');
+}
+const lastVotedRound=(snapshot:ReviewSnapshot,issueId:string)=>Math.max(-1,...(snapshot.issueVotes??[]).filter(vote=>vote.issueId===issueId&&vote.round===snapshot.round).map(vote=>vote.consensusRound));
+/**
+ * Discussion rounds are only worth their tokens while they still move somebody. An issue whose ballot has been
+ * identical for two consecutive reconsiderations is settled in fact, so the panel stops re-arguing it instead of
+ * burning every remaining round (observed: three rounds of "I keep the rejection" on findings nobody flipped).
+ * Two rounds of silence, not one: a rejecter that needs a second round of evidence is a real convergence path.
+ * Measured against the last round that actually voted, so a round in progress is never judged before its ballots.
+ */
+export function staleContestedIssueIds(snapshot:ReviewSnapshot):string[]{
+  return contestedIssueIds(snapshot).filter(issueId=>{
+    const voted=lastVotedRound(snapshot,issueId);
+    if(voted<2)return false;
+    const current=stancesAt(snapshot,issueId,voted);
+    return current===stancesAt(snapshot,issueId,voted-1)&&current===stancesAt(snapshot,issueId,voted-2);
+  });
+}
+/** Contested findings the panel is still allowed to spend a round on. */
+export function activeContestedIssueIds(snapshot:ReviewSnapshot):string[]{
+  const stale=new Set(staleContestedIssueIds(snapshot));
+  return contestedIssueIds(snapshot).filter(issueId=>!stale.has(issueId));
+}
+
+export type ContestedDisposition='panel_rejected'|'majority_rejected'|'majority_confirmed'|'escalate';
+export type ContestedResolution={issueId:string,disposition:ContestedDisposition,reason:string,severity:Severity,supporters:string[],rejecters:string[]};
+/** Findings a human is actually worth interrupting for; everything below this the panel settles itself. */
+const HUMAN_REVIEW_SEVERITIES:Severity[]=['blocker','critical'];
+const MAJOR_SEVERITIES:Severity[]=['blocker','critical','major'];
+/**
+ * Closes out the consensus stage. Escalating every disagreement makes a panel of N a queue of N disputes for the
+ * human (observed: 6 of 18 findings, including two the reporter itself had conceded), so only two situations
+ * genuinely need a ruling: a split panel on a serious finding, and a serious finding the whole panel rejected
+ * over its reporter's objection. Everything else is decided by the panel and recorded.
+ */
+export function resolveContestedIssues(snapshot:ReviewSnapshot):ContestedResolution[]{
+  const panel=reviewers(snapshot);
+  return issueConsensus(snapshot).filter(entry=>entry.rejecters.length>0).map(entry=>{
+    const issue=snapshot.issues.find(candidate=>candidate.issueId===entry.issueId);
+    const severity=issue?.severity??'major';
+    const voters=panel.filter(reviewer=>reviewer.participantId!==issue?.reporterId).map(reviewer=>reviewer.participantId);
+    const base={issueId:entry.issueId,severity,supporters:entry.supporters,rejecters:entry.rejecters};
+    // The reporter is the only supporter left: the panel says this is not a defect, and it had every discussion
+    // round to withdraw it or convince somebody. Only a claimed blocker still buys a human's attention. Two
+    // dissenters minimum: on a two-seat panel "everyone else" is one reviewer, which is a tie, not a verdict.
+    if(voters.length>1&&voters.every(participantId=>entry.rejecters.includes(participantId)))
+      return {...base,disposition:HUMAN_REVIEW_SEVERITIES.includes(severity)?'escalate' as const:'panel_rejected' as const,reason:'panel_unanimously_rejected'};
+    if(MAJOR_SEVERITIES.includes(severity))return {...base,disposition:'escalate' as const,reason:'split_panel_on_a_major_finding'};
+    if(entry.rejecters.length>entry.supporters.length)return {...base,disposition:'majority_rejected' as const,reason:'panel_majority_rejected'};
+    // A tie keeps the finding: reporting it costs a line in the report, dropping a real defect costs a release.
+    return {...base,disposition:'majority_confirmed' as const,reason:entry.supporters.length===entry.rejecters.length?'tie_kept_as_a_recorded_dispute':'panel_majority_confirmed'};
+  });
+}
 const currentMergeProposals=(snapshot:ReviewSnapshot)=>(snapshot.mergeProposals??[]).filter(proposal=>proposal.round===snapshot.round);
 const collectedThisRound=(snapshot:ReviewSnapshot)=>new Set(snapshot.completions.filter(entry=>entry.phase==='collecting'&&entry.round===snapshot.round).map(entry=>entry.participantId));
 /** Reviewers who already closed their own blind review but still owe votes on other reviewers' already-filed issues. */
@@ -89,10 +151,13 @@ export function requiredActors(snapshot:ReviewSnapshot):string[]{
     case 'validating':return reviewers(snapshot).map(participant=>participant.participantId);
     case 'merge_voting':return reviewers(snapshot).filter(participant=>currentMergeProposals(snapshot).some(proposal=>!proposal.votes.some(vote=>vote.participantId===participant.participantId))).map(participant=>participant.participantId);
     case 'issue_discussing':{
-      const contested=new Set(contestedIssueIds(snapshot));
+      const contested=new Set(activeContestedIssueIds(snapshot));
       return unique(issueConsensus(snapshot).filter(entry=>contested.has(entry.issueId)).flatMap(entry=>entry.supporters));
     }
-    case 'issue_reconsidering':return unique(issueConsensus(snapshot).flatMap(entry=>entry.rejecters));
+    case 'issue_reconsidering':{
+      const contested=new Set(activeContestedIssueIds(snapshot));
+      return unique(issueConsensus(snapshot).filter(entry=>contested.has(entry.issueId)).flatMap(entry=>entry.rejecters));
+    }
     // responding/adjudicating are legacy persisted phases. New reviews finish after panel consensus.
     default:return [];
   }
@@ -116,7 +181,7 @@ export function isReadyToAdvance(snapshot:ReviewSnapshot):boolean{
   return waitingOn(snapshot).length===0;
 }
 
-export type AdvanceResult={phase:ReviewPhase,round:number,reason:string,debateRound?:number,escalateDeadlock?:boolean,escalateConsensus?:boolean,skipped?:string[]};
+export type AdvanceResult={phase:ReviewPhase,round:number,reason:string,debateRound?:number,escalateDeadlock?:boolean,escalateConsensus?:boolean,resolutions?:ContestedResolution[],skipped?:string[]};
 
 /**
  * Computes the next phase. `forced` is the human override used to break a stall; it is the only way
@@ -155,9 +220,16 @@ export function nextPhase(snapshot:ReviewSnapshot,options:{forced?:boolean}={}):
     case 'merge_voting':return {phase:'consolidating',round:snapshot.round,reason:'merge_voting_complete',...skipped};
     case 'issue_discussing':return {phase:'issue_reconsidering',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'supporter_arguments_complete',...skipped};
     case 'issue_reconsidering':{
-      if(!contestedIssueIds(snapshot).length)return {phase:'finished',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'review_consensus_complete',...skipped};
-      if((snapshot.debateRound??1)>=snapshot.policy.maxConsensusRounds)return {phase:'awaiting_human',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'issue_consensus_exhausted',escalateConsensus:true,...skipped};
-      return {phase:'issue_discussing',round:snapshot.round,debateRound:(snapshot.debateRound??1)+1,reason:'issue_consensus_next_round',...skipped};
+      const contested=contestedIssueIds(snapshot);
+      if(!contested.length)return {phase:'finished',round:snapshot.round,debateRound:snapshot.debateRound??1,reason:'review_consensus_complete',...skipped};
+      const exhausted=(snapshot.debateRound??1)>=snapshot.policy.maxConsensusRounds;
+      if(!exhausted&&activeContestedIssueIds(snapshot).length)return {phase:'issue_discussing',round:snapshot.round,debateRound:(snapshot.debateRound??1)+1,reason:'issue_consensus_next_round',...skipped};
+      // The panel is done arguing, either out of rounds or out of movement. Dispose of every contested finding
+      // here so only the ones a human must actually rule on reach the escalation queue.
+      const resolutions=resolveContestedIssues(snapshot),escalated=resolutions.filter(entry=>entry.disposition==='escalate');
+      return {phase:escalated.length?'awaiting_human':'finished',round:snapshot.round,debateRound:snapshot.debateRound??1,
+        reason:escalated.length?(exhausted?'issue_consensus_exhausted':'issue_consensus_settled_with_disputes'):'issue_consensus_resolved_by_panel',
+        resolutions,escalateConsensus:escalated.length>0,...skipped};
     }
     case 'awaiting_human':return {phase:'consolidating',round:snapshot.round,reason:'consensus_human_ruled',...skipped};
     // Compatibility recovery for sessions persisted by the old mandatory response loop: do not ask Agents for

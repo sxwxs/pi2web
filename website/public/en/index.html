@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pi2web — Run Pi Coding Agent remotely from your browser or Android phone</title>
+  <meta name="description" content="pi2web runs Pi Coding Agent on your dev machine and exposes a pairing-code protected HTTP/WebSocket service with a web UI, Android client, terminals, voice summaries, and email notifications.">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/en/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="pi2web — Run Pi Coding Agent remotely from your browser or Android phone">
+  <meta property="og:description" content="pi2web runs Pi Coding Agent on your dev machine and exposes a pairing-code protected HTTP/WebSocket service with a web UI, Android client, terminals, voice summaries, and email notifications.">
+  <meta property="og:url" content="https://pi2web.es2q.com/en/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:locale:alternate" content="zh_CN">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="pi2web — Run Pi Coding Agent remotely from your browser or Android phone">
+  <meta name="twitter:description" content="pi2web runs Pi Coding Agent on your dev machine and exposes a pairing-code protected HTTP/WebSocket service with a web UI, Android client, terminals, voice summaries, and email notifications.">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","headline":"pi2web \u2014 Run Pi Coding Agent remotely from your browser or Android phone","description":"pi2web runs Pi Coding Agent on your dev machine and exposes a pairing-code protected HTTP/WebSocket service with a web UI, Android client, terminals, voice summaries, and email notifications.","url":"https://pi2web.es2q.com/en/","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"pi2web","alternateName":"Remote Pi","applicationCategory":"DeveloperApplication","operatingSystem":"Linux, macOS, Windows, Android","description":"pi2web runs Pi Coding Agent on your dev machine and exposes a pairing-code protected HTTP/WebSocket service with a web UI, Android client, terminals, voice summaries, and email notifications.","url":"https://pi2web.es2q.com/en/","softwareVersion":"0.2.0","license":"https://opensource.org/licenses/MIT","downloadUrl":"https://www.npmjs.com/package/pi2web","installUrl":"https://www.npmjs.com/package/pi2web","codeRepository":"https://github.com/sxwxs/pi2web","author":{"@type":"Person","name":"sxwxs"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="home">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/en/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/en/features/">Features</a>
+        <a href="/en/blog/">Guides</a>
+        <a href="/en/faq/">FAQ</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/zh/" lang="zh-CN" aria-label="切换到中文">中文</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<section class="hero section-pad">
+  <div class="hero-glow hero-glow-one"></div>
+  <div class="hero-glow hero-glow-two"></div>
+  <div class="content-shell hero-grid">
+    <div class="hero-copy reveal">
+      <div class="eyebrow"><span class="status-dot"></span> Open source · self-hosted · pairing code</div>
+      <h1>Your Pi Coding Agent,<br><span>reachable from any screen.</span></h1>
+      <p class="hero-lead">pi2web runs Pi Coding Agent on your own development machine and exposes it through a pairing-code protected HTTP/WebSocket service with a web UI and a native Android client. Sessions, models, and code stay local — you just gain another screen.</p>
+      <div class="hero-actions">
+        <a class="button button-primary" href="/en/blog/install-and-configure/">Read the setup guide</a>
+        <a class="button button-secondary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">View on GitHub <span>↗</span></a>
+      </div>
+      <div class="install-command" data-copy-block>
+        <span class="prompt" aria-hidden="true">$</span>
+        <code>npm install -g pi2web</code>
+        <button type="button" data-copy="npm install -g pi2web" aria-label="Copy install command"><span class="copy-label">Copy</span></button>
+      </div>
+      <p class="hero-requirement"><strong>pi2web ships no models and no quota.</strong> It reuses the Pi model configuration and provider authentication already in <code>~/.pi/agent</code>, and requires Node.js 20.10 or newer.</p>
+    </div>
+
+    <div class="hero-console reveal reveal-delay" aria-label="pi2web runtime illustration">
+      <div class="console-top">
+        <div class="window-dots"><i></i><i></i><i></i></div>
+        <span>pi2web · 127.0.0.1:11318</span>
+        <span class="console-live">● live</span>
+      </div>
+      <div class="console-body">
+        <div class="flow-client-row">
+          <span>BROWSER</span><span>ANDROID</span><span>TABLET</span>
+        </div>
+        <div class="flow-line"><i></i><b>HTTP + WebSocket</b><i></i></div>
+        <div class="proxy-core">
+          <div class="proxy-title"><span class="mini-mark">π→w</span><strong>pi2web</strong><em>PAIRED</em></div>
+          <div class="proxy-jobs">
+            <span>sessions</span><span>terminals</span><span>streaming</span>
+          </div>
+        </div>
+        <div class="request-log">
+          <div><time>00:00.412</time><span class="method">WS</span><code>agent.prompt → session#3</code><b class="ok">ok</b></div>
+          <div><time>00:00.585</time><span class="event">EVT</span><code>assistant_delta · tool_call</code><b>↗</b></div>
+          <div><time>00:12.907</time><span class="token">TTS</span><code>agent_settled · spoken summary</code><b>✓</b></div>
+        </div>
+        <div class="flow-destination"><span>YOUR DEV MACHINE</span><b>Pi Agent · ~/.pi/agent</b></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="trust-strip" aria-label="Core capabilities">
+  <div class="content-shell trust-list">
+    <span>Web UI</span><i></i><span>Android client</span><i></i><span>Interactive terminals</span><i></i><span>Workspace files</span><i></i><span>Voice summaries</span><i></i><span>Email alerts</span><i></i><span>SQLite persistence</span>
+  </div>
+</section>
+
+<section class="section-pad principles">
+  <div class="content-shell">
+    <div class="section-heading centered reveal">
+      <span class="section-kicker">WHY PI2WEB</span>
+      <h2>Long-running agents belong<br>on the machine with your code.</h2>
+      <p>The repository, the toolchain, and the credentials are already there. The only thing missing is a remote surface you can take over from at any time.</p>
+    </div>
+    <div class="three-grid">
+      <article class="principle-card reveal">
+        <span class="card-index">01</span>
+        <div class="line-icon icon-phone" aria-hidden="true"></div>
+        <h3>Take over anywhere</h3>
+        <p>The browser and the Android client talk to the same service. Follow streaming output, add instructions, steer, or abort after you walk away from the desk.</p>
+      </article>
+      <article class="principle-card reveal reveal-delay-sm">
+        <span class="card-index">02</span>
+        <div class="line-icon icon-lock" aria-hidden="true"></div>
+        <h3>Local by default</h3>
+        <p>Binds to <code>127.0.0.1</code>, requires a manually typed pairing code, stores only its SHA-256 hash, and rate-limits failed attempts with exponential lockout.</p>
+      </article>
+      <article class="principle-card reveal reveal-delay">
+        <span class="card-index">03</span>
+        <div class="line-icon icon-sync" aria-hidden="true"></div>
+        <h3>Survives bad networks</h3>
+        <p>WebSocket sequence de-duplication, exponential backoff, and incremental replay/snapshot recovery. Agent metadata lives in SQLite and reloads on demand.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad architecture-section">
+  <div class="content-shell split-heading reveal">
+    <div><span class="section-kicker">HOW IT WORKS</span><h2>One process between every client and your local Pi.</h2></div>
+    <p>pi2web starts agents through the real <code>@earendil-works/pi-coding-agent</code> SDK and reuses the Pi CLI directory for models, authentication, and settings.</p>
+  </div>
+  <div class="content-shell architecture-board reveal">
+    <div class="arch-column arch-clients">
+      <span class="arch-label">CLIENTS</span>
+      <div class="client-node"><b>W</b><span><strong>Web UI</strong><small>Served by the same process</small></span></div>
+      <div class="client-node"><b>A</b><span><strong>Android app</strong><small>Kotlin + Jetpack Compose</small></span></div>
+      <div class="client-node"><b>T</b><span><strong>Terminal</strong><small>xterm.js + node-pty</small></span></div>
+      <div class="client-node"><b>+</b><span><strong>Your scripts</strong><small>Bearer-authenticated REST/WS API</small></span></div>
+    </div>
+    <div class="arch-connector connector-in"><span>Bearer + WebSocket</span></div>
+    <div class="arch-core">
+      <span class="arch-label">PI2WEB SERVER</span>
+      <div class="core-orbit"><div class="core-logo">pi2<br><span>web</span></div><i></i><i></i><i></i></div>
+      <ul><li>Workspaces</li><li>Agent lifecycle</li><li>Event replay</li><li>Terminal sessions</li><li>Voice summaries</li><li>Email alerts</li></ul>
+    </div>
+    <div class="arch-connector connector-out"><span>Pi SDK</span></div>
+    <div class="arch-column arch-upstream">
+      <span class="arch-label">LOCAL</span>
+      <div class="github-node"><span class="github-ring">π</span><strong>Pi Coding Agent</strong><small>~/.pi/agent · session JSONL</small></div>
+      <div class="account-note"><span>✓</span> Models, auth, and quota stay yours</div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad observability-section">
+  <div class="content-shell feature-split">
+    <div class="feature-copy reveal">
+      <span class="section-kicker">WEB UI</span>
+      <h2>A real agent workbench<br>inside the browser.</h2>
+      <p>Not a read-only log viewer. Create sessions, send prompts, steer mid-run, queue follow-ups, open terminals, and browse workspace files from a single page.</p>
+      <ul class="check-list">
+        <li>Streaming conversations with collapsible thinking, tool, and extension events</li>
+        <li>Session naming, tree navigation, undo/fork, and compact</li>
+        <li>Model and thinking-level switching</li>
+        <li>Type <code>@</code> to browse and reference workspace files</li>
+        <li>Right-click a directory to open an interactive terminal</li>
+        <li>Browser notifications and optional spoken summaries</li>
+      </ul>
+      <a class="text-link" href="/en/blog/web-ui/">Read the web UI guide <span>→</span></a>
+    </div>
+    <div class="inspector-mock reveal reveal-delay">
+      <div class="inspector-sidebar">
+        <div class="inspector-brand"><span>π→w</span> pi2web</div>
+        <div class="inspector-tab active"><i></i>Agents</div><div class="inspector-tab"><i></i>Sessions</div><div class="inspector-tab"><i></i>Files</div><div class="inspector-tab"><i></i>Terminal</div><div class="inspector-tab"><i></i>Settings</div>
+      </div>
+      <div class="inspector-main">
+        <div class="inspector-head"><div><span>AGENT</span><code>~/code/service-api</code></div><b>running</b></div>
+        <div class="metric-row"><div><small>MODEL</small><strong>pi · sonnet</strong></div><div><small>THINKING</small><strong>medium</strong></div><div><small>MSGS</small><strong>128</strong></div></div>
+        <div class="code-window"><div class="code-tabs"><b>Stream</b><span>Terminal</span></div><pre><em>user</em> fix the retry timeout in login
+
+<em>assistant</em> <span>thinking…</span>
+<em>tool</em> <q>read</q> src/auth/login.ts
+<em>tool</em> <q>edit</q> src/auth/login.ts <b>+18 −4</b>
+
+<em>assistant</em> Added backoff retries and tests.</pre></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad workspace-section">
+  <div class="content-shell">
+    <div class="split-heading reveal">
+      <div><span class="section-kicker">MORE THAN A VIEWER</span><h2>Everything remote control actually needs.</h2></div>
+      <p>Terminals, files, notifications, voice, email, and persistence come from a single process. Nothing else to deploy.</p>
+    </div>
+    <div class="feature-grid">
+      <article class="feature-card feature-card-wide reveal"><span class="feature-tag">AGENTS</span><h3>Parallel workspaces and agents</h3><p>Create a workspace per repository and manage agents and terminals in one list. Agent metadata is stored in SQLite; after a restart agents are <code>unloaded</code> and a Pi session is only created when you actually use them.</p><div class="session-visual"><div><span class="avatar user">U</span><p>Work through the review comments on this PR</p></div><div><span class="avatar agent">A</span><p><i></i><i></i><i></i> reading review threads…</p></div></div></article>
+      <article class="feature-card reveal"><span class="feature-tag">TERMINAL</span><h3>Interactive terminals</h3><p>Real shells backed by node-pty with input, resize, output snapshots, and reconnect after a refresh. Up to eight per server process.</p><div class="mini-sessions"><span><i class="green"></i>service-api <small>running</small></span><span><i></i>web-client <small>12m</small></span><span><i></i>bash · ~/code <small>1h</small></span></div></article>
+      <article class="feature-card reveal reveal-delay-sm"><span class="feature-tag">VOICE</span><h3>Spoken summaries and dictation</h3><p>A summary LLM condenses the final answer and streams it to TTS. Add an STT model and you can dictate prompts too.</p><div class="privacy-toggle"><span>Voice features</span><b>OFF BY DEFAULT</b></div></article>
+      <article class="feature-card reveal"><span class="feature-tag">MAIL</span><h3>Completion emails</h3><p>Send transactional mail through MailDispatch when a task settles, with a configurable aggregation window and body options.</p></article>
+      <article class="feature-card reveal reveal-delay-sm"><span class="feature-tag">PERSISTENCE</span><h3>Durable metadata</h3><p>SQLite in WAL mode stores workspaces, agents, and a session index. Full conversations stay in Pi's JSONL session files.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad privacy-section">
+  <div class="content-shell privacy-panel reveal">
+    <div class="privacy-icon"><span></span></div>
+    <div><span class="section-kicker">SECURITY FIRST</span><h2>Treat the service like a shell key.</h2><p>Terminals are full host shells running as the pi2web process user, and a workspace path only sets the initial working directory — it is not a sandbox. Reach the service through an SSH tunnel, Tailscale, or an HTTPS reverse proxy with access control instead of publishing the port.</p></div>
+    <div class="privacy-facts"><span><b>127.0.0.1</b> default bind</span><span><b>Hash only</b> pairing code</span><span><b>429</b> lockout on failures</span></div>
+  </div>
+</section>
+
+<section class="section-pad quickstart-section">
+  <div class="content-shell">
+    <div class="split-heading reveal"><div><span class="section-kicker">QUICKSTART</span><h2>Three steps to a running service.</h2></div><a class="button button-secondary" href="/en/blog/install-and-configure/">Read the full setup guide</a></div>
+    <div class="step-grid">
+      <article class="step-card reveal"><span>STEP 01</span><h3>Install globally</h3><p>Node.js 20.10+ required. Installation prepares the <code>better-sqlite3</code> and <code>node-pty</code> native modules.</p><div class="step-code"><code>npm install -g pi2web</code></div></article>
+      <article class="step-card reveal reveal-delay-sm"><span>STEP 02</span><h3>Start the server</h3><p>The pairing code is printed once on first startup. Save it immediately.</p><div class="step-code"><code>pi2web --host 127.0.0.1 --port 11318</code></div></article>
+      <article class="step-card reveal reveal-delay"><span>STEP 03</span><h3>Open and pair</h3><p>Visit <code>http://127.0.0.1:11318</code>, type the pairing code, and add your first workspace.</p><div class="step-code"><code>pi2web --rotate-access-token</code></div></article>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad final-section">
+  <div class="content-shell final-grid">
+    <div class="spec-card reveal">
+      <span class="section-kicker">PACKAGE</span>
+      <dl>
+        <dt>npm package</dt><dd>pi2web</dd>
+        <dt>Command</dt><dd>pi2web</dd>
+        <dt>Runtime</dt><dd>Node.js ≥ 20.10 (Linux / macOS / Windows)</dd>
+        <dt>Default address</dt><dd>http://127.0.0.1:11318</dd>
+        <dt>License</dt><dd>MIT</dd>
+      </dl>
+      <div class="spec-links"><a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm ↗</a><a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub ↗</a><a href="/en/faq/">FAQ</a></div>
+    </div>
+    <div class="final-cta reveal reveal-delay-sm">
+      <span class="section-kicker">START LOCAL</span>
+      <h2>Install once.<br>Your sessions never leave.</h2>
+      <p>pi2web is only a remote shell around Pi Coding Agent: no hosted code, no proxied models, no uploaded sessions.</p>
+      <div class="install-command">
+        <span class="prompt" aria-hidden="true">$</span>
+        <code>npm install -g pi2web &amp;&amp; pi2web</code>
+        <button type="button" data-copy="npm install -g pi2web &amp;&amp; pi2web" aria-label="Copy install and run command"><span class="copy-label">Copy</span></button>
+      </div>
+      <div class="hero-actions"><a class="button button-primary" href="/en/blog/install-and-configure/">Setup guide</a><a class="button button-secondary dark" href="/en/features/">Features</a></div>
+    </div>
+  </div>
+</section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/en/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>Run Pi Coding Agent on your own machine and drive it safely from a browser or an Android phone.</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/en/features/">Features</a>
+          <a href="/en/blog/">Guides</a>
+          <a href="/en/faq/">FAQ</a>
+          <a href="/en/privacy/">Privacy</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web does not provide any LLM, inference service, or model quota. Models, provider authentication, and usage all come from your local Pi configuration.</strong></p>
+        <p>© 2026 pi2web · MIT License · Independent open-source project<br>Not affiliated with or endorsed by Pi, GitHub, Google, or other referenced vendors. Trademarks belong to their respective owners.</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

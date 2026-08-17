@@ -1,0 +1,40 @@
+{% extends "blog_article.html" %}{% block kicker %}ANDROID CLIENT{% endblock %}{% block deck %}The android/ directory holds a native Kotlin + Jetpack Compose client that shares the same API and pairing code as the web UI. This guide covers building it, connecting, and current capability differences.{% endblock %}{% block toc %}<a href="#why">Why a native client</a><a href="#build">Build</a><a href="#connect">Connect and pair</a><a href="#features">Capability comparison</a><a href="#tips">Practical tips</a>{% endblock %}{% block article %}
+<h2 id="why">1. Why a native client</h2>
+<p>The browser already covers most scenarios, but a native app is nicer on a phone: persistent login state, system notifications, better keyboard and scrolling behaviour, and background connections. It talks to the same pi2web service, so nothing extra needs to be deployed.</p>
+<div class="article-callout"><strong>The server uses the real SDK.</strong><p>pi2web runs the real <code>@earendil-works/pi-coding-agent</code> SDK and reuses the Pi CLI's <code>~/.pi/agent</code> models, authentication, and settings. <code>MockBackend</code> exists only for automated tests.</p></div>
+
+<h2 id="build">2. Build</h2>
+<p>There is no prebuilt APK yet, so build it yourself with Android Studio or from the command line:</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="./gradlew assembleDebug"><span class="copy-label">Copy</span></button></div><pre><code>git clone https://github.com/sxwxs/pi2web.git
+cd pi2web/android
+./gradlew assembleDebug
+# Output in app/build/outputs/apk/debug/</code></pre></div>
+<p>Exact toolchain requirements (JDK, Android SDK versions) and connection notes live in <code>android/README.md</code>; the full feature list is in <code>ANDROID_APP_FEATURES.md</code>.</p>
+
+<h2 id="connect">3. Connect and pair</h2>
+<ol>
+<li>Make sure the phone can reach the pi2web address. The service listens on <code>127.0.0.1</code> by default, so you usually need an SSH tunnel, a private network such as Tailscale, or a tunnel with access control.</li>
+<li>Enter the server address in the app, for example <code>http://100.x.y.z:11318</code>.</li>
+<li>Enter the pairing code. It is shown only on first startup or rotation; if you lost it, run <code>pi2web --rotate-access-token</code>.</li>
+</ol>
+<p>Trade-offs between connection methods are covered in the <a href="/en/blog/remote-access/">secure remote access guide</a>.</p>
+
+<h2 id="features">4. Capability comparison</h2>
+<table class="article-table"><thead><tr><th>Capability</th><th>Web UI</th><th>Android</th></tr></thead><tbody>
+<tr><td>Workspace and agent management</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Streaming chat, steer, follow-up</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Session listing and resume</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Interactive terminal</td><td>Yes (xterm.js)</td><td>See <code>ANDROID_APP_FEATURES.md</code></td></tr>
+<tr><td>Voice playback and recording</td><td>Yes (server configured)</td><td>Not wired yet</td></tr>
+<tr><td>Custom Pi TUI components</td><td>Not generically renderable</td><td>Not generically renderable</td></tr>
+</tbody></table>
+
+<h2 id="tips">5. Practical tips</h2>
+<ul>
+<li>The phone is best for following up and intervening; start large refactors from the desktop.</li>
+<li>Mobile networks switch often, but WebSocket sequence de-duplication and incremental replay mean short drops do not lose messages.</li>
+<li>The pairing code is equivalent to shell access — store it only on your own device and keep a lock screen enabled.</li>
+<li>When you stop using a device, rotate the pairing code to revoke it.</li>
+</ul>
+<p class="article-source">References: <a href="https://github.com/sxwxs/pi2web/blob/main/android/README.md" rel="noreferrer">android/README.md ↗</a> · <a href="https://github.com/sxwxs/pi2web/blob/main/ANDROID_APP_FEATURES.md" rel="noreferrer">ANDROID_APP_FEATURES.md ↗</a></p>
+{% endblock %}

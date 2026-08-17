@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FAQ — pi2web</title>
+  <meta name="description" content="Common pi2web questions: lost pairing codes, public exposure, Pi requirements, where data is stored, supported platforms, upgrading, and uninstalling.">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/en/faq/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/faq/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/faq/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/faq/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="FAQ — pi2web">
+  <meta property="og:description" content="Common pi2web questions: lost pairing codes, public exposure, Pi requirements, where data is stored, supported platforms, upgrading, and uninstalling.">
+  <meta property="og:url" content="https://pi2web.es2q.com/en/faq/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:locale:alternate" content="zh_CN">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="FAQ — pi2web">
+  <meta name="twitter:description" content="Common pi2web questions: lost pairing codes, public exposure, Pi requirements, where data is stored, supported platforms, upgrading, and uninstalling.">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","headline":"FAQ \u2014 pi2web","description":"Common pi2web questions: lost pairing codes, public exposure, Pi requirements, where data is stored, supported platforms, upgrading, and uninstalling.","url":"https://pi2web.es2q.com/en/faq/","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","inLanguage":"en","mainEntity":[{"@type":"Question","name":"What is pi2web?","acceptedAnswer":{"@type":"Answer","text":"pi2web is a server that runs Pi Coding Agent on your development machine and exposes it through a pairing-code protected HTTP/WebSocket API, so a browser or the Android app can drive the same coding session."}},{"@type":"Question","name":"How do I install pi2web?","acceptedAnswer":{"@type":"Answer","text":"Node.js 20.10 or newer is required. Run npm install -g pi2web, then run pi2web; it listens on http://127.0.0.1:11318 by default."}},{"@type":"Question","name":"Where is the pairing code, and what if I lose it?","acceptedAnswer":{"@type":"Answer","text":"The pairing code is printed once on first startup and only its SHA-256 hash is stored. It cannot be recovered; run pi2web --rotate-access-token to issue a new one and invalidate the old code immediately."}},{"@type":"Question","name":"Can I expose pi2web directly to the internet?","acceptedAnswer":{"@type":"Answer","text":"Not recommended. Terminals are full host shells running as the service user, so anyone with the pairing code effectively has shell access. Use an SSH tunnel, Tailscale, devtunnel, or a trusted HTTPS reverse proxy with access control."}},{"@type":"Question","name":"Does pi2web provide models or credits?","acceptedAnswer":{"@type":"Answer","text":"No. pi2web is only a remote shell around Pi Coding Agent; model configuration, provider authentication, and quota all come from your local ~/.pi/agent Pi settings."}},{"@type":"Question","name":"Where is my data stored?","acceptedAnswer":{"@type":"Answer","text":"Server metadata lives in ~/.pi/remote-pi/remote-pi.db (SQLite) and full conversations are stored as JSONL by the Pi SessionManager under ~/.pi/agent/sessions/. pi2web never uploads sessions to a third party."}},{"@type":"Question","name":"Which platforms are supported?","acceptedAnswer":{"@type":"Answer","text":"The server runs on Node.js 20.10+ on Linux, macOS, and Windows. Clients include modern browsers and the Kotlin + Jetpack Compose Android app in the repository."}},{"@type":"Question","name":"Are voice and email notifications required?","acceptedAnswer":{"@type":"Answer","text":"No. Both are off by default: voice is enabled only when --voice-base-url is set, and email requires the MailDispatch endpoint, API key environment variable, and recipient to be configured together."}}]}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="faq">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/en/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/en/features/">Features</a>
+        <a href="/en/blog/">Guides</a>
+        <a href="/en/faq/" aria-current="page">FAQ</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/zh/faq/" lang="zh-CN" aria-label="切换到中文">中文</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<section class="page-hero section-pad"><div class="content-shell narrow reveal"><span class="section-kicker">FAQ</span><h1>Frequently asked<br><span>pi2web questions.</span></h1><p>Installation, pairing codes, security boundaries, data storage, and platform support. If your question is missing, open a GitHub issue.</p><div class="page-hero-actions"><a class="button button-primary" href="/en/blog/install-and-configure/">Setup guide</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web/issues" rel="noreferrer">Open an issue ↗</a></div></div></section>
+<section class="section-pad faq-page"><div class="content-shell faq-layout">
+  <article class="faq-item reveal"><h2>What is pi2web?</h2><p>pi2web is a server that runs Pi Coding Agent on your development machine and exposes it through a pairing-code protected HTTP/WebSocket API, so a browser or the Android app can drive the same coding session.</p></article>
+  <article class="faq-item reveal"><h2>How do I install pi2web?</h2><p>Node.js 20.10 or newer is required. Run npm install -g pi2web, then run pi2web; it listens on http://127.0.0.1:11318 by default.</p></article>
+  <article class="faq-item reveal"><h2>Where is the pairing code, and what if I lose it?</h2><p>The pairing code is printed once on first startup and only its SHA-256 hash is stored. It cannot be recovered; run pi2web --rotate-access-token to issue a new one and invalidate the old code immediately.</p></article>
+  <article class="faq-item reveal"><h2>Can I expose pi2web directly to the internet?</h2><p>Not recommended. Terminals are full host shells running as the service user, so anyone with the pairing code effectively has shell access. Use an SSH tunnel, Tailscale, devtunnel, or a trusted HTTPS reverse proxy with access control.</p></article>
+  <article class="faq-item reveal"><h2>Does pi2web provide models or credits?</h2><p>No. pi2web is only a remote shell around Pi Coding Agent; model configuration, provider authentication, and quota all come from your local ~/.pi/agent Pi settings.</p></article>
+  <article class="faq-item reveal"><h2>Where is my data stored?</h2><p>Server metadata lives in ~/.pi/remote-pi/remote-pi.db (SQLite) and full conversations are stored as JSONL by the Pi SessionManager under ~/.pi/agent/sessions/. pi2web never uploads sessions to a third party.</p></article>
+  <article class="faq-item reveal"><h2>Which platforms are supported?</h2><p>The server runs on Node.js 20.10+ on Linux, macOS, and Windows. Clients include modern browsers and the Kotlin + Jetpack Compose Android app in the repository.</p></article>
+  <article class="faq-item reveal"><h2>Are voice and email notifications required?</h2><p>No. Both are off by default: voice is enabled only when --voice-base-url is set, and email requires the MailDispatch endpoint, API key environment variable, and recipient to be configured together.</p></article>
+  <div class="faq-more reveal">
+    <h2>Still stuck?</h2>
+    <p>The guides go deeper on CLI options, remote access options, voice, and email notifications.</p>
+    <div class="hero-actions center-actions"><a class="button button-primary" href="/en/blog/">Browse all guides</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub ↗</a></div>
+  </div>
+</div></section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/en/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>Run Pi Coding Agent on your own machine and drive it safely from a browser or an Android phone.</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/en/features/">Features</a>
+          <a href="/en/blog/">Guides</a>
+          <a href="/en/faq/">FAQ</a>
+          <a href="/en/privacy/">Privacy</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web does not provide any LLM, inference service, or model quota. Models, provider authentication, and usage all come from your local Pi configuration.</strong></p>
+        <p>© 2026 pi2web · MIT License · Independent open-source project<br>Not affiliated with or endorsed by Pi, GitHub, Google, or other referenced vendors. Trademarks belong to their respective owners.</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

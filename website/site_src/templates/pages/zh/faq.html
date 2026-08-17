@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-hero section-pad"><div class="content-shell narrow reveal"><span class="section-kicker">FAQ</span><h1>关于 pi2web 的<br><span>常见问题。</span></h1><p>安装、配对码、安全边界、数据存储与平台支持。没找到答案时，可以在 GitHub Issues 中提问。</p><div class="page-hero-actions"><a class="button button-primary" href="/zh/blog/install-and-configure/">安装与配置指南</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web/issues" rel="noreferrer">提交 Issue ↗</a></div></div></section>
+<section class="section-pad faq-page"><div class="content-shell faq-layout">
+{% for question, answer in faq_items %}
+  <article class="faq-item reveal"><h2>{{ question }}</h2><p>{{ answer }}</p></article>
+{% endfor %}
+  <div class="faq-more reveal">
+    <h2>还有其他问题？</h2>
+    <p>使用指南里有更详细的配置说明，包含命令行选项、远程访问方案、语音与邮件通知。</p>
+    <div class="hero-actions center-actions"><a class="button button-primary" href="/zh/blog/">查看全部指南</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub ↗</a></div>
+  </div>
+</div></section>
+{% endblock %}

@@ -1,0 +1,76 @@
+{% extends "blog_article.html" %}{% block kicker %}VOICE{% endblock %}{% block deck %}pi2web 可以在 Agent 结束后朗读一段摘要，也可以用麦克风口述 Prompt。这需要两个 OpenAI 兼容服务：一个摘要 LLM，一个语音服务。本文给出 Speaches 与 Edge TTS 两种配置。{% endblock %}{% block toc %}<a href="#how">工作方式</a><a href="#edge">方案一：Edge TTS</a><a href="#speaches">方案二：Speaches</a><a href="#flags">参数说明</a><a href="#ui">在 Web UI 中使用</a><a href="#limits">限制与排查</a>{% endblock %}{% block article %}
+<h2 id="how">1. 工作方式</h2>
+<p>语音默认关闭，只有配置 <code>--voice-base-url</code> 才会启用。启用后的流程是：</p>
+<ol>
+<li>Pi 发出 <code>agent_settled</code>（不会再自动重试、自动 compact 或执行排队的 follow-up）。</li>
+<li>pi2web 取最后一条 Assistant 文本，移除代码块、长链接和 Markdown，并限制摘要输入长度。</li>
+<li>摘要 LLM 以流式 Chat Completions 生成短播报；只要出现完整句子就立即调用流式 TTS，不必等整段摘要完成。</li>
+<li>音频通过已认证的 Agent WebSocket 推送到浏览器播放。</li>
+</ol>
+<p>多个 Session 接近同时完成时，播报进入全局队列依次播放，不会重叠；有 Session 名称时以“会话{name}已完成：”开头。新的 Agent 运行会取消该 Agent 尚未完成的播报。</p>
+<div class="article-callout"><strong>语音流不写入历史。</strong><p>音频只实时投递，不写入 Session，也不参与事件 replay。</p></div>
+
+<h2 id="edge">2. 方案一：Edge TTS（只要朗读）</h2>
+<p>如果只需要“说出来”，不需要语音识别，仓库内的 <code>packages/edge-tts-server</code> 是最轻的选择：基于 Python <code>edge-tts</code> 和 <code>aiohttp</code>，直接返回 MP3，不需要 Docker 或 FFmpeg。</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="python -m pip install -e ."><span class="copy-label">复制</span></button></div><pre><code>cd packages/edge-tts-server
+python -m venv .venv
+# Windows: .venv\Scripts\Activate.ps1
+# Linux/macOS: source .venv/bin/activate
+python -m pip install -e .
+remote-pi-edge-tts</code></pre></div>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:5050/v1"><span class="copy-label">复制</span></button></div><pre><code>export SUMMARY_API_KEY=...
+pi2web \
+  --voice-base-url http://127.0.0.1:5050/v1 \
+  --voice-tts-model edge-tts \
+  --voice-tts-voice zh-CN-XiaoxiaoNeural \
+  --voice-tts-format mp3 \
+  --voice-summary-base-url https://llm.example.com/v1 \
+  --voice-summary-model &lt;summary-model-id&gt; \
+  --voice-summary-api-key-env SUMMARY_API_KEY</code></pre></div>
+<p>该模式没有配置 <code>--voice-stt-model</code>，因此只启用播报，不启用语音识别。Edge TTS 使用非官方消费者服务，适合本地和实验性使用。</p>
+
+<h2 id="speaches">3. 方案二：Speaches（朗读 + 识别）</h2>
+<p>需要语音输入时，使用一个同时提供 TTS 与 STT 的 OpenAI 兼容服务，例如 Speaches。Windows 下的启动、模型下载与故障排查见仓库中的 <code>VOICE_SERVER_SETUP.md</code>。</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:8000/v1"><span class="copy-label">复制</span></button></div><pre><code># 示例模型 ID 需要替换为服务中实际下载的模型
+export SUMMARY_API_KEY=...
+pi2web \
+  --voice-base-url http://127.0.0.1:8000/v1 \
+  --voice-stt-model &lt;stt-model-id&gt; \
+  --voice-tts-model &lt;tts-model-id&gt; \
+  --voice-tts-voice &lt;voice-id&gt; \
+  --voice-summary-base-url https://llm.example.com/v1 \
+  --voice-summary-model &lt;summary-model-id&gt; \
+  --voice-summary-api-key-env SUMMARY_API_KEY \
+  --voice-language zh-CN</code></pre></div>
+
+<h2 id="flags">4. 参数说明</h2>
+<table class="article-table"><thead><tr><th>参数</th><th>说明</th></tr></thead><tbody>
+<tr><td><code>--voice-base-url</code></td><td>OpenAI 兼容语音服务地址。不配置则语音功能完全关闭。</td></tr>
+<tr><td><code>--voice-tts-model</code> / <code>--voice-tts-voice</code></td><td>启用语音时必填的 TTS 模型 ID 与音色 ID。</td></tr>
+<tr><td><code>--voice-tts-format</code></td><td><code>pcm</code>（默认）或 <code>mp3</code>，取决于语音服务实际支持的输出。</td></tr>
+<tr><td><code>--voice-stt-model</code></td><td>可选。配置后 Web UI 才显示麦克风按钮。</td></tr>
+<tr><td><code>--voice-api-key-env</code></td><td>存放语音服务 API key 的环境变量名。</td></tr>
+<tr><td><code>--voice-summary-base-url</code> / <code>--voice-summary-model</code></td><td>生成播报摘要的 LLM endpoint 与模型。</td></tr>
+<tr><td><code>--voice-summary-api-key-env</code></td><td>存放摘要 LLM API key 的环境变量名。</td></tr>
+<tr><td><code>--voice-language</code></td><td>播报语言标签，默认 <code>zh-CN</code>。</td></tr>
+<tr><td><code>--voice-request-timeout</code></td><td>摘要、合成与识别的单次请求超时，默认 <code>120000</code> 毫秒，最小 1000。</td></tr>
+</tbody></table>
+<p>API key 一律通过环境变量名传入，不直接写在命令行参数中，避免出现在进程列表里。</p>
+
+<h2 id="ui">5. 在 Web UI 中使用</h2>
+<ul>
+<li>点击“启用语音”后开始播放服务端推送的 PCM16 或 MP3 音频。浏览器通常要求用户交互后才允许自动播放，这也是需要点一下的原因。</li>
+<li>配置了 STT 模型时会显示麦克风按钮；识别文字只插入输入框，<strong>不会自动发送</strong>，你仍然可以先修改再提交。</li>
+<li>麦克风要求 HTTPS 安全上下文（<code>localhost</code> 例外）；通过局域网 IP 的 HTTP 地址访问时无法使用。</li>
+</ul>
+
+<h2 id="limits">6. 限制与排查</h2>
+<table class="article-table"><thead><tr><th>现象</th><th>处理</th></tr></thead><tbody>
+<tr><td>没有任何播报</td><td>确认启动参数中有 <code>--voice-base-url</code>，且页面已点击“启用语音”。</td></tr>
+<tr><td>播报变成文本提示</td><td>摘要或 TTS 请求超时。提高 <code>--voice-request-timeout</code>，或检查语音服务负载。</td></tr>
+<tr><td>没有麦克风按钮</td><td>未配置 <code>--voice-stt-model</code>，或访问地址不是安全上下文。</td></tr>
+<tr><td>音频断续或格式错误</td><td>尝试切换 <code>--voice-tts-format</code>（<code>pcm</code> ↔ <code>mp3</code>），确认服务端实际支持的格式。</td></tr>
+<tr><td>Android 上没有语音</td><td>Android 客户端的流式 PCM 播放与录音 UI 尚未接入。</td></tr>
+</tbody></table>
+<p class="article-source">参考：<a href="https://github.com/sxwxs/pi2web/blob/main/VOICE_SERVER_SETUP.md" rel="noreferrer">VOICE_SERVER_SETUP.md ↗</a> · <a href="https://github.com/sxwxs/pi2web/tree/main/packages/edge-tts-server" rel="noreferrer">edge-tts-server ↗</a></p>
+{% endblock %}

@@ -1,0 +1,82 @@
+{% extends "blog_article.html" %}{% block kicker %}SECURE REMOTE ACCESS{% endblock %}{% block deck %}pi2web has exactly one layer of authentication, and its terminals are full host shells. This guide explains the threat model and shows four workable options: SSH tunnels, Tailscale, devtunnel, and an nginx HTTPS proxy.{% endblock %}{% block toc %}<a href="#threat">Threat model</a><a href="#auth">Pairing and rate limits</a><a href="#ssh">SSH port forwarding</a><a href="#tailscale">Tailscale / private networks</a><a href="#tunnel">devtunnel and tunnels</a><a href="#nginx">nginx HTTPS proxy</a><a href="#checklist">Checklist</a>{% endblock %}{% block article %}
+<h2 id="threat">1. Understand the threat model first</h2>
+<p>Before using pi2web you must accept one premise: <strong>whoever holds the pairing code effectively holds a shell as the user running pi2web.</strong></p>
+<ul>
+<li>Terminals are full host shells running as the pi2web process user, with access to files outside the workspace and to inherited environment variables.</li>
+<li>The agent itself can read, write, and execute — that is the point of a coding agent.</li>
+<li>A workspace path only sets the initial cwd. It is not a security boundary and not a sandbox.</li>
+<li>pi2web does not validate <code>Origin</code> or <code>Host</code>, which makes tunnels convenient but means you cannot rely on those headers for protection.</li>
+</ul>
+<div class="article-callout warning"><strong>Never publish the port directly.</strong><p>Establish a trusted channel first — SSH, a private network, or an HTTPS proxy with access control — and reach the service inside that channel.</p></div>
+
+<h2 id="auth">2. Pairing code and rate limiting</h2>
+<p>Authentication is straightforward: except for static assets, <code>/health</code>, and <code>/api/v1/auth/login</code>, every request needs <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+<ul>
+<li>The code is shown once on first startup or rotation; only its SHA-256 hash is stored, in a <code>0600</code> file.</li>
+<li>The web UI requires manual entry and only asks about <code>localStorage</code> after a successful connection.</li>
+<li>Ten failures from one source address in 60 seconds trigger a lockout that starts at 60 seconds and doubles up to 15 minutes, returning <code>429</code> with <code>Retry-After</code>. WebSocket upgrades are limited too; one success resets the counter.</li>
+</ul>
+<div class="article-callout"><strong>Limits are per TCP source address.</strong><p>Behind devtunnel, Cloudflare Tunnel, or a reverse proxy, every client shares one bucket — one person repeatedly typing the wrong code can lock everyone out.</p></div>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --rotate-access-token"><span class="copy-label">Copy</span></button></div><pre><code># Rotate immediately if you suspect the code leaked
+pi2web --rotate-access-token</code></pre></div>
+
+<h2 id="ssh">3. Option one: SSH port forwarding (recommended)</h2>
+<p>The simplest and safest option. The service keeps listening on <code>127.0.0.1</code> while SSH provides the encrypted channel.</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="ssh -N -L 11318:127.0.0.1:11318 user@dev-host"><span class="copy-label">Copy</span></button></div><pre><code># On the client machine
+ssh -N -L 11318:127.0.0.1:11318 user@dev-host
+
+# Then open http://127.0.0.1:11318</code></pre></div>
+<p>Because the address is <code>localhost</code>, the browser treats it as a secure context, so notifications and the microphone keep working. On Android, an SSH client with port forwarding achieves the same result.</p>
+
+<h2 id="tailscale">4. Option two: Tailscale or another private network</h2>
+<p>For regular phone access, a private network beats opening a tunnel every time. Bind the service to the tailnet address so only devices on the network can reach it:</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --host 100.x.y.z --port 11318"><span class="copy-label">Copy</span></button></div><pre><code>pi2web --host 100.x.y.z --port 11318</code></pre></div>
+<p>Pair this with tailnet ACLs restricting which devices may reach the port. Note that plain HTTP over a private IP is not a browser secure context, so notifications and the microphone stay disabled; Tailscale's HTTPS certificates solve that.</p>
+
+<h2 id="tunnel">5. Option three: devtunnel and similar tunnels</h2>
+<p>Without a public IP or a VPN, tools like devtunnel or Cloudflare Tunnel can publish the local port as an HTTPS URL. pi2web does not validate <code>Origin</code>/<code>Host</code>, so it works out of the box.</p>
+<ul>
+<li>Enable the tunnel provider's own access control (login, allow list, or policy). Do not publish an anonymous public URL.</li>
+<li>Rate limiting counts the tunnel egress address, which matters when several people share it.</li>
+<li>Close the tunnel when you are not using it rather than leaving it running.</li>
+</ul>
+
+<h2 id="nginx">6. Option four: nginx + HTTPS reverse proxy</h2>
+<p>If you already run a server with certificates, proxy it yourself. The key parts are forwarding WebSocket upgrade headers and adding a second layer of access control.</p>
+<div class="article-code"><div><span>nginx</span><button type="button" data-copy="proxy_set_header Upgrade $http_upgrade;"><span class="copy-label">Copy</span></button></div><pre><code>server {
+    listen 443 ssl http2;
+    server_name pi.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/pi.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pi.example.com/privkey.pem;
+
+    # Extra access control: client certs, basic auth, or an IP allow list
+    allow 203.0.113.0/24;
+    deny all;
+
+    location / {
+        proxy_pass http://127.0.0.1:11318;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}</code></pre></div>
+<p>Keep <code>proxy_read_timeout</code> generous or long agent runs will be disconnected by the proxy. Behind a proxy all requests share one source address, so rate-limit counters merge as well.</p>
+
+<h2 id="checklist">7. Before you go live</h2>
+<ul>
+<li>Is the service still bound to <code>127.0.0.1</code> or a private address rather than <code>0.0.0.0</code>?</li>
+<li>Does the channel add a second control independent of the pairing code (SSH keys, tailnet ACLs, tunnel policy, proxy auth)?</li>
+<li>Is the pairing code stored in <code>localStorage</code> only on trusted devices?</li>
+<li>Are you on HTTPS or <code>localhost</code> so notifications and the microphone work?</li>
+<li>Do you know how to rotate the pairing code immediately if it leaks?</li>
+<li>Does the pi2web user run with least privilege (definitely not root)?</li>
+</ul>
+<p class="article-source">Reference: <a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a></p>
+{% endblock %}
+{% block next_step %}<div class="article-end"><strong>Next step</strong><p>With the channel in place, revisit the setup guide for CLI options, the data directory, and optional features.</p><a class="button button-secondary" href="/en/blog/install-and-configure/">Read the setup guide →</a></div>{% endblock %}

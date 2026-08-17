@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Using the pi2web web UI</title>
+  <meta name="description" content="Create workspaces and agents in the browser, send prompts and steer, use terminals, reference files with @, switch models and thinking levels, fork/undo, and compact.">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/en/blog/web-ui/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/blog/web-ui/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/blog/web-ui/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/blog/web-ui/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="Using the pi2web web UI">
+  <meta property="og:description" content="Create workspaces and agents in the browser, send prompts and steer, use terminals, reference files with @, switch models and thinking levels, fork/undo, and compact.">
+  <meta property="og:url" content="https://pi2web.es2q.com/en/blog/web-ui/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:locale:alternate" content="zh_CN">
+  <meta property="article:published_time" content="2026-07-25">
+  <meta property="article:modified_time" content="2026-07-25">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Using the pi2web web UI">
+  <meta name="twitter:description" content="Create workspaces and agents in the browser, send prompts and steer, use terminals, reference files with @, switch models and thinking levels, fork/undo, and compact.">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Using the pi2web web UI","description":"Create workspaces and agents in the browser, send prompts and steer, use terminals, reference files with @, switch models and thinking levels, fork/undo, and compact.","url":"https://pi2web.es2q.com/en/blog/web-ui/","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"},"datePublished":"2026-07-25","dateModified":"2026-07-25","author":{"@type":"Person","name":"sxwxs"},"publisher":{"@type":"Organization","name":"pi2web"},"about":{"@type":"SoftwareApplication","name":"pi2web","applicationCategory":"DeveloperApplication"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"pi2web","item":"https://pi2web.es2q.com/en/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://pi2web.es2q.com/en/blog/"},{"@type":"ListItem","position":3,"name":"Using the pi2web web UI","item":"https://pi2web.es2q.com/en/blog/web-ui/"}]}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="blog_webui">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/en/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/en/features/">Features</a>
+        <a href="/en/blog/" aria-current="page">Guides</a>
+        <a href="/en/faq/">FAQ</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/zh/blog/web-ui/" lang="zh-CN" aria-label="切换到中文">中文</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<article class="article-page">
+<header class="article-hero section-pad"><div class="content-shell article-shell reveal"><nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/en/">pi2web</a><span>/</span><a href="/en/blog/">Guides</a></nav><span class="section-kicker">WEB UI</span><h1>Using the pi2web web UI</h1><p class="article-deck">Once paired, the browser is a full agent workbench. This guide covers workspaces, agents, conversation control, file references, terminals, recovery, and notifications.</p><div class="article-meta"><time datetime="2026-07-25">2026-07-25</time><span>pi2web</span><span>Practical guide</span></div></div></header>
+<div class="content-shell article-layout"><aside class="article-toc"><strong>On this page</strong><a href="#connect">Connect and pair</a><a href="#workspace">Workspaces</a><a href="#agent">Agents</a><a href="#chat">Conversation control</a><a href="#session">Branching and compact</a><a href="#terminal">Terminals</a><a href="#notify">Notifications and voice</a><a href="#recovery">Reconnect behaviour</a></aside><div class="article-body"><h2 id="connect">1. Connect and pair</h2>
+<p>Open the service address (<code>http://127.0.0.1:11318</code> by default) and type the pairing code. It is never read from URL parameters and never injected by the server. After a successful connection the page asks whether to store it in <code>localStorage</code>; if you decline, the code lives only in the page's JavaScript memory and is gone after a refresh.</p>
+<p>The server address, the current workspace/agent, and the event sequence cursor are kept in <code>localStorage</code> so a refresh restores your view quickly.</p>
+
+<h2 id="workspace">2. Workspaces</h2>
+<p>A workspace is a local directory plus a name. It gives agents an initial working directory and enables file browsing.</p>
+<ul>
+<li>Browse the directory tree and read text files with pagination; binary files show an explicit notice.</li>
+<li>Type <code>@</code> in the composer to browse and reference files or directories directly in a prompt.</li>
+<li>Right-click a directory to open an interactive terminal at that path.</li>
+</ul>
+<div class="article-callout warning"><strong>A workspace is not a sandbox.</strong><p>It only sets the initial cwd. Terminals and agents run as the pi2web process user and can reach files outside the workspace.</p></div>
+
+<h2 id="agent">3. Creating and managing agents</h2>
+<p>When creating an agent you can start a new session or resume an existing one. Agents and terminals share one list so you can switch between them in a single view.</p>
+<ul>
+<li><strong>Lazy start</strong>: after a restart agents are <code>unloaded</code>; the Pi session is created when you read messages or send a command, and concurrent requests share one startup.</li>
+<li><strong>Stop agent</strong>: releases the running session while keeping metadata, so the next use restarts it automatically.</li>
+<li><strong>Archive</strong>: right-click an agent to archive it. This only sets <code>archived_at</code> in the database and never moves, renames, or deletes Pi session files.</li>
+</ul>
+
+<h2 id="chat">4. Conversation control</h2>
+<p>The composer supports four operations that map to Pi's native semantics:</p>
+<table class="article-table"><thead><tr><th>Action</th><th>Effect</th><th>When to use</th></tr></thead><tbody>
+<tr><td>Prompt</td><td>Starts a new agent run.</td><td>Ask for a task or a question.</td></tr>
+<tr><td>Steer</td><td>Injects guidance into the current run.</td><td>Correct course without restarting.</td></tr>
+<tr><td>Follow-up</td><td>Queues work for after the current run.</td><td>Let it finish, then continue.</td></tr>
+<tr><td>Abort</td><td>Stops the current run.</td><td>Requirements changed or it went off track.</td></tr>
+</tbody></table>
+<p>Thinking, tool calls, retries, and extension UI events are collapsible, so long conversations do not drown in tool output. Model and thinking level can be switched at any time and apply to subsequent runs.</p>
+
+<h2 id="session">5. Branching and compact</h2>
+<ul>
+<li><strong>Session naming</strong> — the name shows up in lists, notifications, and spoken summaries.</li>
+<li><strong>Tree navigate</strong> — walk through the session's history nodes.</li>
+<li><strong>Undo / fork</strong> — go back to a node, or branch off from it.</li>
+<li><strong>Compact</strong> — compress the context of a long-running session.</li>
+</ul>
+<p>These operations act on Pi's JSONL session files; pi2web's SQLite database only keeps a rebuildable index.</p>
+
+<h2 id="terminal">6. Terminals</h2>
+<p>Terminals use node-pty on the server and xterm.js in the browser, and give you a full host shell.</p>
+<ul>
+<li>Input, window resize, clear, close, and reconnect after a browser refresh.</li>
+<li>The last 512 KiB of output is retained for reconnect replay.</li>
+<li>Up to eight terminals per server process.</li>
+<li>Terminals live only in process memory and end when pi2web exits or restarts.</li>
+</ul>
+
+<h2 id="notify">7. Notifications and voice</h2>
+<p>The "settings" dialog in the navigation bar toggles email notifications and configures the aggregation window, whether to include the agent's final reply, and whether to include the session name and working path. These settings live in the server database and apply to every client.</p>
+<p>Browser notifications require permission and a secure context (<code>localhost</code> excepted); once granted, every known agent can notify you. If the server has voice configured, an "enable voice" button appears and plays the PCM16 or MP3 audio pushed by the server. With an STT model configured, a microphone button appears as well; transcripts are inserted into the composer and never sent automatically.</p>
+<div class="guide-link-grid">
+  <a href="/en/blog/voice/"><strong>Configure voice →</strong><span>Summary LLM, TTS/STT services, playback queue</span></a>
+  <a href="/en/blog/mail-notifications/"><strong>Configure email →</strong><span>MailDispatch options and message body</span></a>
+</div>
+
+<h2 id="recovery">8. Reconnect behaviour</h2>
+<p>The web UI receives events over WebSocket and de-duplicates them by sequence. After a disconnect it reconnects with exponential backoff and requests an incremental replay or a snapshot based on the stored cursor, so a brief network drop, a Wi-Fi switch, or a sleeping phone does not lose output.</p>
+<div class="article-callout"><strong>Browser and Android differences.</strong><p>Custom Pi TUI components cannot be rendered generically in a browser, and the Android client does not yet implement streaming PCM playback or recording UI.</p></div>
+<p class="article-source">Reference: <a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a></p>
+<div class="article-end"><strong>Next step</strong><p>Before reaching the service from another device, review the pi2web threat model and safe remote access options.</p><a class="button button-secondary" href="/en/blog/remote-access/">Read the secure remote access guide →</a></div></div></div>
+</article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/en/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>Run Pi Coding Agent on your own machine and drive it safely from a browser or an Android phone.</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/en/features/">Features</a>
+          <a href="/en/blog/">Guides</a>
+          <a href="/en/faq/">FAQ</a>
+          <a href="/en/privacy/">Privacy</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web does not provide any LLM, inference service, or model quota. Models, provider authentication, and usage all come from your local Pi configuration.</strong></p>
+        <p>© 2026 pi2web · MIT License · Independent open-source project<br>Not affiliated with or endorsed by Pi, GitHub, Google, or other referenced vendors. Trademarks belong to their respective owners.</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

@@ -41,12 +41,11 @@ const TASK_FOR_ACTION:Partial<Record<CollabAction,string[]>>={
 };
 const SUBMIT_TOOLS=[...new Set(Object.values(TOOL_FOR_TASK))];
 const OPTIONAL_TOOLS=['collab_escalate','collab_withdraw_issue'];
+/** Last-resort scrub for text the hub did not write for the tool flow (mostly error strings). */
 const scrub=(text:string)=>text
   .replace(/(?:POST|GET|PUT|DELETE)s?\s+(?:to\s+)?\S*\/api\/v1\/\S+/gi,'use the active collaboration submission tool')
   .replace(/\S*\/api\/v1\/\S+/gi,'the collaboration tool')
-  .replace(/\s*with\s+baselineId="[^"]*"/gi,'')
   .replace(/[0-9a-f]{8}-[0-9a-f-]{16,}/gi,'[internal reference]');
-
 /** Inline-only Pi extension. It is loaded solely for profile=collab sessions. */
 export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
   return function collabExtension(pi:ExtensionAPI){
@@ -61,7 +60,7 @@ export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
       if(!value||typeof value!=='object')return typeof value==='string'&&aliases.has(value)?aliases.get(value):value;
       const output:Record<string,unknown>={};
       for(const [name,entry] of Object.entries(value as Record<string,unknown>)){
-        if(['sessionId','tokensUsed','tokenBudget'].includes(name))continue;
+        if(name==='sessionId')continue;
         const ids=typeof entry==='string'?[entry]:Array.isArray(entry)&&entry.every(item=>typeof item==='string')?entry as string[]:undefined;
         if(ids&&/(Id|Ids)$/.test(name)){
           const kind=/issue/i.test(name)?'issue':/criterion/i.test(name)?'criterion':/proposal/i.test(name)?'proposal':/debate/i.test(name)?'debate':/baseline/i.test(name)?'baseline':/participant|author|reporter|target|raisedBy/i.test(name)?'participant':'ref';
@@ -69,6 +68,34 @@ export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
         }else output[name]=redact(entry);
       }
       return output;
+    };
+    /**
+     * Aliases are assigned before the walk, not during it, for two reasons. Seat refs must line up with the panel
+     * (so "reviewer-2" means the same agent in every turn and in every argument the model writes), and any id the
+     * walk does not recognise as an id-shaped key - `progress.waitingOn` is a plain string array - would otherwise
+     * reach the model as a raw hub uuid. Findings borrow the board's own numbering so a ref survives a new turn.
+     */
+    const seed=(task:Record<string,unknown>)=>{
+      const counters=new Map<string,number>();
+      const claim=(id:unknown,alias:string)=>{if(typeof id==='string'&&id&&!aliases.has(id))aliases.set(id,alias)};
+      for(const seat of Array.isArray(task.panel)?task.panel as Record<string,unknown>[]:[]){
+        const role=typeof seat.role==='string'?seat.role:'participant',next=(counters.get(role)??0)+1;
+        counters.set(role,next);claim(seat.participantId,`${role}-${next}`);
+      }
+      const walk=(value:unknown)=>{
+        if(Array.isArray(value))return value.forEach(walk);
+        if(!value||typeof value!=='object')return;
+        const entry=value as Record<string,unknown>;
+        if(typeof entry.issueId==='string'&&typeof entry.number==='number')claim(entry.issueId,`issue-${entry.number}`);
+        for(const nested of Object.values(entry))walk(nested);
+      };
+      walk(task);
+    };
+    /** Hub errors name findings by hub id; the model only knows aliases, so map before falling back to scrubbing. */
+    const explain=(text:string)=>{
+      let output=text;
+      for(const [id,alias] of aliases)output=output.split(id).join(alias);
+      return scrub(output);
     };
     const restore=(value:unknown):unknown=>{
       if(Array.isArray(value))return value.map(restore);
@@ -86,8 +113,7 @@ export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
       if(Object.keys(context).length)lines.push(`Task context:\n${JSON.stringify(context,null,2)}`);
       const submit=TOOL_FOR_TASK[String(safe.task??'')];lines.push(submit?`Complete every required Ref with ${submit}, then end the turn.`:'No submission is required; end the turn.');
       return lines.join('\n');
-    };
-    const currentTask=()=>String(lastTask?.task??'');
+    };    const currentTask=()=>String(lastTask?.task??'');
     const normalize=(action:CollabAction,payload:Record<string,unknown>)=>{
       const body=restore(payload) as Record<string,unknown>;
       if(action==='findings'){
@@ -114,7 +140,7 @@ export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
       promptGuidelines:[`Use ${definition.name} only after collab_get_task requests it, and include every required Ref exactly once.`],parameters:definition.parameters,
       async execute(_id:string,input:Record<string,unknown>){
         try{assertTask(definition.action);const result=await bridge.submit(agentId,definition.action,normalize(definition.action,input));return {content:[{type:'text',text:acceptedText(result)}],details:{result:redact(result)},terminate:definition.terminate??true}}
-        catch(error){const fields=(error as {fieldErrors?:unknown}).fieldErrors;throw new Error(scrub(`${(error as Error).message??'Submission failed'}${fields?` ${JSON.stringify(fields)}`:''}`))}
+        catch(error){const fields=(error as {fieldErrors?:unknown}).fieldErrors;throw new Error(explain(`${(error as Error).message??'Submission failed'}${fields?` ${JSON.stringify(fields)}`:''}`))}
       }
     } as any);
 
@@ -129,7 +155,7 @@ export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
     pi.registerTool({
       name:'collab_get_task',label:'Get Collaboration Task',description:'Get the complete current collaboration assignment and activate its exact typed submission tool.',
       promptSnippet:'Fetch the current collaboration assignment before doing any collaboration work',promptGuidelines:['Call collab_get_task first after every pi2web collaboration wake-up.'],parameters:Type.Object({}, {additionalProperties:false}),
-      async execute(){aliases=new Map();lastTask=await bridge.getTask(agentId);activate(lastTask);return {content:[{type:'text',text:taskText(lastTask)}],details:{task:redact(lastTask)}}}
+      async execute(){aliases=new Map();lastTask=await bridge.getTask(agentId);seed(lastTask);activate(lastTask);return {content:[{type:'text',text:taskText(lastTask)}],details:{task:redact(lastTask)}}}
     });
 
     registerSubmit({name:'collab_submit_ready',label:'Submit Implementation',action:'ready',description:'Declare the assigned implementation complete with an auditable change summary.',parameters:Type.Object({
@@ -144,7 +170,10 @@ export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
       mergeProposals:Type.Optional(Type.Array(Type.Object({issueRefs:Type.Array(Type.String(),{minItems:2,maxItems:20}),rationale:Type.String({minLength:10,maxLength:2000})},{additionalProperties:false}),{maxItems:50}))
     },{additionalProperties:false})});
     registerSubmit({name:'collab_submit_merge_votes',label:'Submit Merge Votes',action:'merge_votes',description:'Vote on every required duplicate-merge proposal.',parameters:Type.Object({votes:Type.Array(Type.Object({proposalRef:Type.String(),stance:StringEnum(['approve','reject'] as const),rationale:Type.Optional(Type.String({maxLength:4000}))},{additionalProperties:false}),{minItems:1,maxItems:100})},{additionalProperties:false})});
-    registerSubmit({name:'collab_submit_issue_discussions',label:'Submit Issue Arguments',action:'issue_discussions',description:'Defend every required approved issue with evidence.',parameters:Type.Object({discussions:Type.Array(Type.Object({issueRef:Type.String(),argument:Type.String({minLength:20,maxLength:4000}),respondingTo:Type.Optional(Type.String())},{additionalProperties:false}),{minItems:1,maxItems:200})},{additionalProperties:false})});
+    registerSubmit({name:'collab_submit_issue_discussions',label:'Submit Issue Arguments',action:'issue_discussions',description:'Defend every required finding with evidence, and withdraw the ones you no longer stand by.',parameters:Type.Object({
+      discussions:Type.Optional(Type.Array(Type.Object({issueRef:Type.String(),argument:Type.String({minLength:20,maxLength:4000}),respondingTo:Type.Optional(Type.String())},{additionalProperties:false}),{maxItems:200})),
+      withdrawals:Type.Optional(Type.Array(Type.Object({issueRef:Type.String(),rationale:Type.String({minLength:10,maxLength:4000,description:'Why you no longer stand by your own finding'})},{additionalProperties:false}),{maxItems:200}))
+    },{additionalProperties:false})});
     registerSubmit({name:'collab_submit_nominations',label:'Submit Criteria Nominations',action:'nominations',description:'Submit the complete independent set of proposed scoring criteria.',parameters:Type.Object({nominations:Type.Array(Type.Object({
       externalId:Type.Optional(Type.String()),name:Type.String({minLength:2,maxLength:80}),definition:Type.String({minLength:20,maxLength:2000}),weightSuggestion:Type.Optional(Type.Number({minimum:0,maximum:1})),anchors:Type.Optional(Type.Record(Type.String(),Type.String())),rationale:Type.Optional(Type.String({maxLength:2000}))
     },{additionalProperties:false}),{maxItems:20})},{additionalProperties:false})});
@@ -160,6 +189,6 @@ export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
     registerSubmit({name:'collab_escalate',label:'Escalate Collaboration',action:'escalate',description:'Escalate a genuine blocker or unresolved judgment to the human operator.',terminate:false,parameters:Type.Object({
       kind:StringEnum(['issue_dispute','rubric_dispute','score_dispute','other'] as const),refRef:Type.Optional(Type.String()),summary:Type.String({minLength:20,maxLength:2000}),question:Type.String({minLength:10,maxLength:1000}),options:Type.Optional(Type.Array(Type.String(),{maxItems:10})),urgency:Type.Optional(StringEnum(['low','normal','high'] as const))
     },{additionalProperties:false})});
-    registerSubmit({name:'collab_withdraw_issue',label:'Withdraw Issue',action:'withdraw',description:'Withdraw one of your own findings when you no longer stand by it.',terminate:false,parameters:Type.Object({issueRef:Type.String()},{additionalProperties:false})});
+    registerSubmit({name:'collab_withdraw_issue',label:'Withdraw Issue',action:'withdraw',description:'Withdraw one of your own findings when you no longer stand by it. Does not end your turn.',terminate:false,parameters:Type.Object({issueRef:Type.String()},{additionalProperties:false})});
   };
 }

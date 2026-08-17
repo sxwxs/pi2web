@@ -7,7 +7,7 @@ const digest={sessionId:SESSION,kind:'review',phase:'validating',round:2,task:'v
   you:{participantId:'pppppppp-2222-3333-4444-555555555555',role:'reviewer',tokensUsed:10,tokenBudget:1000},
   issues:[{issueId:ISSUE,number:1,title:'Callback trusts the client amount'}],
   yourRequiredIssueIds:[ISSUE],
-  instructions:`Validate this round's new issues, then POST one vote for every issue to /api/v1/collab/sessions/${SESSION}/issue-votes with baselineId="${BASELINE}".`};
+  instructions:'Verify each finding yourself, then call collab_submit_issue_votes once with a vote for each.'};
 
 /** Minimal stand-in for the Pi extension host: it only has to hand back the two registered tools. */
 const load=(submit:(action:CollabAction,payload:Record<string,unknown>)=>unknown,task:Record<string,unknown>=digest)=>{
@@ -43,13 +43,49 @@ describe('collaboration Pi extension',()=>{
     expect(result.content[0].text).not.toContain(ISSUE);
   });
 
-  it('reports validation field errors without leaking ids',async()=>{
-    const tools=load(()=>{throw Object.assign(new Error(`Invalid request: votes.0.stance REQUIRED (issue ${ISSUE})`),{fieldErrors:[{path:'votes.0.stance',code:'REQUIRED'}]})});
+  it('names findings by their alias in validation errors instead of hiding them',async()=>{
+    const tools=load(()=>{throw Object.assign(new Error(`Invalid request: a vote for issue ${ISSUE} is required`),{fieldErrors:[{path:'votes',code:'REQUIRED'}]})});
     await tools.collab_get_task.execute('call-1',{});
+    // The hub names findings by hub id. Blanking them left the model unable to tell *which* vote it still owed,
+    // so an id it has an alias for is translated, and only an unknown one is blanked.
     await expect(tools.collab_submit_issue_votes.execute('call-2',{votes:[{issueRef:'issue-1'}]}))
-      .rejects.toThrow(/votes\.0\.stance/);
+      .rejects.toThrow(/a vote for issue issue-1 is required/);
     await expect(tools.collab_submit_issue_votes.execute('call-3',{votes:[{issueRef:'issue-1'}]}))
-      .rejects.toThrow(/internal reference/);
+      .rejects.toThrow(/^(?!.*aaaaaaaa-2222).*$/);
+  });
+
+  it('blanks an id it has no alias for',async()=>{
+    const unknown='eeeeeeee-2222-3333-4444-555555555555';
+    const tools=load(()=>{throw new Error(`Invalid request: unknown issue ${unknown}`)});
+    await tools.collab_get_task.execute('call-1',{});
+    await expect(tools.collab_submit_issue_votes.execute('call-2',{votes:[{issueRef:'issue-1'}]})).rejects.toThrow(/internal reference/);
+  });
+
+  it('keeps seat aliases aligned with the panel and never leaks a raw seat id',async()=>{
+    const seats=['11111111-aaaa-3333-4444-555555555555','22222222-aaaa-3333-4444-555555555555'];
+    const tools=load(()=>({}),{...digest,task:'defend_approved_issues',phase:'issue_discussing',
+      panel:[{participantId:seats[0],role:'reviewer',displayName:'Reviewer one'},{participantId:seats[1],role:'reviewer',displayName:'Reviewer two'}],
+      you:{participantId:seats[1],role:'reviewer'},
+      // A plain string array is not an id-shaped key: without seeding, these reach the model as raw hub ids.
+      progress:{waitingOn:[seats[0],seats[1]]},
+      consensus:[{issueId:ISSUE,rejecters:[seats[0]],supporters:[seats[1]],panelRejected:true}],
+      instructions:'Defend or withdraw.'});
+    const text=(await tools.collab_get_task.execute('call-1',{})).content[0].text as string;
+    expect(text).not.toContain(seats[0]);expect(text).not.toContain(seats[1]);
+    expect(text).toContain('reviewer-1');expect(text).toContain('reviewer-2');
+    expect(text).toMatch(/"waitingOn":\s*\[\s*"reviewer-1",\s*"reviewer-2"\s*\]/);
+  });
+
+  it('lets a reporter withdraw and defend in one submission',async()=>{
+    const other='ffffffff-2222-3333-4444-555555555555';let seen:any;
+    const tools=load((action,payload)=>{seen={action,payload};return {withdrawn:[ISSUE],accepted:[other]}},{...digest,task:'defend_approved_issues',phase:'issue_discussing',
+      issues:[{issueId:ISSUE,number:1,title:'Dropped'},{issueId:other,number:2,title:'Kept'}],
+      yourRequiredIssueIds:[ISSUE,other],instructions:'Defend or withdraw every required finding.'});
+    await tools.collab_get_task.execute('call-1',{});
+    await tools.collab_submit_issue_discussions.execute('call-2',{
+      withdrawals:[{issueRef:'issue-1',rationale:'The rejecter is right; my evidence does not hold on this baseline.'}],
+      discussions:[{issueRef:'issue-2',argument:'This one still reproduces exactly as filed, so I am keeping it.'}]});
+    expect(seen).toMatchObject({action:'issue_discussions',payload:{withdrawals:[{issueId:ISSUE}],discussions:[{issueId:other}]}});
   });
 
   it('exposes complete scoring candidates and restores criterion aliases in votes',async()=>{

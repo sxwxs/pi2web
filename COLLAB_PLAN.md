@@ -2,6 +2,10 @@
 
 > 状态：**已实现并进入扩展整合阶段**（M0–M8；openapi.yaml 仍需继续补齐）。决策记录见 §10。
 >
+> 实现补记：**共识的终局不再一律升级人工**。讨论在用满 `maxConsensusRounds` 或票型连续两轮未变时结束，中枢按严重度裁决：除报告人外全员 reject → `wontfix`（`blocker`/`critical` 除外）；panel 分裂且 `major` 以上 → escalation；`minor`/`nit` → 多数决，平票保留。报告人可以在答辩提交里直接用 `withdrawals[]` 撤回自己不再坚持的 Finding。Issue 投票允许分批提交，没投完就不算完成并重新派工单，而不是把整批驳回。
+>
+> 实现补记：每个工单都带上 panel 名单、严重度与投票口径、共识/撤回规则和 `baseline.changedFiles`；指令只出现工具名，不出现 HTTP 端点。中枢在真正唤醒前会复查该座位是否仍欠这件事，避免把一次模型调用花在"无事可做"上。
+>
 > 实现补记：Review 已改为 **review-only + 人工触发 remediation**。正常评审在盲审、Issue 共识和人工争议裁定后直接 `finished`，不再经过 `responding/adjudicating`。确认的问题以 `confirmed` 保留。人可对 finished Review 调 `POST /sessions/{id}/recheck`：直接复核当前代码，或指定 implementer 先修复；开发 `/ready` 后自动召集原 Reviewer，Reviewer 在下一轮 findings 提交中逐项回报 `resolved/still_present`。
 >
 > 实现补记：支持 **build-then-review**（`policy.implementationFirst`）——首次会话可先进入 `implementing` 阶段，由唯一的开发 Agent 施工；只有显式 `POST /sessions/{id}/ready` 才触发中枢召集 Reviewer。`agent_settled` 不再等同于完成，避免失败或漏交被误判为可评审。
@@ -195,10 +199,18 @@ finished ──人工 recheck(fix_then_review)──▶ implementing ──ready
 ```
 open（本轮新 Finding） ──Panel 共识通过──▶ confirmed（评审输出，需要处理但不阻塞 finished）
 open ──提出者 withdraw─────────────────▶ withdrawn
-open ──共识无法收敛────────────────────▶ escalated ──人工裁决──▶ confirmed | wontfix | closed
+open ──讨论结束后除报告人外全员 reject──▶ wontfix（panel_rejected，不需要人）
+open ──讨论结束后 panel 分裂且为小问题──▶ confirmed | wontfix（多数决，平票保留）
+open ──讨论结束后仍有实质争议且严重────▶ escalated ──人工裁决──▶ confirmed | wontfix | closed
 confirmed ──下一轮原提出者复核 resolved──────▶ resolved
 confirmed ──下一轮原提出者复核 still_present──▶ confirmed
 ```
+
+讨论何时结束：用满 `maxConsensusRounds`，**或**某条 Finding 的票型连续两轮完全没变（无人被说服，再吵一轮只是重复）。严重度分级：`blocker`/`critical` 任何未收敛争议都上人；`major` 只有 panel 分裂才上人；`minor`/`nit` 不上人。两人 panel 里"除报告人外全员 reject"只是一对一平票，不算 panel 判决。
+
+报告人的撤回是一等公民操作，不是例外路径：`POST /issues/{id}/withdraw`（工具名 `collab_withdraw_issue`），或在 `POST /issue-discussions` 的 `withdrawals:[{issueId,rationale}]` 里与答辩一次提交。后者是必需的：Agent 的提交工具会结束回合，分两次调用在物理上做不到。两条路径可以叠加：单独调用 `collab_withdraw_issue`（不结束回合）之后又在 `withdrawals[]` 里重复同一个 id，按幂等 no-op 处理并在响应里返回 `alreadyWithdrawn`，绝不因此驳回整批答辩。
+
+同理，`POST /issue-votes` 只对「本会话里根本不存在的 issueId」报错。一条 Finding 可能在这名 Reviewer 被唤醒到它提交之间离开可投票集合（另一名 reject 者先投票把票型冻结成 stale，或报告人撤回），这类 id 静默丢弃并在响应的 `dropped[]` 里回报，其余选票照常入账——否则一条过期 id 就会连坐整批选票。
 
 开发 Agent 不再逐条回应 Issue。人工启动 `fix_then_review` 后，选定开发 Agent 收到全部 `confirmed` Action Items，完成代码修改并统一调用 `/ready`；随后原 Reviewer 在新 baseline 上复核自己提出的旧问题，同时可以提交新 Finding。
 

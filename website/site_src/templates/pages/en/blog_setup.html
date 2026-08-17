@@ -1,0 +1,126 @@
+{% extends "blog_article.html" %}{% block kicker %}INSTALL & CONFIGURE{% endblock %}{% block deck %}pi2web ships the server, the web UI, and the API in a single npm package. This guide covers requirements, CLI options, pairing codes, the data directory, optional email and voice features, and troubleshooting.{% endblock %}{% block toc %}<a href="#requirements">Requirements</a><a href="#install">Installation</a><a href="#first-run">First run and pairing</a><a href="#options">CLI options</a><a href="#data">Data and persistence</a><a href="#workspace">Workspaces and agents</a><a href="#optional">Email and voice</a><a href="#remote">Remote access</a><a href="#upgrade">Upgrade and uninstall</a><a href="#troubleshooting">Troubleshooting</a>{% endblock %}{% block article %}
+<h2 id="requirements">1. Requirements</h2>
+<p>pi2web is a remote shell around Pi Coding Agent: it starts the real <code>@earendil-works/pi-coding-agent</code> SDK on your development machine and exposes it over HTTP/WebSocket to browsers and the Android client. Three things must be in place first.</p>
+<ul>
+<li><strong>Node.js 20.10 or newer</strong> — check with <code>node -v</code>.</li>
+<li><strong>A working Pi configuration</strong> — models, provider authentication, and settings are reused from <code>~/.pi/agent</code>. If you have never run Pi on this machine, configure Pi itself first.</li>
+<li><strong>Native module prerequisites</strong> — installation prepares <code>better-sqlite3</code> and <code>node-pty</code>. Most platforms use prebuilt binaries; platforms without them need Python 3 and a C/C++ toolchain (<code>build-essential</code> on Linux, Xcode Command Line Tools on macOS, Visual Studio Build Tools on Windows).</li>
+</ul>
+<div class="article-callout"><strong>pi2web provides no models or quota.</strong><p>It does not proxy model requests and does not host your code. All inference happens through the providers configured in your local Pi setup.</p></div>
+
+<h2 id="install">2. Installation</h2>
+<p>The npm package and the global command are both named <code>pi2web</code>.</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="npm install -g pi2web"><span class="copy-label">Copy</span></button></div><pre><code>npm install -g pi2web
+pi2web --version</code></pre></div>
+<p>You can also run it ad hoc with <code>npx pi2web</code>, but a global install avoids re-downloading native modules every time.</p>
+
+<h2 id="first-run">3. First run and pairing</h2>
+<p>Run <code>pi2web</code>. The service listens on <code>127.0.0.1:11318</code> by default and serves the API, the WebSocket endpoint, and the web UI from the same process — no extra static file server is needed.</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --host 127.0.0.1 --port 11318"><span class="copy-label">Copy</span></button></div><pre><code>pi2web --host 127.0.0.1 --port 11318</code></pre></div>
+<p><strong>The pairing code is printed once on first startup</strong> — that is the only time it appears in clear text. The server stores just its SHA-256 hash in <code>auth.json</code> inside the data directory with <code>0600</code> permissions, so a forgotten code cannot be recovered. Rotate instead:</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --rotate-access-token"><span class="copy-label">Copy</span></button></div><pre><code>pi2web --rotate-access-token</code></pre></div>
+<p>That command prints a new pairing code, invalidates the old one immediately, and exits. When you open the printed address, <strong>you must type the pairing code manually</strong>: the web UI never reads it from the URL and the server never injects it. Only after a successful connection are you asked whether to store it in <code>localStorage</code> — confirm this on trusted devices only.</p>
+<div class="article-callout warning"><strong>Failed pairing is rate limited.</strong><p>Ten failures from the same source address within a 60-second window trigger a lockout starting at 60 seconds and doubling up to 15 minutes, with HTTP <code>429</code> and <code>Retry-After</code>. WebSocket upgrades are limited too, and one successful pairing clears the counter. Limits are tracked per TCP source address, so all clients behind a tunnel or reverse proxy share a single bucket.</p></div>
+
+<h2 id="options">4. CLI options</h2>
+<p><code>pi2web --help</code> lists everything. The most useful options:</p>
+<table class="article-table"><thead><tr><th>Option</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--host &lt;address&gt;</code></td><td><code>127.0.0.1</code></td><td>Listen address. Read the remote access section before switching to <code>0.0.0.0</code>.</td></tr>
+<tr><td><code>--port &lt;number&gt;</code></td><td><code>11318</code></td><td>Listen port.</td></tr>
+<tr><td><code>--data-dir &lt;path&gt;</code></td><td><code>~/.pi/remote-pi</code></td><td>Metadata directory; also settable via <code>PI_REMOTE_DIR</code>.</td></tr>
+<tr><td><code>--rotate-access-token</code></td><td>—</td><td>Print a new pairing code and exit; the old code stops working immediately.</td></tr>
+<tr><td><code>--maildispatch-endpoint &lt;url&gt;</code></td><td>disabled</td><td>MailDispatch message API endpoint.</td></tr>
+<tr><td><code>--maildispatch-api-key-env &lt;name&gt;</code></td><td>disabled</td><td>Name of the environment variable holding the MailDispatch API key.</td></tr>
+<tr><td><code>--maildispatch-notify-to &lt;email&gt;</code></td><td>disabled</td><td>Recipient for agent completion notifications.</td></tr>
+<tr><td><code>--maildispatch-sender-id &lt;id&gt;</code></td><td>optional</td><td>Explicit MailDispatch sender; otherwise chosen by API key and service config.</td></tr>
+<tr><td><code>--voice-base-url &lt;url&gt;</code></td><td>disabled</td><td>OpenAI-compatible speech endpoint. Without it, voice stays off entirely.</td></tr>
+<tr><td><code>--voice-tts-model</code> / <code>--voice-tts-voice</code></td><td>—</td><td>Required when voice is enabled.</td></tr>
+<tr><td><code>--voice-stt-model &lt;id&gt;</code></td><td>optional</td><td>Enables the microphone button in the web UI.</td></tr>
+<tr><td><code>--voice-summary-base-url</code> / <code>--voice-summary-model</code></td><td>—</td><td>LLM endpoint and model used to write the spoken summary.</td></tr>
+<tr><td><code>--voice-request-timeout &lt;ms&gt;</code></td><td><code>120000</code></td><td>Timeout for speech and summary requests; on timeout the announcement degrades to text.</td></tr>
+<tr><td><code>--version</code> / <code>--help</code></td><td>—</td><td>Print version or help.</td></tr>
+</tbody></table>
+<p>The three MailDispatch options must be provided together or pi2web refuses to start. Voice options are validated only when <code>--voice-base-url</code> is set. Every API key is passed by <strong>environment variable name</strong> so secrets never appear in command lines or process listings.</p>
+
+<h2 id="data">5. Data and persistence</h2>
+<p>Server metadata lives in the SQLite database at <code>~/.pi/remote-pi/remote-pi.db</code> (WAL mode):</p>
+<ul>
+<li><code>workspaces</code> — workspace ID, name, root directory, creation time.</li>
+<li><code>agents</code> — agent-to-workspace/session mapping, cwd, state, timestamps, archive flag.</li>
+<li><code>sessions</code> — a lightweight index for listing, sorting, and pagination, including name, file path, message count, and file mtime/size.</li>
+<li><code>auth.json</code> — the SHA-256 hash of the pairing code plus creation and rotation times, stored separately and never in clear text.</li>
+</ul>
+<p>Full conversations remain in Pi's <code>SessionManager</code> JSONL files under <code>~/.pi/agent/sessions/&lt;encoded-cwd&gt;/</code>. SQLite only stores a rebuildable index. Terminals exist purely in process memory and end when the service stops.</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --data-dir ~/pi2web-data"><span class="copy-label">Copy</span></button></div><pre><code># Store metadata elsewhere, for example on an encrypted volume
+pi2web --data-dir ~/pi2web-data</code></pre></div>
+<p>Changing the data directory means a different pairing code and different agent metadata. Pi's own session files are unaffected.</p>
+
+<h2 id="workspace">6. Workspaces and agents</h2>
+<p>After pairing, add a workspace: a local directory (usually a repository root) plus a name. You can then:</p>
+<ul>
+<li>create agents whose cwd is the workspace path;</li>
+<li>browse the directory tree and page through text files;</li>
+<li>right-click a directory to open an interactive terminal there;</li>
+<li>type <code>@</code> in the composer to reference files or directories.</li>
+</ul>
+<p>Agent metadata is stored in SQLite. After a restart agents are <code>unloaded</code> and no Pi <code>AgentSession</code> is created until you read messages, sessions, capabilities, or send a command; concurrent requests share a single startup. "Stop agent" releases the running session but keeps the metadata. See the <a href="/en/blog/web-ui/">web UI guide</a> for details.</p>
+
+<h2 id="optional">7. Optional: email and voice</h2>
+<p>Both features are off by default and must be configured explicitly.</p>
+<div class="article-code"><div><span>Shell · email</span><button type="button" data-copy="export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'"><span class="copy-label">Copy</span></button></div><pre><code>export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
+pi2web \
+  --maildispatch-endpoint https://mail.example.com/api/v1/messages \
+  --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
+  --maildispatch-notify-to owner@example.com</code></pre></div>
+<div class="article-code"><div><span>Shell · voice</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:5050/v1"><span class="copy-label">Copy</span></button></div><pre><code>export SUMMARY_API_KEY=...
+pi2web \
+  --voice-base-url http://127.0.0.1:5050/v1 \
+  --voice-tts-model edge-tts \
+  --voice-tts-voice en-US-AriaNeural \
+  --voice-tts-format mp3 \
+  --voice-summary-base-url https://llm.example.com/v1 \
+  --voice-summary-model &lt;summary-model-id&gt; \
+  --voice-summary-api-key-env SUMMARY_API_KEY</code></pre></div>
+<div class="guide-link-grid">
+  <a href="/en/blog/mail-notifications/"><strong>Email notification guide →</strong><span>Aggregation window, body options, failure handling</span></a>
+  <a href="/en/blog/voice/"><strong>Voice guide →</strong><span>Speaches and Edge TTS setups</span></a>
+</div>
+
+<h2 id="remote">8. Reaching the service from other devices</h2>
+<p>pi2web listens locally by default. To use it from a phone or another computer, prefer the most controlled option available:</p>
+<ol>
+<li><strong>SSH port forwarding</strong>: <code>ssh -N -L 11318:127.0.0.1:11318 user@dev-host</code>, then open <code>http://127.0.0.1:11318</code> locally.</li>
+<li><strong>Tailscale or another private network</strong>: bind to the tailnet address so only your devices can reach it.</li>
+<li><strong>devtunnel / Cloudflare Tunnel</strong>: no public IP required, but rate limiting is counted per tunnel egress address.</li>
+<li><strong>nginx + HTTPS reverse proxy</strong>: you handle WebSocket upgrades, TLS certificates, and extra access control yourself.</li>
+</ol>
+<p>pi2web does not validate <code>Origin</code> or <code>Host</code>, which makes tunnels easy — and which is exactly why you should <strong>never publish the port directly</strong>. Browser notifications and the microphone also require a secure context (<code>localhost</code> excepted), another practical reason to use HTTPS. See the <a href="/en/blog/remote-access/">secure remote access guide</a>.</p>
+
+<h2 id="upgrade">9. Upgrade, uninstall, and local development</h2>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="npm update -g pi2web"><span class="copy-label">Copy</span></button></div><pre><code># upgrade
+npm update -g pi2web
+
+# uninstall (leaves ~/.pi data intact)
+npm uninstall -g pi2web
+
+# run from source
+git clone https://github.com/sxwxs/pi2web.git
+cd pi2web
+npm install
+npm run check
+npm test
+npm run dev -- --port 11318</code></pre></div>
+<p>You can inspect the published package locally with <code>npm pack --dry-run</code> or install the tarball with <code>npm install -g ./pi2web-0.2.0.tgz</code>.</p>
+
+<h2 id="troubleshooting">10. Troubleshooting</h2>
+<table class="article-table"><thead><tr><th>Symptom</th><th>Likely cause and fix</th></tr></thead><tbody>
+<tr><td>Native module build fails during install</td><td>Missing Python 3 or a C/C++ toolchain. Install the platform build tools and retry, or use a Node.js version with prebuilt binaries.</td></tr>
+<tr><td>Pairing fails with HTTP 429</td><td>Failure rate limiting kicked in. Wait for <code>Retry-After</code>, or confirm the code was not rotated.</td></tr>
+<tr><td>Pairing code lost</td><td>It cannot be recovered. Run <code>pi2web --rotate-access-token</code>.</td></tr>
+<tr><td>Agent list empty although history exists</td><td>The agent may be archived. Archiving only sets a database flag and never deletes Pi session files.</td></tr>
+<tr><td>Notifications or microphone unavailable</td><td>Plain HTTP over a LAN IP is not a secure context. Use <code>localhost</code>, an SSH tunnel, or HTTPS.</td></tr>
+<tr><td>Terminal closes immediately</td><td>Check that the workspace path exists and that you are below the eight-terminal limit.</td></tr>
+<tr><td>Startup fails with MailDispatch errors</td><td>Endpoint, API key environment variable, and recipient must all be present, and the endpoint must be an http/https URL.</td></tr>
+</tbody></table>
+<p class="article-source">References: <a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a> · <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm package ↗</a></p>
+{% endblock %}

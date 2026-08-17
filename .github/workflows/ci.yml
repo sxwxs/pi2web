@@ -31,3 +31,26 @@ jobs:
           cache: gradle
       - uses: android-actions/setup-android@v3
       - run: ./gradlew testDebugUnitTest
+
+  website:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r site_src/requirements.txt
+      - run: python site_src/build.py
+      # `git diff` only sees tracked files, so a newly generated page would pass unnoticed. Compare the whole
+      # working tree state of public/ instead: modified, deleted *and* untracked files all fail the job.
+      - name: Ensure public/ is up to date
+        run: |
+          if [ -n "$(git status --porcelain -- public)" ]; then
+            echo 'public/ is out of date; run `python site_src/build.py` and commit the result.'
+            git status --porcelain -- public
+            git diff -- public
+            exit 1
+          fi

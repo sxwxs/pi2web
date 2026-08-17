@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero section-pad">
+  <div class="hero-glow hero-glow-one"></div>
+  <div class="hero-glow hero-glow-two"></div>
+  <div class="content-shell hero-grid">
+    <div class="hero-copy reveal">
+      <div class="eyebrow"><span class="status-dot"></span> 开源 · 自托管 · 配对码保护</div>
+      <h1>你的 Pi Coding Agent，<br><span>浏览器和手机都能接管。</span></h1>
+      <p class="hero-lead">pi2web 在你自己的开发机上运行 Pi Coding Agent，并通过一个受配对码保护的 HTTP/WebSocket 服务提供 Web UI 与 Android 原生客户端。会话、模型和代码都留在本机，只是多了一块屏幕。</p>
+      <div class="hero-actions">
+        <a class="button button-primary" href="/zh/blog/install-and-configure/">阅读配置指南</a>
+        <a class="button button-secondary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">在 GitHub 查看 <span>↗</span></a>
+      </div>
+      <div class="install-command" data-copy-block>
+        <span class="prompt" aria-hidden="true">$</span>
+        <code>npm install -g pi2web</code>
+        <button type="button" data-copy="npm install -g pi2web" aria-label="复制安装命令"><span class="copy-label">复制</span></button>
+      </div>
+      <p class="hero-requirement"><strong>pi2web 不提供模型，也不提供额度。</strong> 它复用本机 <code>~/.pi/agent</code> 中已有的 Pi 模型配置与 Provider 认证；需要 Node.js 20.10 及以上版本。</p>
+    </div>
+
+    <div class="hero-console reveal reveal-delay" aria-label="pi2web 运行示意">
+      <div class="console-top">
+        <div class="window-dots"><i></i><i></i><i></i></div>
+        <span>pi2web · 127.0.0.1:11318</span>
+        <span class="console-live">● live</span>
+      </div>
+      <div class="console-body">
+        <div class="flow-client-row">
+          <span>BROWSER</span><span>ANDROID</span><span>TABLET</span>
+        </div>
+        <div class="flow-line"><i></i><b>HTTP + WebSocket</b><i></i></div>
+        <div class="proxy-core">
+          <div class="proxy-title"><span class="mini-mark">π→w</span><strong>pi2web</strong><em>PAIRED</em></div>
+          <div class="proxy-jobs">
+            <span>sessions</span><span>terminals</span><span>streaming</span>
+          </div>
+        </div>
+        <div class="request-log">
+          <div><time>00:00.412</time><span class="method">WS</span><code>agent.prompt → session#3</code><b class="ok">ok</b></div>
+          <div><time>00:00.585</time><span class="event">EVT</span><code>assistant_delta · tool_call</code><b>↗</b></div>
+          <div><time>00:12.907</time><span class="token">TTS</span><code>agent_settled · 语音播报</code><b>✓</b></div>
+        </div>
+        <div class="flow-destination"><span>YOUR DEV MACHINE</span><b>Pi Agent · ~/.pi/agent</b></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="trust-strip" aria-label="核心能力">
+  <div class="content-shell trust-list">
+    <span>Web UI</span><i></i><span>Android 客户端</span><i></i><span>交互式 Terminal</span><i></i><span>Workspace 文件</span><i></i><span>语音摘要</span><i></i><span>邮件通知</span><i></i><span>SQLite 持久化</span>
+  </div>
+</section>
+
+<section class="section-pad principles">
+  <div class="content-shell">
+    <div class="section-heading centered reveal">
+      <span class="section-kicker">WHY PI2WEB</span>
+      <h2>把长时间运行的 Agent，<br>带到你手边的任何设备。</h2>
+      <p>Agent 跑在开发机上最合理：代码、依赖和工具链都在那里。缺的只是一个可以随时接管的远程界面。</p>
+    </div>
+    <div class="three-grid">
+      <article class="principle-card reveal">
+        <span class="card-index">01</span>
+        <div class="line-icon icon-phone" aria-hidden="true"></div>
+        <h3>随时接管，不中断</h3>
+        <p>浏览器和 Android 客户端连接同一个服务。离开电脑后继续跟进流式输出、追加指令、steer 或 abort。</p>
+      </article>
+      <article class="principle-card reveal reveal-delay-sm">
+        <span class="card-index">02</span>
+        <div class="line-icon icon-lock" aria-hidden="true"></div>
+        <h3>默认只监听本机</h3>
+        <p>默认绑定 <code>127.0.0.1</code>，访问需要手动输入配对码；服务端只保存配对码的 SHA-256 hash，并对失败尝试做指数退避限流。</p>
+      </article>
+      <article class="principle-card reveal reveal-delay">
+        <span class="card-index">03</span>
+        <div class="line-icon icon-sync" aria-hidden="true"></div>
+        <h3>断线可恢复</h3>
+        <p>WebSocket 带 sequence 去重、断线指数退避和增量 replay/snapshot；Agent 元数据落在 SQLite，重启后按需重新加载。</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad architecture-section">
+  <div class="content-shell split-heading reveal">
+    <div><span class="section-kicker">HOW IT WORKS</span><h2>一个进程，连接所有客户端与本机 Pi。</h2></div>
+    <p>pi2web 使用真实的 <code>@earendil-works/pi-coding-agent</code> SDK 启动 Agent，并复用 Pi CLI 的模型、认证与设置目录。</p>
+  </div>
+  <div class="content-shell architecture-board reveal">
+    <div class="arch-column arch-clients">
+      <span class="arch-label">CLIENTS</span>
+      <div class="client-node"><b>W</b><span><strong>Web UI</strong><small>内置静态资源，无需另起服务</small></span></div>
+      <div class="client-node"><b>A</b><span><strong>Android App</strong><small>Kotlin + Jetpack Compose</small></span></div>
+      <div class="client-node"><b>T</b><span><strong>Terminal</strong><small>xterm.js + node-pty</small></span></div>
+      <div class="client-node"><b>+</b><span><strong>你的脚本</strong><small>Bearer 认证的 REST/WS API</small></span></div>
+    </div>
+    <div class="arch-connector connector-in"><span>Bearer + WebSocket</span></div>
+    <div class="arch-core">
+      <span class="arch-label">PI2WEB SERVER</span>
+      <div class="core-orbit"><div class="core-logo">pi2<br><span>web</span></div><i></i><i></i><i></i></div>
+      <ul><li>Workspace 管理</li><li>Agent 生命周期</li><li>事件 replay</li><li>Terminal 会话</li><li>语音摘要</li><li>邮件通知</li></ul>
+    </div>
+    <div class="arch-connector connector-out"><span>Pi SDK</span></div>
+    <div class="arch-column arch-upstream">
+      <span class="arch-label">LOCAL</span>
+      <div class="github-node"><span class="github-ring">π</span><strong>Pi Coding Agent</strong><small>~/.pi/agent · Session JSONL</small></div>
+      <div class="account-note"><span>✓</span> 模型、认证与配额全部来自你自己的配置</div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad observability-section">
+  <div class="content-shell feature-split">
+    <div class="feature-copy reveal">
+      <span class="section-kicker">WEB UI</span>
+      <h2>浏览器里的完整<br>Agent 工作台。</h2>
+      <p>不是一个只读的日志查看器。创建 Session、发送 Prompt、插入 steer、排队 follow-up、打开 Terminal、浏览 Workspace 文件，都在同一个页面完成。</p>
+      <ul class="check-list">
+        <li>流式对话，折叠 Thinking、Tool 与 Extension 事件</li>
+        <li>Session 命名、Tree Navigate、Undo/Fork 与 Compact</li>
+        <li>模型与 Thinking level 切换</li>
+        <li>输入 <code>@</code> 浏览并引用 Workspace 文件</li>
+        <li>Workspace 目录右键在交互式 Terminal 中打开</li>
+        <li>浏览器通知与可选语音播报</li>
+      </ul>
+      <a class="text-link" href="/zh/blog/web-ui/">查看 Web UI 使用说明 <span>→</span></a>
+    </div>
+    <div class="inspector-mock reveal reveal-delay">
+      <div class="inspector-sidebar">
+        <div class="inspector-brand"><span>π→w</span> pi2web</div>
+        <div class="inspector-tab active"><i></i>Agents</div><div class="inspector-tab"><i></i>Sessions</div><div class="inspector-tab"><i></i>Files</div><div class="inspector-tab"><i></i>Terminal</div><div class="inspector-tab"><i></i>Settings</div>
+      </div>
+      <div class="inspector-main">
+        <div class="inspector-head"><div><span>AGENT</span><code>~/code/service-api</code></div><b>running</b></div>
+        <div class="metric-row"><div><small>MODEL</small><strong>pi · sonnet</strong></div><div><small>THINKING</small><strong>medium</strong></div><div><small>MSGS</small><strong>128</strong></div></div>
+        <div class="code-window"><div class="code-tabs"><b>Stream</b><span>Terminal</span></div><pre><em>user</em> 修复登录接口的超时重试
+
+<em>assistant</em> <span>thinking…</span>
+<em>tool</em> <q>read</q> src/auth/login.ts
+<em>tool</em> <q>edit</q> src/auth/login.ts <b>+18 −4</b>
+
+<em>assistant</em> 已加入退避重试并补充测试。</pre></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad workspace-section">
+  <div class="content-shell">
+    <div class="split-heading reveal">
+      <div><span class="section-kicker">MORE THAN A VIEWER</span><h2>远程操作需要的细节，都已经补齐。</h2></div>
+      <p>终端、文件、通知、语音、邮件与持久化，一个进程即可提供，无需再部署别的服务。</p>
+    </div>
+    <div class="feature-grid">
+      <article class="feature-card feature-card-wide reveal"><span class="feature-tag">AGENTS</span><h3>多 Workspace、多 Agent 并行</h3><p>为不同仓库创建 Workspace，在同一列表中管理 Agent 与 Terminal。Agent 元数据保存在 SQLite，重启后为 <code>unloaded</code> 状态，真正需要时才按需启动 Pi Session。</p><div class="session-visual"><div><span class="avatar user">U</span><p>把这个 PR 的评论逐条处理掉</p></div><div><span class="avatar agent">A</span><p><i></i><i></i><i></i> 正在读取 review 评论…</p></div></div></article>
+      <article class="feature-card reveal"><span class="feature-tag">TERMINAL</span><h3>交互式终端</h3><p>基于 node-pty 的真实 Shell，支持输入、resize、输出快照与刷新重连；每个服务进程最多 8 个终端。</p><div class="mini-sessions"><span><i class="green"></i>service-api <small>running</small></span><span><i></i>web-client <small>12m</small></span><span><i></i>bash · ~/code <small>1h</small></span></div></article>
+      <article class="feature-card reveal reveal-delay-sm"><span class="feature-tag">VOICE</span><h3>语音摘要与语音输入</h3><p>Agent 结束后用摘要 LLM 生成短播报并流式 TTS；配置 STT 模型后还能用麦克风输入 Prompt。</p><div class="privacy-toggle"><span>语音功能</span><b>默认关闭</b></div></article>
+      <article class="feature-card reveal"><span class="feature-tag">MAIL</span><h3>完成邮件通知</h3><p>通过 MailDispatch 在任务结束时发邮件，可设置聚合等待时间，并选择是否包含回复内容与会话信息。</p></article>
+      <article class="feature-card reveal reveal-delay-sm"><span class="feature-tag">PERSISTENCE</span><h3>可靠的元数据存储</h3><p>WAL 模式的 SQLite 保存 Workspace、Agent 与 Session 索引；完整对话仍由 Pi 的 SessionManager 以 JSONL 管理。</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad privacy-section">
+  <div class="content-shell privacy-panel reveal">
+    <div class="privacy-icon"><span></span></div>
+    <div><span class="section-kicker">SECURITY FIRST</span><h2>把这项服务当成一把 Shell 钥匙。</h2><p>Terminal 是以 pi2web 进程用户身份运行的完整宿主机 Shell，Workspace 路径只决定初始 cwd，并不是沙箱。请通过 SSH 隧道、Tailscale 或带访问控制的 HTTPS 反向代理访问，不要把端口直接暴露到公网。</p></div>
+    <div class="privacy-facts"><span><b>127.0.0.1</b> 默认监听</span><span><b>Hash only</b> 配对码存储</span><span><b>429</b> 失败限流锁定</span></div>
+  </div>
+</section>
+
+<section class="section-pad quickstart-section">
+  <div class="content-shell">
+    <div class="split-heading reveal"><div><span class="section-kicker">QUICKSTART</span><h2>三步跑起来。</h2></div><a class="button button-secondary" href="/zh/blog/install-and-configure/">查看完整配置指南</a></div>
+    <div class="step-grid">
+      <article class="step-card reveal"><span>STEP 01</span><h3>全局安装</h3><p>需要 Node.js 20.10+。安装时会准备 <code>better-sqlite3</code> 与 <code>node-pty</code> 原生模块。</p><div class="step-code"><code>npm install -g pi2web</code></div></article>
+      <article class="step-card reveal reveal-delay-sm"><span>STEP 02</span><h3>启动服务</h3><p>首次启动时终端会显示一次配对码，务必立刻保存。</p><div class="step-code"><code>pi2web --host 127.0.0.1 --port 11318</code></div></article>
+      <article class="step-card reveal reveal-delay"><span>STEP 03</span><h3>打开并配对</h3><p>访问 <code>http://127.0.0.1:11318</code>，手动输入配对码，然后添加第一个 Workspace。</p><div class="step-code"><code>pi2web --rotate-access-token</code></div></article>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad final-section">
+  <div class="content-shell final-grid">
+    <div class="spec-card reveal">
+      <span class="section-kicker">PACKAGE</span>
+      <dl>
+        <dt>npm 包名</dt><dd>pi2web</dd>
+        <dt>命令</dt><dd>pi2web</dd>
+        <dt>运行环境</dt><dd>Node.js ≥ 20.10（Linux / macOS / Windows）</dd>
+        <dt>默认地址</dt><dd>http://127.0.0.1:11318</dd>
+        <dt>License</dt><dd>MIT</dd>
+      </dl>
+      <div class="spec-links"><a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm ↗</a><a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub ↗</a><a href="/zh/faq/">常见问题</a></div>
+    </div>
+    <div class="final-cta reveal reveal-delay-sm">
+      <span class="section-kicker">START LOCAL</span>
+      <h2>装好即用。<br>会话依然留在你的机器上。</h2>
+      <p>pi2web 只是 Pi Coding Agent 的远程外壳：不托管代码、不代理模型、不上传会话。</p>
+      <div class="install-command">
+        <span class="prompt" aria-hidden="true">$</span>
+        <code>npm install -g pi2web &amp;&amp; pi2web</code>
+        <button type="button" data-copy="npm install -g pi2web &amp;&amp; pi2web" aria-label="复制安装并启动命令"><span class="copy-label">复制</span></button>
+      </div>
+      <div class="hero-actions"><a class="button button-primary" href="/zh/blog/install-and-configure/">配置指南</a><a class="button button-secondary dark" href="/zh/features/">产品能力</a></div>
+    </div>
+  </div>
+</section>
+{% endblock %}

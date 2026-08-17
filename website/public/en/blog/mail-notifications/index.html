@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Configure email notifications for finished pi2web agents</title>
+  <meta name="description" content="Send transactional email through MailDispatch when an agent settles: CLI flags, API key environment variables, aggregation window, body options, and failure handling.">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/en/blog/mail-notifications/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/blog/mail-notifications/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/blog/mail-notifications/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/blog/mail-notifications/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="Configure email notifications for finished pi2web agents">
+  <meta property="og:description" content="Send transactional email through MailDispatch when an agent settles: CLI flags, API key environment variables, aggregation window, body options, and failure handling.">
+  <meta property="og:url" content="https://pi2web.es2q.com/en/blog/mail-notifications/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:locale:alternate" content="zh_CN">
+  <meta property="article:published_time" content="2026-07-25">
+  <meta property="article:modified_time" content="2026-07-25">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Configure email notifications for finished pi2web agents">
+  <meta name="twitter:description" content="Send transactional email through MailDispatch when an agent settles: CLI flags, API key environment variables, aggregation window, body options, and failure handling.">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Configure email notifications for finished pi2web agents","description":"Send transactional email through MailDispatch when an agent settles: CLI flags, API key environment variables, aggregation window, body options, and failure handling.","url":"https://pi2web.es2q.com/en/blog/mail-notifications/","inLanguage":"en","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"},"datePublished":"2026-07-25","dateModified":"2026-07-25","author":{"@type":"Person","name":"sxwxs"},"publisher":{"@type":"Organization","name":"pi2web"},"about":{"@type":"SoftwareApplication","name":"pi2web","applicationCategory":"DeveloperApplication"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"pi2web","item":"https://pi2web.es2q.com/en/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://pi2web.es2q.com/en/blog/"},{"@type":"ListItem","position":3,"name":"Configure email notifications for finished pi2web agents","item":"https://pi2web.es2q.com/en/blog/mail-notifications/"}]}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="blog_mail">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/en/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/en/features/">Features</a>
+        <a href="/en/blog/" aria-current="page">Guides</a>
+        <a href="/en/faq/">FAQ</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/zh/blog/mail-notifications/" lang="zh-CN" aria-label="切换到中文">中文</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<article class="article-page">
+<header class="article-hero section-pad"><div class="content-shell article-shell reveal"><nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/en/">pi2web</a><span>/</span><a href="/en/blog/">Guides</a></nav><span class="section-kicker">EMAIL NOTIFICATIONS</span><h1>Configure email notifications for finished pi2web agents</h1><p class="article-deck">Get an email when an agent finishes while you are away from the machine. pi2web submits transactional mail through MailDispatch with a configurable aggregation window and body options.</p><div class="article-meta"><time datetime="2026-07-25">2026-07-25</time><span>pi2web</span><span>Practical guide</span></div></div></header>
+<div class="content-shell article-layout"><aside class="article-toc"><strong>On this page</strong><a href="#when">When mail is sent</a><a href="#config">CLI configuration</a><a href="#ui">Adjusting in the web UI</a><a href="#body">Message body</a><a href="#failure">Failure handling</a></aside><div class="article-body"><h2 id="when">1. When mail is sent</h2>
+<p>Mail is triggered when Pi emits <code>agent_settled</code>, meaning the agent will not automatically retry, automatically compact, or run a queued follow-up. That is the moment the task genuinely paused and is worth your attention.</p>
+<p>pi2web only submits the message to MailDispatch. A <code>202</code> response means the mail entered MailDispatch's durable queue; actual delivery is handled by its workers.</p>
+
+<h2 id="config">2. CLI configuration</h2>
+<p>Three options must be provided together — endpoint, API key environment variable, and recipient — or pi2web refuses to start.</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'"><span class="copy-label">Copy</span></button></div><pre><code>export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
+pi2web \
+  --maildispatch-endpoint https://mail.example.com/api/v1/messages \
+  --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
+  --maildispatch-notify-to owner@example.com \
+  --maildispatch-sender-id system</code></pre></div>
+<table class="article-table"><thead><tr><th>Option</th><th>Required</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--maildispatch-endpoint</code></td><td>Yes</td><td>MailDispatch message API URL; must be http or https.</td></tr>
+<tr><td><code>--maildispatch-api-key-env</code></td><td>Yes</td><td>The <strong>name of the environment variable</strong> holding the API key, not the key itself.</td></tr>
+<tr><td><code>--maildispatch-notify-to</code></td><td>Yes</td><td>Recipient address for completion notifications.</td></tr>
+<tr><td><code>--maildispatch-sender-id</code></td><td>No</td><td>Explicit sender; otherwise MailDispatch picks one from the API key and service configuration.</td></tr>
+</tbody></table>
+<div class="article-callout"><strong>API keys are read from the environment only.</strong><p>This keeps the secret out of command lines and process listings. The key needs at least the MailDispatch <code>mail:send</code> scope.</p></div>
+
+<h2 id="ui">3. Adjusting in the web UI</h2>
+<p>The "settings" dialog in the navigation bar enables or disables email notifications and configures:</p>
+<ul>
+<li><strong>Aggregation window</strong> — wait N seconds after the first completion so tasks finishing in that window share one email; <code>0</code> sends immediately.</li>
+<li><strong>Include the agent's final reply.</strong></li>
+<li><strong>Include the session name and working path.</strong></li>
+</ul>
+<p>Settings persist in pi2web's SQLite metadata database, apply to every browser client and agent, and survive restarts.</p>
+
+<h2 id="body">4. Message body</h2>
+<p>With both "include final reply" and "include session info" disabled, the body only states that one or more agent tasks finished, without any project detail.</p>
+<div class="article-callout warning"><strong>Consider content sensitivity.</strong><p>A final reply may contain code snippets, paths, or internal information, and email leaves your machine. Enable those options according to how much you trust the mailbox and the mail provider.</p></div>
+
+<h2 id="failure">5. Failure handling</h2>
+<p>Notification failures are written to pi2web's standard error only. They never change agent state and never block subsequent runs. Debug in this order:</p>
+<ol>
+<li>Check startup logs for validation errors (all three required options present, endpoint a valid URL).</li>
+<li>Verify the environment variable really exists in the shell that started pi2web.</li>
+<li>Confirm the API key has the <code>mail:send</code> scope and has not been revoked.</li>
+<li>Check whether MailDispatch returned <code>202</code>; other status codes are printed to stderr.</li>
+<li>If mail was queued but never arrived, inspect MailDispatch delivery logs and the recipient's spam filter.</li>
+</ol>
+<p class="article-source">Reference: <a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a></p>
+<div class="article-end"><strong>Next step</strong><p>Before reaching the service from another device, review the pi2web threat model and safe remote access options.</p><a class="button button-secondary" href="/en/blog/remote-access/">Read the secure remote access guide →</a></div></div></div>
+</article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/en/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>Run Pi Coding Agent on your own machine and drive it safely from a browser or an Android phone.</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/en/features/">Features</a>
+          <a href="/en/blog/">Guides</a>
+          <a href="/en/faq/">FAQ</a>
+          <a href="/en/privacy/">Privacy</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web does not provide any LLM, inference service, or model quota. Models, provider authentication, and usage all come from your local Pi configuration.</strong></p>
+        <p>© 2026 pi2web · MIT License · Independent open-source project<br>Not affiliated with or endorsed by Pi, GitHub, Google, or other referenced vendors. Trademarks belong to their respective owners.</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

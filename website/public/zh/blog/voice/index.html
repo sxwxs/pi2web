@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>配置 pi2web 的语音摘要与语音输入</title>
+  <meta name="description" content="为 pi2web 配置摘要 LLM 与 OpenAI 兼容语音服务：Speaches 全功能方案、Edge TTS 轻量方案、命令行参数、播报队列与常见问题。">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/zh/blog/voice/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/blog/voice/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/blog/voice/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/blog/voice/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="配置 pi2web 的语音摘要与语音输入">
+  <meta property="og:description" content="为 pi2web 配置摘要 LLM 与 OpenAI 兼容语音服务：Speaches 全功能方案、Edge TTS 轻量方案、命令行参数、播报队列与常见问题。">
+  <meta property="og:url" content="https://pi2web.es2q.com/zh/blog/voice/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="article:published_time" content="2026-07-25">
+  <meta property="article:modified_time" content="2026-07-25">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="配置 pi2web 的语音摘要与语音输入">
+  <meta name="twitter:description" content="为 pi2web 配置摘要 LLM 与 OpenAI 兼容语音服务：Speaches 全功能方案、Edge TTS 轻量方案、命令行参数、播报队列与常见问题。">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"\u914d\u7f6e pi2web \u7684\u8bed\u97f3\u6458\u8981\u4e0e\u8bed\u97f3\u8f93\u5165","description":"\u4e3a pi2web \u914d\u7f6e\u6458\u8981 LLM \u4e0e OpenAI \u517c\u5bb9\u8bed\u97f3\u670d\u52a1\uff1aSpeaches \u5168\u529f\u80fd\u65b9\u6848\u3001Edge TTS \u8f7b\u91cf\u65b9\u6848\u3001\u547d\u4ee4\u884c\u53c2\u6570\u3001\u64ad\u62a5\u961f\u5217\u4e0e\u5e38\u89c1\u95ee\u9898\u3002","url":"https://pi2web.es2q.com/zh/blog/voice/","inLanguage":"zh-CN","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"},"datePublished":"2026-07-25","dateModified":"2026-07-25","author":{"@type":"Person","name":"sxwxs"},"publisher":{"@type":"Organization","name":"pi2web"},"about":{"@type":"SoftwareApplication","name":"pi2web","applicationCategory":"DeveloperApplication"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"pi2web","item":"https://pi2web.es2q.com/zh/"},{"@type":"ListItem","position":2,"name":"\u4f7f\u7528\u6307\u5357","item":"https://pi2web.es2q.com/zh/blog/"},{"@type":"ListItem","position":3,"name":"\u914d\u7f6e pi2web \u7684\u8bed\u97f3\u6458\u8981\u4e0e\u8bed\u97f3\u8f93\u5165","item":"https://pi2web.es2q.com/zh/blog/voice/"}]}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="blog_voice">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/zh/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/zh/features/">产品能力</a>
+        <a href="/zh/blog/" aria-current="page">使用指南</a>
+        <a href="/zh/faq/">常见问题</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/en/blog/voice/" lang="en" aria-label="Switch to English">EN</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<article class="article-page">
+<header class="article-hero section-pad"><div class="content-shell article-shell reveal"><nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/zh/">pi2web</a><span>/</span><a href="/zh/blog/">使用指南</a></nav><span class="section-kicker">VOICE</span><h1>配置 pi2web 的语音摘要与语音输入</h1><p class="article-deck">pi2web 可以在 Agent 结束后朗读一段摘要，也可以用麦克风口述 Prompt。这需要两个 OpenAI 兼容服务：一个摘要 LLM，一个语音服务。本文给出 Speaches 与 Edge TTS 两种配置。</p><div class="article-meta"><time datetime="2026-07-25">2026-07-25</time><span>pi2web</span><span>实践指南</span></div></div></header>
+<div class="content-shell article-layout"><aside class="article-toc"><strong>本文目录</strong><a href="#how">工作方式</a><a href="#edge">方案一：Edge TTS</a><a href="#speaches">方案二：Speaches</a><a href="#flags">参数说明</a><a href="#ui">在 Web UI 中使用</a><a href="#limits">限制与排查</a></aside><div class="article-body"><h2 id="how">1. 工作方式</h2>
+<p>语音默认关闭，只有配置 <code>--voice-base-url</code> 才会启用。启用后的流程是：</p>
+<ol>
+<li>Pi 发出 <code>agent_settled</code>（不会再自动重试、自动 compact 或执行排队的 follow-up）。</li>
+<li>pi2web 取最后一条 Assistant 文本，移除代码块、长链接和 Markdown，并限制摘要输入长度。</li>
+<li>摘要 LLM 以流式 Chat Completions 生成短播报；只要出现完整句子就立即调用流式 TTS，不必等整段摘要完成。</li>
+<li>音频通过已认证的 Agent WebSocket 推送到浏览器播放。</li>
+</ol>
+<p>多个 Session 接近同时完成时，播报进入全局队列依次播放，不会重叠；有 Session 名称时以“会话{name}已完成：”开头。新的 Agent 运行会取消该 Agent 尚未完成的播报。</p>
+<div class="article-callout"><strong>语音流不写入历史。</strong><p>音频只实时投递，不写入 Session，也不参与事件 replay。</p></div>
+
+<h2 id="edge">2. 方案一：Edge TTS（只要朗读）</h2>
+<p>如果只需要“说出来”，不需要语音识别，仓库内的 <code>packages/edge-tts-server</code> 是最轻的选择：基于 Python <code>edge-tts</code> 和 <code>aiohttp</code>，直接返回 MP3，不需要 Docker 或 FFmpeg。</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="python -m pip install -e ."><span class="copy-label">复制</span></button></div><pre><code>cd packages/edge-tts-server
+python -m venv .venv
+# Windows: .venv\Scripts\Activate.ps1
+# Linux/macOS: source .venv/bin/activate
+python -m pip install -e .
+remote-pi-edge-tts</code></pre></div>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:5050/v1"><span class="copy-label">复制</span></button></div><pre><code>export SUMMARY_API_KEY=...
+pi2web \
+  --voice-base-url http://127.0.0.1:5050/v1 \
+  --voice-tts-model edge-tts \
+  --voice-tts-voice zh-CN-XiaoxiaoNeural \
+  --voice-tts-format mp3 \
+  --voice-summary-base-url https://llm.example.com/v1 \
+  --voice-summary-model &lt;summary-model-id&gt; \
+  --voice-summary-api-key-env SUMMARY_API_KEY</code></pre></div>
+<p>该模式没有配置 <code>--voice-stt-model</code>，因此只启用播报，不启用语音识别。Edge TTS 使用非官方消费者服务，适合本地和实验性使用。</p>
+
+<h2 id="speaches">3. 方案二：Speaches（朗读 + 识别）</h2>
+<p>需要语音输入时，使用一个同时提供 TTS 与 STT 的 OpenAI 兼容服务，例如 Speaches。Windows 下的启动、模型下载与故障排查见仓库中的 <code>VOICE_SERVER_SETUP.md</code>。</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:8000/v1"><span class="copy-label">复制</span></button></div><pre><code># 示例模型 ID 需要替换为服务中实际下载的模型
+export SUMMARY_API_KEY=...
+pi2web \
+  --voice-base-url http://127.0.0.1:8000/v1 \
+  --voice-stt-model &lt;stt-model-id&gt; \
+  --voice-tts-model &lt;tts-model-id&gt; \
+  --voice-tts-voice &lt;voice-id&gt; \
+  --voice-summary-base-url https://llm.example.com/v1 \
+  --voice-summary-model &lt;summary-model-id&gt; \
+  --voice-summary-api-key-env SUMMARY_API_KEY \
+  --voice-language zh-CN</code></pre></div>
+
+<h2 id="flags">4. 参数说明</h2>
+<table class="article-table"><thead><tr><th>参数</th><th>说明</th></tr></thead><tbody>
+<tr><td><code>--voice-base-url</code></td><td>OpenAI 兼容语音服务地址。不配置则语音功能完全关闭。</td></tr>
+<tr><td><code>--voice-tts-model</code> / <code>--voice-tts-voice</code></td><td>启用语音时必填的 TTS 模型 ID 与音色 ID。</td></tr>
+<tr><td><code>--voice-tts-format</code></td><td><code>pcm</code>（默认）或 <code>mp3</code>，取决于语音服务实际支持的输出。</td></tr>
+<tr><td><code>--voice-stt-model</code></td><td>可选。配置后 Web UI 才显示麦克风按钮。</td></tr>
+<tr><td><code>--voice-api-key-env</code></td><td>存放语音服务 API key 的环境变量名。</td></tr>
+<tr><td><code>--voice-summary-base-url</code> / <code>--voice-summary-model</code></td><td>生成播报摘要的 LLM endpoint 与模型。</td></tr>
+<tr><td><code>--voice-summary-api-key-env</code></td><td>存放摘要 LLM API key 的环境变量名。</td></tr>
+<tr><td><code>--voice-language</code></td><td>播报语言标签，默认 <code>zh-CN</code>。</td></tr>
+<tr><td><code>--voice-request-timeout</code></td><td>摘要、合成与识别的单次请求超时，默认 <code>120000</code> 毫秒，最小 1000。</td></tr>
+</tbody></table>
+<p>API key 一律通过环境变量名传入，不直接写在命令行参数中，避免出现在进程列表里。</p>
+
+<h2 id="ui">5. 在 Web UI 中使用</h2>
+<ul>
+<li>点击“启用语音”后开始播放服务端推送的 PCM16 或 MP3 音频。浏览器通常要求用户交互后才允许自动播放，这也是需要点一下的原因。</li>
+<li>配置了 STT 模型时会显示麦克风按钮；识别文字只插入输入框，<strong>不会自动发送</strong>，你仍然可以先修改再提交。</li>
+<li>麦克风要求 HTTPS 安全上下文（<code>localhost</code> 例外）；通过局域网 IP 的 HTTP 地址访问时无法使用。</li>
+</ul>
+
+<h2 id="limits">6. 限制与排查</h2>
+<table class="article-table"><thead><tr><th>现象</th><th>处理</th></tr></thead><tbody>
+<tr><td>没有任何播报</td><td>确认启动参数中有 <code>--voice-base-url</code>，且页面已点击“启用语音”。</td></tr>
+<tr><td>播报变成文本提示</td><td>摘要或 TTS 请求超时。提高 <code>--voice-request-timeout</code>，或检查语音服务负载。</td></tr>
+<tr><td>没有麦克风按钮</td><td>未配置 <code>--voice-stt-model</code>，或访问地址不是安全上下文。</td></tr>
+<tr><td>音频断续或格式错误</td><td>尝试切换 <code>--voice-tts-format</code>（<code>pcm</code> ↔ <code>mp3</code>），确认服务端实际支持的格式。</td></tr>
+<tr><td>Android 上没有语音</td><td>Android 客户端的流式 PCM 播放与录音 UI 尚未接入。</td></tr>
+</tbody></table>
+<p class="article-source">参考：<a href="https://github.com/sxwxs/pi2web/blob/main/VOICE_SERVER_SETUP.md" rel="noreferrer">VOICE_SERVER_SETUP.md ↗</a> · <a href="https://github.com/sxwxs/pi2web/tree/main/packages/edge-tts-server" rel="noreferrer">edge-tts-server ↗</a></p>
+<div class="article-end"><strong>下一步</strong><p>在把服务开放给其他设备之前，先了解 pi2web 的威胁模型和安全远程访问方式。</p><a class="button button-secondary" href="/zh/blog/remote-access/">阅读安全远程访问指南 →</a></div></div></div>
+</article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/zh/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>在你自己的机器上运行 Pi Coding Agent，用浏览器和 Android 手机安全地远程操作。</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/zh/features/">产品能力</a>
+          <a href="/zh/blog/">使用指南</a>
+          <a href="/zh/faq/">常见问题</a>
+          <a href="/zh/privacy/">隐私说明</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web 不提供任何 LLM、推理服务或模型额度。模型、Provider 认证和用量全部来自你本机的 Pi 配置。</strong></p>
+        <p>© 2026 pi2web · MIT License · 独立开源项目<br>与 Pi、GitHub、Google 及其他相关厂商不存在隶属或背书关系；相关商标归各自所有者。</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,40 @@
+{% extends "blog_article.html" %}{% block kicker %}ANDROID CLIENT{% endblock %}{% block deck %}仓库中的 android/ 是一个 Kotlin + Jetpack Compose 原生客户端，和 Web UI 共用同一套 API 与配对码。这篇说明覆盖构建、连接与当前能力差异。{% endblock %}{% block toc %}<a href="#why">为什么用原生客户端</a><a href="#build">构建</a><a href="#connect">连接与配对</a><a href="#features">能力对照</a><a href="#tips">使用建议</a>{% endblock %}{% block article %}
+<h2 id="why">1. 为什么需要原生客户端</h2>
+<p>浏览器已经能覆盖大部分场景，但手机上的原生应用在以下方面更顺手：常驻登录状态、系统通知、更好的键盘与滚动体验，以及后台保持连接。Android 客户端连接的仍然是同一个 pi2web 服务，不需要额外部署。</p>
+<div class="article-callout"><strong>运行时使用真实 SDK。</strong><p>服务端使用真实的 <code>@earendil-works/pi-coding-agent</code> SDK，并复用 Pi CLI 的 <code>~/.pi/agent</code> 模型、认证与设置；<code>MockBackend</code> 只用于自动化测试。</p></div>
+
+<h2 id="build">2. 构建</h2>
+<p>目前没有提供预编译 APK，需要自行构建。Android Studio 或命令行均可：</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="./gradlew assembleDebug"><span class="copy-label">复制</span></button></div><pre><code>git clone https://github.com/sxwxs/pi2web.git
+cd pi2web/android
+./gradlew assembleDebug
+# 产物位于 app/build/outputs/apk/debug/</code></pre></div>
+<p>详细的构建要求（JDK、Android SDK 版本等）与连接说明见仓库中的 <code>android/README.md</code>，完整功能列表见 <code>ANDROID_APP_FEATURES.md</code>。</p>
+
+<h2 id="connect">3. 连接与配对</h2>
+<ol>
+<li>确认手机可以访问 pi2web 服务地址。默认服务只监听 <code>127.0.0.1</code>，通常需要先建立 SSH 隧道、加入 Tailscale 之类的私有网络，或使用带访问控制的隧道。</li>
+<li>在应用中填写服务地址（例如 <code>http://100.x.y.z:11318</code>）。</li>
+<li>输入配对码。配对码只在服务首次启动或轮换时显示一次；忘记时运行 <code>pi2web --rotate-access-token</code>。</li>
+</ol>
+<p>连接方式的取舍与安全建议见<a href="/zh/blog/remote-access/">安全远程访问指南</a>。</p>
+
+<h2 id="features">4. 与 Web UI 的能力对照</h2>
+<table class="article-table"><thead><tr><th>能力</th><th>Web UI</th><th>Android</th></tr></thead><tbody>
+<tr><td>Workspace 与 Agent 管理</td><td>支持</td><td>支持</td></tr>
+<tr><td>流式对话、steer、follow-up</td><td>支持</td><td>支持</td></tr>
+<tr><td>Session 列表与恢复</td><td>支持</td><td>支持</td></tr>
+<tr><td>交互式 Terminal</td><td>支持（xterm.js）</td><td>见 <code>ANDROID_APP_FEATURES.md</code></td></tr>
+<tr><td>语音播报与录音</td><td>支持（需服务端配置）</td><td>尚未接入</td></tr>
+<tr><td>自定义 Pi TUI Component</td><td>无法通用渲染</td><td>无法通用渲染</td></tr>
+</tbody></table>
+
+<h2 id="tips">5. 使用建议</h2>
+<ul>
+<li>手机端更适合“跟进与干预”，复杂的重构任务仍然建议在电脑上发起。</li>
+<li>移动网络切换频繁，客户端依赖 WebSocket 的 sequence 去重与增量 replay 恢复，短暂断线不会丢消息。</li>
+<li>配对码等同 Shell 权限，请只在自己的设备上保存，并给手机本身设置锁屏。</li>
+<li>不再使用某台设备时，直接轮换配对码即可让它失效。</li>
+</ul>
+<p class="article-source">参考：<a href="https://github.com/sxwxs/pi2web/blob/main/android/README.md" rel="noreferrer">android/README.md ↗</a> · <a href="https://github.com/sxwxs/pi2web/blob/main/ANDROID_APP_FEATURES.md" rel="noreferrer">ANDROID_APP_FEATURES.md ↗</a></p>
+{% endblock %}

@@ -85,6 +85,62 @@ describe('collab dispatcher',()=>{
     expect(sent.some(entry=>entry.agentId==='agent-C'&&entry.message.includes('validate_issues'))).toBe(false);
   });
 
+  it('drops a wake-up whose work the panel has already moved past',async()=>{
+    const created=await hub.createSession({kind:'review',title:'Stale wake-up',workspaceId:'ws-1',subject:{type:'free',value:'branch'},policy:{consensusReview:true}},async()=>dir);
+    const a=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'A',agentId:'agent-A'});
+    const b=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'B',agentId:'agent-B'});
+    hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'C',agentId:'agent-C'});
+    await hub.openRound(created.sessionId);await dispatcher.drain();
+    const baselineId=store.getBaselineForRound(created.sessionId,1)!.baselineId;
+    const filed=await hub.submitFindings(a.participant,{clientRequestId:rid(),baselineId,findings:[{title:'A concrete correctness issue',severity:'major',category:'correctness',location:{path:'src/a.ts',startLine:1},evidence:'The implementation at line 1 demonstrably violates the required behavior.'}],reviewComplete:true});
+    await hub.submitFindings(b.participant,{clientRequestId:rid(),baselineId,findings:[],reviewComplete:true});
+    // B owes a cross-vote, casts it, and only then does the queued wake-up for that same work get delivered.
+    await hub.submitIssueVotes(b.participant,{clientRequestId:rid(),votes:[{issueId:(filed as any).accepted[0].issueId,stance:'approve'}],complete:true});
+    await dispatcher.drain();sent.length=0;
+    (hub as any).push(created.sessionId,b.participant.participantId,'validate_issues',{phase:'collecting',round:1});
+    (hub as any).record(created.sessionId,'task_assigned',{participantId:b.participant.participantId,task:'validate_issues',phase:'collecting',round:1});
+    await dispatcher.drain();
+    expect(sent.some(entry=>entry.agentId==='agent-B')).toBe(false);
+    expect(store.listInbox(b.participant.participantId).some(item=>item.type==='validate_issues')).toBe(false);
+    expect(hub.events(created.sessionId).some(event=>event.type==='dispatch_skipped'&&event.payload.reason==='NOTHING_OWED')).toBe(true);
+    // The session itself is untouched: C is still the one everybody is waiting for.
+    expect(hub.progress(created.sessionId)).toMatchObject({phase:'collecting'});
+  });
+
+  it('still wakes a seat when the digest cannot be computed',async()=>{
+    const created=await session();
+    const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'A',agentId:'agent-1'});
+    await hub.openRound(created.sessionId);await dispatcher.drain();sent.length=0;
+    // A transient failure (a locked database, a session read while it is being removed) must not be read as
+    // "nothing owed": that acks the durable item and the phase then waits forever on a seat nobody wakes again.
+    const digest=hub.digest.bind(hub);
+    (hub as any).digest=()=>{throw new Error('database is locked')};
+    try{
+      (hub as any).push(created.sessionId,reviewer.participant.participantId,'validate_issues',{phase:'collecting',round:1});
+      (hub as any).record(created.sessionId,'task_assigned',{participantId:reviewer.participant.participantId,task:'validate_issues',phase:'collecting',round:1});
+      await dispatcher.drain();
+    }finally{(hub as any).digest=digest}
+    expect(sent.some(entry=>entry.agentId==='agent-1'&&entry.message.includes('action: validate_issues'))).toBe(true);
+    expect(store.listInbox(reviewer.participant.participantId).some(item=>item.type==='validate_issues')).toBe(true);
+    expect(hub.events(created.sessionId).some(event=>event.type==='dispatch_skipped')).toBe(false);
+  });
+
+  it('keeps a single queued cross-vote per seat while the owed set grows',async()=>{
+    const created=await hub.createSession({kind:'review',title:'Growing ballot',workspaceId:'ws-1',subject:{type:'free',value:'branch'},policy:{consensusReview:true}},async()=>dir);
+    const seats:Record<string,any>={};
+    for(const name of ['A','B','C','D'])seats[name]=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:name,agentId:`agent-${name}`});
+    await hub.openRound(created.sessionId);await dispatcher.drain();
+    const baselineId=store.getBaselineForRound(created.sessionId,1)!.baselineId;
+    const file=async(name:string,count:number)=>hub.submitFindings(seats[name].participant,{clientRequestId:rid(),baselineId,
+      findings:Array.from({length:count},(_,index)=>({title:`${name} correctness issue ${index+1}`,severity:'major',category:'correctness',
+        location:{path:`src/${name}-${index}.ts`,startLine:index+1},evidence:'The implementation demonstrably violates the required behavior.'})),reviewComplete:true});
+    await file('A',1);await file('B',1);await dispatcher.drain();
+    // The owed count is only a hint inside the task type. A second wave must not queue validate_issues#3 next to
+    // the validate_issues#1 that is still waiting for the same seat.
+    await file('C',2);await dispatcher.drain();
+    expect(store.listInbox(seats.A.participant.participantId).filter(item=>item.type.split('#')[0]==='validate_issues')).toHaveLength(1);
+  });
+
   it('tells a managed agent that the session is over instead of leaving it waiting',async()=>{
     const created=await session();
     const reviewer=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer',agentId:'agent-1'});

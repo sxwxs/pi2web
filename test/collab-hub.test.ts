@@ -44,6 +44,37 @@ describe('collab hub',()=>{
     return {session,r1:r1.participant,r2:r2.participant,impl:impl.participant,tokens:{r1:r1.token,r2:r2.token,impl:impl.token}};
   };
 
+  it('hands a reviewer the panel, the rulebook and the review scope, and never an endpoint',async()=>{
+    const {r1}=await setup();
+    const task=hub.digest(r1) as any;
+    expect(task.task).toBe('file_findings');
+    // Who else is on the panel is what a reviewer needs to calibrate: it votes on their findings and they on its.
+    expect(task.panel.map((seat:any)=>seat.displayName).sort()).toEqual(['implementer','reviewer-correctness','reviewer-security']);
+    expect(task.panel.find((seat:any)=>seat.displayName==='reviewer-security').isYou).toBe(true);
+    expect(task.rules.severity.blocker).toBeTruthy();
+    expect(task.rules.requiredAction.must_fix).toBeTruthy();
+    expect(task.rules.vote.reject).toMatch(/factually wrong/);
+    expect(task.rules.withdraw).toMatch(/collab_withdraw_issue/);
+    expect(task.instructions).toContain('collab_submit_findings');
+    // The tool flow owns transport. An instruction that names an endpoint is one the agent cannot follow.
+    for(const text of [task.instructions,JSON.stringify(task.rules)]){
+      expect(text).not.toContain('/api/');
+      expect(text).not.toMatch(/\bPOST\b/);
+    }
+  });
+
+  it('tells a seat with nothing to do exactly that, instead of the phase blurb',async()=>{
+    const {session,r1,r2}=await setup();
+    await fileFindings(r1,[finding()]);
+    // A reviewer that closed its blind review owes nothing until the panel moves; the prompt must say so.
+    const waiting=hub.digest(r1) as any;
+    expect(waiting.task).toBe('wait');
+    expect(waiting.instructions).toMatch(/finished the blind review/);
+    expect(waiting.instructions).not.toMatch(/collab_submit/);
+    await fileFindings(r2,[]);
+    expect(store.getSession(session.sessionId).phase).toBe('finished');
+  });
+
   it('rejects findings written against an outdated or changed baseline',async()=>{
     const {r1}=await setup();
     await expect(fileFindings(r1,[finding()],true,'b-stale')).rejects.toMatchObject({code:'STALE_BASELINE'});

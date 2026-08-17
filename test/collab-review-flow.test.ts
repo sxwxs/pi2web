@@ -1,6 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {DEFAULT_POLICY,type CollabPolicy,type IssueStatus} from '../src/collab/types.js';
-import {applyEscalation,applyHumanRuling,applyWithdraw,assertCanFileFinding,canSeeOthersFindings,isReadyToAdvance,nextPhase,pendingCrossVoters,requiredActors,sessionProgress,stallCheck,waitingOn,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from '../src/collab/review-flow.js';
+import {applyEscalation,applyHumanRuling,applyWithdraw,assertCanFileFinding,canSeeOthersFindings,isReadyToAdvance,nextPhase,pendingCrossVoters,requiredActors,resolveContestedIssues,sessionProgress,stallCheck,staleContestedIssueIds,waitingOn,type FlowIssue,type FlowParticipant,type ReviewSnapshot} from '../src/collab/review-flow.js';
 
 const reviewer=(id:string):FlowParticipant=>({participantId:id,role:'reviewer',state:'active'});
 const implementer=(id='impl'):FlowParticipant=>({participantId:id,role:'implementer',state:'active'});
@@ -108,5 +108,50 @@ describe('issue consensus mutation helpers',()=>{
     expect(applyHumanRuling(issue({status:'escalated'}),'resolved')).toMatchObject({status:'human_ruled'});
     expect(applyWithdraw({issue:issue(),actor:reviewer('r1')})).toMatchObject({status:'withdrawn'});
     expect(()=>applyWithdraw({issue:issue(),actor:implementer()})).toThrow(/Only the reporter/);
+  });
+});
+
+describe('contested issue resolution',()=>{
+  const panel=[reviewer('r1'),reviewer('r2'),reviewer('r3')];
+  const vote=(participantId:string,stance:'approve'|'reject',consensusRound:number)=>
+    ({voteId:`v-${participantId}-${consensusRound}`,sessionId:'s',issueId:'i-1',participantId,round:1,consensusRound,stance,createdAt:`2026-01-0${consensusRound+1}`});
+  const contested=(patch:Partial<ReviewSnapshot>={},severity:FlowIssue['severity']='major')=>snapshot({
+    phase:'issue_reconsidering',policy:policy({consensusReview:true,maxConsensusRounds:4}),participants:panel,
+    issues:[issue({severity})],debateRound:1,...patch});
+
+  it('drops a finding the rest of the panel rejected instead of escalating it',()=>{
+    const state=contested({issueVotes:[vote('r2','reject',0),vote('r3','reject',0)]});
+    expect(resolveContestedIssues(state)).toMatchObject([{disposition:'panel_rejected',reason:'panel_unanimously_rejected'}]);
+  });
+
+  it('still asks a human about a blocker the panel talked itself out of',()=>{
+    const state=contested({issueVotes:[vote('r2','reject',0),vote('r3','reject',0)]},'blocker');
+    expect(resolveContestedIssues(state)).toMatchObject([{disposition:'escalate'}]);
+  });
+
+  it('treats a two-seat panel as a tie rather than a verdict',()=>{
+    const state=contested({participants:[reviewer('r1'),reviewer('r2')],issueVotes:[vote('r2','reject',0)]});
+    expect(resolveContestedIssues(state)).toMatchObject([{disposition:'escalate',reason:'split_panel_on_a_major_finding'}]);
+  });
+
+  it('settles a split panel on a small finding by majority instead of by escalation',()=>{
+    const split=[vote('r2','reject',0),vote('r3','approve',0)];
+    expect(resolveContestedIssues(contested({issueVotes:split},'minor'))).toMatchObject([{disposition:'majority_confirmed'}]);
+    expect(resolveContestedIssues(contested({issueVotes:[vote('r2','reject',0),vote('r3','reject',0)]},'nit'))).toMatchObject([{disposition:'panel_rejected'}]);
+  });
+
+  it('stops debating a ballot that has not moved for two rounds',()=>{
+    const unmoved=[vote('r2','reject',0),vote('r3','approve',0),vote('r2','reject',1),vote('r2','reject',2)];
+    const state=contested({debateRound:2,issueVotes:unmoved,completions:[{phase:'issue_reconsidering',round:1,participantId:'r2'}]});
+    expect(staleContestedIssueIds(state)).toEqual(['i-1']);
+    // maxConsensusRounds is 4, but rounds 3 and 4 would only re-ask a question nobody is answering.
+    expect(nextPhase(state)).toMatchObject({phase:'awaiting_human',reason:'issue_consensus_settled_with_disputes'});
+  });
+
+  it('keeps debating while somebody is still changing their mind',()=>{
+    const moving=[vote('r2','reject',0),vote('r3','approve',0),vote('r2','reject',1),vote('r2','approve',2)];
+    const state=contested({debateRound:2,issueVotes:moving,completions:[{phase:'issue_reconsidering',round:1,participantId:'r2'}]});
+    expect(staleContestedIssueIds(state)).toEqual([]);
+    expect(nextPhase(state)).toMatchObject({phase:'finished',reason:'review_consensus_complete'});
   });
 });
