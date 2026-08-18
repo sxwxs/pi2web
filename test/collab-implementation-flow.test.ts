@@ -1,26 +1,18 @@
 import {afterEach,describe,expect,it} from 'vitest';
-import {mkdtemp} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {RemotePiServer} from '../src/server.js';
-import {WorkspaceStore} from '../src/workspaces.js';
-import {AgentManager,MockBackend} from '../src/agents.js';
+import {MockBackend} from '../src/agents.js';
+import {bootCollabServer} from './collab-harness.js';
 
 let server:RemotePiServer|undefined;
 afterEach(async()=>{await server?.stop();server=undefined});
-const temp=(prefix:string)=>mkdtemp(path.join(tmpdir(),prefix));
 const rid=()=>`req-${randomUUID()}`;
 
-async function boot(factory:(id:string,cwd:string)=>MockBackend=(id,cwd)=>new MockBackend(id,cwd)){
-  const dataDir=await temp('remote-pi-impl-'),root=await temp('impl-workspace-');
-  const workspaces=new WorkspaceStore(),agents=new AgentManager(workspaces,factory);
-  server=new RemotePiServer({port:0,dataDir,workspaces,agents});
-  const auth=await server.auth.init(),address=await server.start(),base=`http://127.0.0.1:${address!.port}`,human=auth.token!;
-  const call=async(method:string,url:string,body?:unknown,token=human)=>{const response=await fetch(base+url,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});const payload:any=await response.json().catch(()=>({}));return {status:response.status,data:payload.data,error:payload.error}};
-  const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
-  const collabAgent=async()=>(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data.agentId;
-  return {call,workspace,agents,collabAgent};
+async function boot(factory?:(id:string,cwd:string)=>MockBackend){
+  const harness=await bootCollabServer('remote-pi-impl',{factory});
+  server=harness.server;
+  return harness;
 }
 const finding=()=>({title:'Retry loop can double-charge a payment',severity:'critical',category:'correctness',location:{path:'src/pay/charge.ts',startLine:88},evidence:'chargeOnce retries on timeout without an idempotency key, so a slow gateway can be charged twice.',suggestion:'Send the order id as the idempotency key.'});
 

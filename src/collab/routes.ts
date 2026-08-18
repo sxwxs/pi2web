@@ -8,12 +8,11 @@ export type CollabRouterDeps={
   /** True when the caller presented the Remote Pi pairing code, which means "a human is acting". */
   verifyHuman:(token:string)=>Promise<boolean>,
   /**
-   * True when the id names a dedicated collaboration Agent (the Pi profile that owns the inline collaboration
-   * extension), false when it names a normal Agent, and undefined when no such Agent exists at all. A seat is
-   * only accepted for an affirmative true: an unknown id cannot be woken by the dispatcher, so the seat would
-   * sit in the panel and stall the phase until a human rebinds it.
+   * A collaboration seat must name a dedicated collaboration Agent (the Pi profile that owns the inline
+   * collaboration extension). An Agent that does not exist is not one: nothing could wake it, so the seat would
+   * only park its phase until a human rebinds it.
    */
-  isCollabAgent:(agentId:string)=>boolean|undefined
+  isCollabAgent:(agentId:string)=>boolean
 };
 
 const ok=(payload:unknown,status=200):CollabRouteResult=>({status,payload:{data:payload}});
@@ -45,7 +44,7 @@ export class CollabRouter {
     const human=(action:string)=>{if(!isHuman)throw Object.assign(new Error(`${action} is reserved for humans`),{code:COLLAB_ERRORS.humanOnly,httpStatus:403})};
     const asParticipant=():Participant=>{if(!participant)throw Object.assign(new Error('This endpoint requires a participant token'),{code:COLLAB_ERRORS.forbidden,httpStatus:403});return participant};
     const scoped=(sessionId:string)=>{if(participant&&participant.sessionId!==sessionId)throw Object.assign(new Error('Collaboration session not found'),{code:COLLAB_ERRORS.sessionNotFound,httpStatus:404})};
-    const collabAgent=(agentId:unknown)=>{if(typeof agentId!=='string'||this.deps.isCollabAgent(agentId)!==true)throw Object.assign(new Error('A collaboration seat requires an existing, dedicated collaboration Agent (profile=collab). Create one from the collaboration board, then register or rebind this seat to it.'),{code:COLLAB_ERRORS.forbidden,httpStatus:403})};
+    const collabAgent=(agentId:unknown)=>{if(typeof agentId!=='string'||!this.deps.isCollabAgent(agentId))throw Object.assign(new Error('A collaboration seat requires an existing, dedicated collaboration Agent (profile=collab). Create one from the collaboration board, then register or rebind this seat to it.'),{code:COLLAB_ERRORS.forbidden,httpStatus:403})};
     const number=(name:string,fallback:number)=>{const raw=url.searchParams.get(name);const value=raw===null?fallback:Number(raw);return Number.isFinite(value)?value:fallback};
 
     // /api/v1/collab/escalations[/{id}/resolve]

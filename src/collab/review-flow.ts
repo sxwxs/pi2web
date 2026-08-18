@@ -148,6 +148,8 @@ export function requiredActors(snapshot:ReviewSnapshot):string[]{
   switch(snapshot.phase){
     case 'implementing':return participants.filter(participant=>participant.role==='implementer').map(participant=>participant.participantId);
     case 'collecting':return participants.filter(participant=>participant.role==='reviewer').map(participant=>participant.participantId);
+    // A reviewer that owes no ballot is already done. There is no empty submission for it to make, so requiring
+    // one would park the phase on a seat that can never satisfy it.
     case 'validating':return reviewers(snapshot).filter(participant=>owedIssueVoteIds(snapshot,participant.participantId).length).map(participant=>participant.participantId);
     case 'merge_voting':return reviewers(snapshot).filter(participant=>currentMergeProposals(snapshot).some(proposal=>!proposal.votes.some(vote=>vote.participantId===participant.participantId))).map(participant=>participant.participantId);
     case 'issue_discussing':{
@@ -208,13 +210,10 @@ export function nextPhase(snapshot:ReviewSnapshot,options:{forced?:boolean}={}):
     case 'collecting':return {phase:'consolidating',round:snapshot.round,reason:'findings_complete',...skipped};
     case 'consolidating':{
       if(!snapshot.policy.consensusReview)return {phase:'finished',round:snapshot.round,reason:'review_complete',...skipped};
-      const panel=reviewers(snapshot),completed=(phase:ReviewPhase)=>new Set(snapshot.completions.filter(entry=>entry.phase===phase&&entry.round===snapshot.round).map(entry=>entry.participantId));
-      // A reviewer that owes no ballot (its own findings only, or everything it owed was withdrawn/merged away)
-      // is already done: demanding a completion marker it can only produce by submitting an empty ballot is
-      // what used to bounce such a panel between consolidating and validating forever.
-      if(!panel.every(entry=>completed('validating').has(entry.participantId)||!owedIssueVoteIds(snapshot,entry.participantId).length))return {phase:'validating',round:snapshot.round,reason:'issue_validation_started',...skipped};
+      // Who still owes a ballot is `waitingOn`'s job, not a second implementation of it here.
+      if(waitingOn({...snapshot,phase:'validating'}).length)return {phase:'validating',round:snapshot.round,reason:'issue_validation_started',...skipped};
       const proposals=currentMergeProposals(snapshot);
-      if(proposals.length&&!completed('merge_voting').has('system'))return {phase:'merge_voting',round:snapshot.round,reason:'merge_voting_started',...skipped};
+      if(proposals.length&&!snapshot.completions.some(entry=>entry.phase==='merge_voting'&&entry.round===snapshot.round&&entry.participantId==='system'))return {phase:'merge_voting',round:snapshot.round,reason:'merge_voting_started',...skipped};
       return contestedIssueIds(snapshot).length
         ?{phase:'issue_discussing',round:snapshot.round,debateRound:Math.max(1,snapshot.debateRound??0),reason:'issue_votes_contested',...skipped}
         :{phase:'finished',round:snapshot.round,reason:'review_consensus_complete',...skipped};

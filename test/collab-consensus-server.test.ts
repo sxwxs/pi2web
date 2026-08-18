@@ -1,26 +1,17 @@
 import {afterEach,describe,expect,it} from 'vitest';
-import {mkdtemp} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {RemotePiServer} from '../src/server.js';
-import {WorkspaceStore} from '../src/workspaces.js';
-import {AgentManager,MockBackend} from '../src/agents.js';
+import {bootCollabServer} from './collab-harness.js';
 
 let server:RemotePiServer|undefined;
 afterEach(async()=>{await server?.stop();server=undefined});
 const rid=()=>`req-${randomUUID()}`;
 
 async function boot(){
-  const dataDir=await mkdtemp(path.join(tmpdir(),'remote-pi-consensus-')),root=await mkdtemp(path.join(tmpdir(),'consensus-workspace-'));
-  const workspaces=new WorkspaceStore(),agents=new AgentManager(workspaces,(id,cwd,sessionFile)=>new MockBackend(id,cwd,sessionFile));
-  server=new RemotePiServer({port:0,dataDir,workspaces,agents});const auth=await server.auth.init(),address=await server.start();
-  const base=`http://127.0.0.1:${address!.port}`,headers={authorization:`Bearer ${auth.token}`,'content-type':'application/json'};
-  const call=async(method:string,url:string,body?:unknown,token?:string)=>{const response=await fetch(base+url,{method,headers:{...headers,...(token?{authorization:`Bearer ${token}`}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});const payload=await response.json();return {status:response.status,data:payload.data,error:payload.error}};
-  const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
-  // A seat is only accepted for a real collaboration Agent, so every reviewer here gets its own.
-  const collabAgent=async()=>(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data.agentId;
-  return {call,workspace,collabAgent};
+  const harness=await bootCollabServer('remote-pi-consensus');
+  server=harness.server;
+  return harness;
 }
 const finding=(title:string,line:number)=>({title,severity:'major',category:'correctness',location:{path:'src/example.ts',startLine:line},evidence:`The implementation at line ${line} demonstrably violates the required behavior.`,suggestion:'Correct the implementation and add a regression test.'});
 
