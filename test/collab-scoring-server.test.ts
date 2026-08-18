@@ -26,7 +26,7 @@ describe('panel scoring over HTTP',()=>{
     const a=await seat('reviewer','reviewer-a'),b=await seat('reviewer','reviewer-b'),impl=await seat('implementer','implementer');
 
     // Nominating stays blind: each panelist only sees its own proposals.
-    await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security'),nomination('tests')],nominationsComplete:true},a.participantToken);
+    await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security',{anchors:{'0':'directly exploitable','10':'threat-modelled and tested'}}),nomination('tests')],nominationsComplete:true},a.participantToken);
     expect((await call('GET',`/api/v1/collab/sessions/${sessionId}/criteria`,undefined,b.participantToken)).data).toHaveLength(0);
     await call('POST',`/api/v1/collab/sessions/${sessionId}/nominations`,{clientRequestId:rid(),nominations:[nomination('security')],nominationsComplete:true},b.participantToken);
 
@@ -37,6 +37,9 @@ describe('panel scoring over HTTP',()=>{
     expect(candidates).toHaveLength(2);
     expect(allCriteria.filter((criterion:any)=>criterion.state==='rejected')).toHaveLength(1);
     expect(candidates.find((criterion:any)=>criterion.name==='security').source.sources).toHaveLength(2);
+    // Anchors are the panel's shared scale guidance and their keys are data. Parsed as a fixed-shape object they
+    // were silently stored as `{}`, so every scoring task went out without the anchors its author wrote.
+    expect(candidates.find((criterion:any)=>criterion.name==='security').anchors).toEqual({'0':'directly exploitable','10':'threat-modelled and tested'});
     const votingTask=(await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,a.participantToken)).data;
     expect(votingTask.task).toBe('vote_on_criteria');
     expect(votingTask.candidates).toEqual(expect.arrayContaining([expect.objectContaining({definition:expect.stringContaining('security')})]));

@@ -185,7 +185,7 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 **中枢是推送式的**：任何一方交完自己的活就应当结束回合，绝不要 sleep 轮询。正常 Review 不会回头要求开发方逐条回应；会话结束时中枢推送 `session_result`。人启动 `fix_then_review` 后，中枢才把全部 confirmed Action Items 推给选定开发 Agent；开发 `/ready` 后再主动唤醒原 Reviewer。
 
-> 凭证说明：participantToken 只以 SHA-256 hash 存储，明文只在登记（`/participants`）、改绑（`/binding`）和复核重开（`/recheck` 返回的 `participantTokens`）的响应里出现一次，数据库里没有任何明文副本。内置 Pi 协作扩展根本不使用它：它走进程内 bridge，按 `agentId` 认领任务，token 不会进入模型上下文或 Agent 会话。
+> 凭证说明：participantToken 只以 SHA-256 hash 存储，明文只在登记（`/participants`）、改绑（`/binding`）和复核重开（`/recheck` 返回的 `participantTokens`）的 **API 响应**里出现一次，数据库里没有任何明文副本。内置 Pi 协作扩展根本不使用它：它走进程内 bridge，按 `agentId` 认领任务，token 不会进入模型上下文或 Agent 会话。看板也不展示它——人用配对码操作，没人需要把一个长期凭证贴到页面上；要拿就直接读接口响应。
 
 最小流程（review）：
 

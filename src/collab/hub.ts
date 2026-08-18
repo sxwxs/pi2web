@@ -1,8 +1,10 @@
-import {execFile,execFileSync} from 'node:child_process';
-import {createHash} from 'node:crypto';
-import {readFile} from 'node:fs/promises';
+import {execFile,execFileSync,spawn} from 'node:child_process';
+import {createHash,type Hash} from 'node:crypto';
+import {createReadStream} from 'node:fs';
 import path from 'node:path';
 import {promisify} from 'node:util';
+import type {Readable} from 'node:stream';
+import type {ChildProcess} from 'node:child_process';
 import {COLLAB_ERRORS,type CollabEvent,type CollabSession,type CollabSubject,type Escalation,type Issue,type Participant,type ReviewPhase,type ScoringPhase} from './types.js';
 import {CollabStore,type CreateSessionInput} from './store.js';
 import {ValidationError,parse,type FieldError} from './validate.js';
@@ -43,16 +45,23 @@ export type HubOptions={resolveBaseline?:BaselineResolver,now?:()=>number,agentT
 
 /** Anchors every round to an immutable code state so round N+1 verdicts are not made against round N's memory. */
 export const gitBaseline:BaselineResolver=async({cwd,subject})=>{
-  const git=async(args:string[])=>(await run('git',args,{cwd,maxBuffer:8*1024*1024})).stdout;
+  const git=async(args:string[])=>(await run('git',args,{cwd})).stdout;
   try{
     const commit=(await git(['rev-parse','HEAD'])).trim();
     let dirtyHash:string|undefined;
     const status=await git(['status','--porcelain','-z']);
     if(status){
-      const diff=await git(['diff','HEAD','--binary']).catch(()=>'');
-      const untracked=(await git(['ls-files','--others','--exclude-standard','-z']).catch(()=>'')).split('\0').filter(Boolean).sort();
-      const hash=createHash('sha256').update(status).update(diff);
-      for(const relative of untracked){hash.update(relative).update('\0');try{hash.update(await readFile(path.join(cwd,relative)))}catch{/* A file removed during capture is already represented by status. */}}
+      const untracked=(await git(['ls-files','--others','--exclude-standard','-z'])).split('\0').filter(Boolean).sort();
+      // Hashed as a stream, never buffered. A working tree diff can be tens of megabytes, and a diff dropped for
+      // exceeding a buffer would leave a hash of nothing but file names - identical before and after an edit to
+      // those same files, which is exactly what `assertBaselineCurrent()` exists to catch.
+      const hash=createHash('sha256').update(status);
+      await hashStream(hash,spawn('git',['diff','HEAD','--binary'],{cwd,stdio:['ignore','pipe','ignore']}));
+      for(const relative of untracked){
+        hash.update(relative).update('\0');
+        // A file removed during capture is already represented by status.
+        await hashStream(hash,createReadStream(path.join(cwd,relative))).catch(()=>{});
+      }
       dirtyHash=`sha256:${hash.digest('hex')}`;
     }
     return {vcs:'git',commit,range:subject.type==='commit_range'?subject.value:undefined,dirtyHash,paths:subject.type==='paths'?subject.value.split(/[\n,]/).map(value=>value.trim()).filter(Boolean):[]};
@@ -61,6 +70,18 @@ export const gitBaseline:BaselineResolver=async({cwd,subject})=>{
     return {vcs:'none',paths:[]};
   }
 };
+/** Feeds one stream into a hash, rejecting on failure so a partial read can never pass as "nothing changed". */
+function hashStream(hash:Hash,source:Readable|ChildProcess){
+  const process='stdout' in source?source:undefined,stream=(process?process.stdout:source) as Readable|null;
+  return new Promise<void>((resolve,reject)=>{
+    if(!stream)return reject(new Error('Stream is not readable'));
+    stream.on('data',chunk=>hash.update(chunk));
+    stream.on('error',reject);
+    if(!process)return void stream.on('end',resolve);
+    process.on('error',reject);
+    process.on('close',code=>code===0?resolve():reject(new Error(`git exited with ${code}`)));
+  });
+}
 
 const fieldError=(path:string,code:string,message:string):FieldError=>({path,code,message});
 
@@ -916,7 +937,7 @@ export class CollabHub {
     assertScoringPhase(snapshot,['nominating'],'Nominating criteria');
     const accepted=input.nominations.map(nomination=>{
       const criterion=this.store.createCriterion({sessionId:session.sessionId,name:nomination.name,definition:nomination.definition,
-        anchors:nomination.anchors as Record<string,string>|undefined,weight:nomination.weightSuggestion,
+        anchors:nomination.anchors,weight:nomination.weightSuggestion,
         source:{participantId:participant.participantId,externalId:nomination.externalId,rationale:nomination.rationale},round:session.round});
       return {externalId:nomination.externalId,criterionId:criterion.criterionId,name:criterion.name};
     });
