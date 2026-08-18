@@ -87,15 +87,6 @@ export class CollabHub {
   private push(sessionId:string,participantId:string,type:string,payload:Record<string,unknown>){
     return this.store.pushInbox(sessionId,participantId,type,payload);
   }
-  /** A finished session no longer needs to wake anyone, so the stored credentials are dropped. */
-  retireDispatchTokens(sessionId:string){
-    for(const participant of this.store.listParticipants(sessionId))this.store.clearDispatchToken(participant.participantId);
-  }
-  /**
-   * Retires one seat's credential. Each delivery must retire its own: dropping the whole session's tokens after
-   * the first closing note would leave every later `session_result` delivery without a credential.
-   */
-  retireDispatchToken(participantId:string){this.store.clearDispatchToken(participantId)}
   /**
    * Marks queued items handled explicitly. Normal tasks use claimTaskForAgent(); this helper remains for
    * terminal notes and stale cleanup because those messages do not call collab_get_task.
@@ -162,8 +153,8 @@ export class CollabHub {
         :`A participant can only be registered in phase ${this.registrationPhases(session).join('/')}, but the session is in ${session.phase}. Wait for the next round, or rebind an existing seat.`);
     this.assertAgentAvailable(input.agentId,sessionId);
     const {participant,token}=this.store.createParticipant({sessionId,role:input.role,displayName:input.displayName,model:input.model,agentId:input.agentId,tokenBudget:input.tokenBudget});
-    // The hub wakes this agent itself, so it keeps the credential it will hand over.
-    this.store.setDispatchToken(participant.participantId,token);
+    // Only the hash is stored: the managed agent submits through the in-process bridge, and the plaintext is
+    // handed to the human exactly once, in this response.
     this.record(sessionId,'participant_added',{participantId:participant.participantId,role:participant.role,displayName:participant.displayName,agentId:participant.agentId,model:participant.model});
     this.assignCurrentTask(session,participant);
     return {participant,token,session};
@@ -243,18 +234,20 @@ export class CollabHub {
     // Finished seats can be reused elsewhere. Reopening is the durability boundary where they become active again.
     for(const participant of participants.filter(entry=>entry.state==='active'))this.assertAgentAvailable(participant.agentId,sessionId,participant.participantId);
     const round=session.round+1,phase:ReviewPhase=input.mode==='fix_then_review'?'implementing':'collecting';
-    // Closing notes from the prior result must not race the new task. Credentials were intentionally retired at
-    // close, so rotate every active seat before dispatching this new cycle.
+    // Closing notes from the prior result must not race the new task. The old bearer token is already in the
+    // old turn's context, so every active seat is rotated; the fresh plaintext is returned to the human here
+    // (the only place it exists) and nothing is persisted but its hash.
+    const participantTokens:{participantId:string,displayName:string,token:string}[]=[];
     for(const participant of participants.filter(entry=>entry.state==='active')){
       this.completeDelivery(participant.participantId,'session_result');
-      this.store.rotateParticipantToken(participant.participantId);
+      participantTokens.push({participantId:participant.participantId,displayName:participant.displayName,token:this.store.rotateParticipantToken(participant.participantId)});
     }
     if(input.mode==='fix_then_review')for(const implementer of implementers)if(!selected.includes(implementer.participantId))this.store.markPhaseComplete(sessionId,round,'implementing',implementer.participantId);
     if(phase==='collecting')await this.captureBaseline({...session,phase,round,status:'active'});
     const updated=this.store.updateSession(sessionId,{phase,round,debateRound:0,status:'active',stalled:undefined,outcome:undefined});
     this.record(sessionId,'review_reopened',{mode:input.mode,round,phase,implementerParticipantIds:selected},actor);
     this.dispatch(sessionId);
-    return updated;
+    return {...updated,participantTokens};
   }
 
   /** Moves a review session out of draft. Build-then-review sessions start in `implementing`; the rest go straight to `collecting`. */
@@ -700,7 +693,12 @@ export class CollabHub {
           scope:'Review exactly the subject, and when baseline.changedFiles is present, those files. Reporting something outside that scope is what the other reviewers vote down.'},
         instructions:`Review the code at the pinned baseline in ${session.cwd} and report every finding in ONE call to collab_submit_findings; that call closes your blind review and ends your turn, so gather everything first. location.path and evidence are mandatory, and evidence must be something you verified in this checkout. ${issuesToRecheck.length?`Also include one rechecks[] entry (outcome resolved or still_present, with a rationale) for each of the ${issuesToRecheck.length} issuesToRecheck entries. `:''}Rate severity and requiredAction by rules.severity and rules.requiredAction, not by how important the finding feels.`};
     }
-    if(session.phase==='validating')return this.issueValidationDigest(session,participant,snapshot,base,false);
+    if(session.phase==='validating'){
+      // Nothing owed means nothing to submit: the typed ballot tool has no empty form, so waking this seat would
+      // only burn a turn and the phase no longer waits for it either (requiredActors).
+      if(!owedIssueVoteIds(snapshot,participant.participantId).length)return this.waitDigest(session,base,'You have voted on every finding that needs your ballot. End your turn; the hub calls you back if later findings need one.');
+      return this.issueValidationDigest(session,participant,snapshot,base,false);
+    }
     if(session.phase==='merge_voting'){
       const proposals=this.store.listMergeProposals(session.sessionId),owed=proposals.filter(proposal=>!proposal.votes.some(vote=>vote.participantId===participant.participantId));
       if(!owed.length)return this.waitDigest(session,base);
@@ -950,12 +948,17 @@ export class CollabHub {
       if(!expected.includes(criterionId))voteErrors.push(fieldError(`votes[${index}].criterionId`,'UNEXPECTED',`Criterion ${criterionId} is not a current candidate`));
       if(submitted.indexOf(criterionId)!==index)voteErrors.push(fieldError(`votes[${index}].criterionId`,'DUPLICATE','Only one vote per criterion is accepted'));
     }
+    // A missing rationale fails the whole call *before* anything is written. Reporting it as a per-criterion
+    // `rejected[]` entry inside a 200 used to end the agent's turn with that criterion unvoted, so the panel
+    // waited on a seat that believed it was finished.
+    input.votes.forEach((vote,index)=>{
+      if(vote.stance==='reject'&&!(vote.rationale??'').trim())voteErrors.push(fieldError(`votes[${index}].rationale`,'REQUIRED','Rejecting a criterion requires a rationale'));
+    });
     if(voteErrors.length)throw new ValidationError(voteErrors);
     const accepted:string[]=[],rejected:{criterionId:string,code:string,message:string}[]=[];
     for(const vote of input.votes){
       const criterion=this.store.findCriterionInSession(session.sessionId,vote.criterionId);
       if(!criterion||criterion.state!=='candidate'){rejected.push({criterionId:vote.criterionId,code:COLLAB_ERRORS.criterionNotFound,message:'Unknown or already decided criterion'});continue}
-      if(vote.stance==='reject'&&!(vote.rationale??'').trim()){rejected.push({criterionId:vote.criterionId,code:'RATIONALE_REQUIRED',message:'Rejecting a criterion requires a rationale'});continue}
       this.store.saveVote({sessionId:session.sessionId,criterionId:vote.criterionId,participantId:participant.participantId,round:session.round,stance:vote.stance,weight:vote.weight,amendment:vote.amendment,rationale:vote.rationale});
       accepted.push(vote.criterionId);
     }
@@ -1328,7 +1331,9 @@ export class CollabHub {
     if(session.phase==='implementing')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'implement');
     // In build-then-review the implementer is writing code, not filing reverse findings, so it gets no task here.
     if(session.phase==='collecting')for(const participant of participants)if(participant.role!=='moderator'&&!(session.policy.implementationFirst&&participant.role==='implementer'))targets.set(participant.participantId,participant.role==='reviewer'?'file_findings':'file_findings_optional');
-    if(session.phase==='validating')for(const participant of participants)if(participant.role==='reviewer')targets.set(participant.participantId,'validate_issues');
+    // A reviewer with nothing owed gets no ballot task: there is no empty submission for it to make, and the
+    // phase does not wait for it.
+    if(session.phase==='validating'){const snapshot=this.snapshot(sessionId);for(const participant of participants)if(participant.role==='reviewer'&&owedIssueVoteIds(snapshot,participant.participantId).length)targets.set(participant.participantId,'validate_issues')}
     if(session.phase==='merge_voting')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'vote_on_merges');
     if(session.phase==='issue_discussing')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'defend_approved_issues');
     if(session.phase==='issue_reconsidering')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'reconsider_issue_votes');
@@ -1458,7 +1463,6 @@ export class CollabHub {
   /**
    * Closing hand-off: every participant is told the session is over. Without it a managed agent that is waiting
    * for review feedback would sit there forever (or start polling), because a clean review pushes no other task.
-   * The stored managed credentials are dropped by the dispatcher once the note has been delivered.
    */
   private announceFinish(session:CollabSession){
     const participants=this.store.listParticipants(session.sessionId).filter(participant=>participant.state!=='left');
@@ -1466,7 +1470,6 @@ export class CollabHub {
       this.push(session.sessionId,participant.participantId,'session_result',{phase:session.phase,round:session.round,outcome:session.outcome??{}});
       this.record(session.sessionId,'task_assigned',{participantId:participant.participantId,task:'session_result',phase:session.phase,round:session.round});
     }
-    if(!participants.length)this.retireDispatchTokens(session.sessionId);
   }
   private outcome(sessionId:string){
     const issues=this.store.listIssues(sessionId),byStatus:Record<string,number>={};

@@ -4,6 +4,8 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {RemotePiServer} from '../src/server.js';
+import {WorkspaceStore} from '../src/workspaces.js';
+import {AgentManager,MockBackend} from '../src/agents.js';
 
 let server:RemotePiServer|undefined;
 afterEach(async()=>{await server?.stop();server=undefined});
@@ -13,7 +15,8 @@ const rid=()=>`req-${randomUUID()}`;
 
 async function boot(policy?:Record<string,unknown>){
   const dataDir=await temp('remote-pi-scoring-'),root=await temp('scoring-workspace-');
-  server=new RemotePiServer({port:0,dataDir});
+  const workspaces=new WorkspaceStore(),agents=new AgentManager(workspaces,(id,cwd,sessionFile)=>new MockBackend(id,cwd,sessionFile));
+  server=new RemotePiServer({port:0,dataDir,workspaces,agents});
   const auth=await server.auth.init(),address=await server.start(),base=`http://127.0.0.1:${address!.port}`,human=auth.token!;
   const call=async(method:string,url:string,body?:unknown,token=human)=>{
     const response=await fetch(base+url,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});
@@ -23,8 +26,10 @@ async function boot(policy?:Record<string,unknown>){
   const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
   const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'scoring',title:'Panel scoring of the payment refactor',workspaceId:workspace.id,
     subject:{type:'commit_range',value:'HEAD~3..HEAD'},...(policy?{policy}:{})})).data.sessionId;
-  const seat=async(role:string,displayName:string)=>(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role,displayName,agentId:`agent-${displayName}`})).data;
-  return {call,sessionId,seat};
+  // Each seat needs its own dedicated collaboration Agent; the hub refuses a seat it could never wake.
+  const collabAgent=async()=>(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data.agentId;
+  const seat=async(role:string,displayName:string)=>(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role,displayName,agentId:await collabAgent()})).data;
+  return {call,sessionId,seat,collabAgent};
 }
 
 const nomination=(name:string,overrides:Record<string,unknown>={})=>({name,definition:`Whether the change is sound with respect to ${name} across the reviewed range.`,weightSuggestion:0.5,...overrides});
@@ -54,6 +59,13 @@ describe('panel scoring over HTTP',()=>{
 
     const partialVote=await call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),votes:[{criterionId:candidates[0].criterionId,stance:'approve',weight:0.5}]},a.participantToken);
     expect(partialVote.status).toBe(422);expect(partialVote.error.fieldErrors[0]).toMatchObject({path:'votes',code:'REQUIRED'});
+    // A reject without a rationale fails the whole call before anything is written: reporting it as a per-criterion
+    // rejection inside a 200 ended the agent's turn with that criterion unvoted, and the panel waited forever.
+    const unexplained=await call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),
+      votes:candidates.map((criterion:any,index:number)=>({criterionId:criterion.criterionId,stance:index===1?'reject':'approve',weight:0.5}))},a.participantToken);
+    expect(unexplained.status).toBe(422);
+    expect(unexplained.error.fieldErrors[0]).toMatchObject({path:'votes[1].rationale',code:'REQUIRED'});
+    expect((await call('GET',`/api/v1/collab/sessions/${sessionId}/votes`,undefined,a.participantToken)).data).toHaveLength(0);
     const vote=(token:string,stances:Record<string,string>)=>call('POST',`/api/v1/collab/sessions/${sessionId}/votes`,{clientRequestId:rid(),
       votes:candidates.map((criterion:any,index:number)=>({criterionId:criterion.criterionId,stance:stances[String(index)],weight:0.5,
         ...(stances[String(index)]==='reject'?{rationale:'Duplicate of another criterion.'}:{})}))},token);
@@ -248,9 +260,9 @@ describe('panel scoring over HTTP',()=>{
   });
 
   it('refuses a human seat and a scale that no score could satisfy',async()=>{
-    const {call,sessionId}=await boot();
+    const {call,sessionId,collabAgent}=await boot();
     // A `human` seat would hold a participant token with nominate/vote/score rights the panel never waits for.
-    const seatAsHuman=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'human',displayName:'operator',agentId:'agent-operator'});
+    const seatAsHuman=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'human',displayName:'operator',agentId:await collabAgent()});
     expect(seatAsHuman.status).toBe(422);
     expect(seatAsHuman.error.fieldErrors[0]).toMatchObject({path:'role',code:'NOT_ALLOWED'});
 

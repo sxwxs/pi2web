@@ -27,7 +27,7 @@ const PARTICIPANTS_DDL=`
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, display_name TEXT NOT NULL,
         model TEXT, agent_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
         state TEXT NOT NULL, token_budget INTEGER NOT NULL, tokens_used INTEGER NOT NULL DEFAULT 0,
-        tokens_estimated INTEGER NOT NULL DEFAULT 0, token_baseline INTEGER, dispatch_token TEXT,
+        tokens_estimated INTEGER NOT NULL DEFAULT 0, token_baseline INTEGER,
         created_at INTEGER NOT NULL, last_seen_at INTEGER,
         FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE
       );`;
@@ -157,9 +157,15 @@ export class CollabStore {
     // Additive migration: scoring sessions need a debate counter independent of the voting round.
     const columns=this.db.prepare('PRAGMA table_info(collab_sessions)').all() as {name:string}[];
     if(!columns.some(column=>column.name==='debate_round'))this.db.exec('ALTER TABLE collab_sessions ADD COLUMN debate_round INTEGER NOT NULL DEFAULT 0');
-    // Additive migration: a managed participant keeps its token in clear text so the hub can hand it to the agent it wakes.
+    // Removal migration: `dispatch_token` used to hold a seat's bearer token in clear text. Managed agents
+    // submit through the in-process bridge (keyed by agentId), so nothing read it any more; the copies are
+    // wiped and the column dropped so an old database stops carrying usable credentials.
     const participantColumns=this.db.prepare('PRAGMA table_info(collab_participants)').all() as {name:string}[];
-    if(!participantColumns.some(column=>column.name==='dispatch_token'))this.db.exec('ALTER TABLE collab_participants ADD COLUMN dispatch_token TEXT');
+    if(participantColumns.some(column=>column.name==='dispatch_token')){
+      this.db.exec('UPDATE collab_participants SET dispatch_token=NULL');
+      // DROP COLUMN needs SQLite >= 3.35; on anything older the values above are already gone.
+      try{this.db.exec('ALTER TABLE collab_participants DROP COLUMN dispatch_token')}catch{/* column stays, always NULL */}
+    }
     // Rebuild migration: `binding_type` is gone (every seat is a local agent now) and it was NOT NULL, so an
     // insert against the new column list would fail on a database created before that decision. A legacy
     // self-service seat keeps its row with an empty agent_id; the dispatcher reports it instead of guessing.
@@ -167,8 +173,8 @@ export class CollabStore {
       this.db.exec(`
         ALTER TABLE collab_participants RENAME TO collab_participants_legacy;
         ${PARTICIPANTS_DDL}
-        INSERT INTO collab_participants(id,session_id,role,display_name,model,agent_id,token_hash,state,token_budget,tokens_used,tokens_estimated,token_baseline,created_at,last_seen_at,dispatch_token)
-          SELECT id,session_id,role,display_name,model,COALESCE(agent_id,''),token_hash,state,token_budget,tokens_used,tokens_estimated,token_baseline,created_at,last_seen_at,dispatch_token FROM collab_participants_legacy;
+        INSERT INTO collab_participants(id,session_id,role,display_name,model,agent_id,token_hash,state,token_budget,tokens_used,tokens_estimated,token_baseline,created_at,last_seen_at)
+          SELECT id,session_id,role,display_name,model,COALESCE(agent_id,''),token_hash,state,token_budget,tokens_used,tokens_estimated,token_baseline,created_at,last_seen_at FROM collab_participants_legacy;
         DROP TABLE collab_participants_legacy;
         CREATE INDEX IF NOT EXISTS collab_participants_session ON collab_participants(session_id);
       `);
@@ -233,18 +239,18 @@ export class CollabStore {
   findActiveParticipantsByAgent(agentId:string):Participant[]{return (this.db.prepare(`SELECT p.* FROM collab_participants p JOIN collab_sessions s ON s.id=p.session_id WHERE p.agent_id=? AND p.state='active' AND s.status='active' ORDER BY p.created_at,p.rowid`).all(agentId) as any[]).map(participantFrom)}
   /**
    * Hands the seat to another local agent. The token is rotated because the old one is already in the old
-   * agent's conversation, and the hub keeps the new plaintext copy: it is what the next wake-up carries.
+   * agent's conversation; only its hash is stored, and the plaintext is returned to the human exactly once.
    */
   rebindParticipant(participantId:string,agentId:string,model?:string):{participant:Participant,token:string}{
     const token=`cpt_${randomUUID().replace(/-/g,'')}${randomUUID().replace(/-/g,'')}`;
-    this.db.prepare('UPDATE collab_participants SET agent_id=?,model=?,token_hash=?,dispatch_token=? WHERE id=?')
-      .run(agentId,model??null,hashToken(token),token,participantId);
+    this.db.prepare('UPDATE collab_participants SET agent_id=?,model=?,token_hash=? WHERE id=?')
+      .run(agentId,model??null,hashToken(token),participantId);
     return {participant:this.getParticipant(participantId),token};
   }
-  /** A finished review drops dispatch credentials. Reopening rotates them before any Agent is called again. */
+  /** Reopening a finished review invalidates the old bearer token before any Agent is called again. */
   rotateParticipantToken(participantId:string):string{
     const token=`cpt_${randomUUID().replace(/-/g,'')}${randomUUID().replace(/-/g,'')}`;
-    this.db.prepare('UPDATE collab_participants SET token_hash=?,dispatch_token=? WHERE id=?').run(hashToken(token),token,participantId);
+    this.db.prepare('UPDATE collab_participants SET token_hash=? WHERE id=?').run(hashToken(token),participantId);
     return token;
   }
   updateParticipant(participantId:string,patch:Partial<Pick<Participant,'state'|'tokensUsed'|'tokenBudget'|'tokensEstimated'|'lastSeenAt'|'model'>>):Participant{
@@ -260,13 +266,6 @@ export class CollabStore {
     const current=this.getParticipant(participantId),used=current.tokensUsed+Math.max(0,Math.round(tokens));
     return this.updateParticipant(participantId,{tokensUsed:used,tokensEstimated:current.tokensEstimated||estimated,state:current.state==='left'?'left':used>=current.tokenBudget?'budget_exhausted':'active'});
   }
-  /**
-   * Stores the plaintext token of a *managed* participant. The hub must be able to give the token to the agent
-   * it wakes, and there is nobody to type it in. External participants keep hash-only storage.
-   */
-  setDispatchToken(participantId:string,token:string){this.db.prepare('UPDATE collab_participants SET dispatch_token=? WHERE id=?').run(token,participantId)}
-  getDispatchToken(participantId:string):string|undefined{const row=this.db.prepare('SELECT dispatch_token FROM collab_participants WHERE id=?').get(participantId) as any;return row?.dispatch_token??undefined}
-  clearDispatchToken(participantId:string){this.db.prepare('UPDATE collab_participants SET dispatch_token=NULL WHERE id=?').run(participantId)}
   getTokenBaseline(participantId:string):number|undefined{const row=this.db.prepare('SELECT token_baseline FROM collab_participants WHERE id=?').get(participantId) as any;return row?.token_baseline??undefined}
   setTokenBaseline(participantId:string,value:number){this.db.prepare('UPDATE collab_participants SET token_baseline=? WHERE id=?').run(Math.max(0,Math.round(value)),participantId)}
 

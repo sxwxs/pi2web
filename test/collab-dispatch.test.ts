@@ -155,8 +155,8 @@ describe('collab dispatcher',()=>{
     expect(closing.message).toContain('finished');
     expect(closing.message).toContain('Result: approved');
     expect(closing.message).not.toContain('token');
-    // The credential the hub was holding for the managed agent is dropped once the note is delivered.
-    expect(store.getDispatchToken(reviewer.participant.participantId)).toBeUndefined();
+    // The delivered note is acked, so a restart never re-fires it.
+    expect(store.listInbox(reviewer.participant.participantId).filter(item=>item.type==='session_result')).toHaveLength(0);
   });
 
   it('queues a busy agent with follow-up instead of interrupting it with a fresh prompt',async()=>{
@@ -200,7 +200,7 @@ describe('collab dispatcher',()=>{
     expect(sent.map(entry=>entry.agentId).sort()).toEqual(['agent-1','agent-impl']);
   });
 
-  it('delivers the closing note to every managed seat and only retires the credential it used',async()=>{
+  it('delivers the closing note to every managed seat',async()=>{
     const created=await session();
     const first=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-a',agentId:'agent-1'});
     const second=hub.addParticipant(created.sessionId,{role:'reviewer',displayName:'reviewer-b',agentId:'agent-2'});
@@ -211,12 +211,15 @@ describe('collab dispatcher',()=>{
       await hub.submitFindings(seat.participant,{clientRequestId:rid(),baselineId:(hub.digest(seat.participant) as any).baseline.baselineId,findings:[],reviewComplete:true});
     await dispatcher.drain();
 
-    // Both agents must be told the session is over: retiring the whole session's tokens on the first delivery
-    // used to leave the second one without a credential, so its closing note was silently dropped.
+    // Both agents must be told the session is over: retiring the whole session's state on the first delivery
+    // used to leave the second one undelivered, so its closing note was silently dropped.
     const closing=sent.filter(entry=>entry.message.includes('collaboration is finished'));
     expect(closing.map(entry=>entry.agentId).sort()).toEqual(['agent-1','agent-2','agent-impl']);
-    expect(store.getDispatchToken(first.participant.participantId)).toBeUndefined();
-    expect(store.getDispatchToken(second.participant.participantId)).toBeUndefined();
+    for(const seat of [first,second])expect(store.listInbox(seat.participant.participantId).filter(item=>item.type==='session_result')).toHaveLength(0);
+    // A seat's bearer token is never persisted in clear text; only its hash is stored.
+    const columns=(metadata.connection.prepare('PRAGMA table_info(collab_participants)').all() as {name:string}[]).map(column=>column.name);
+    expect(columns).not.toContain('dispatch_token');
+    expect(metadata.connection.prepare('SELECT COUNT(*) AS hits FROM collab_participants WHERE token_hash=?').get(first.token)).toMatchObject({hits:0});
   });
 
   it('delivers a closing note that was queued but never dispatched before a restart',async()=>{
@@ -247,7 +250,7 @@ describe('collab dispatcher',()=>{
     expect(hub.events(created.sessionId).filter(event=>event.type==='dispatch_failed')).toHaveLength(0);
   });
 
-  it('keeps a failed closing note retryable instead of burning its credential',async()=>{
+  it('keeps a failed closing note retryable instead of acking it',async()=>{
     const created=await session();
     await dispatcher.stop();
     let failing=true;
@@ -262,8 +265,8 @@ describe('collab dispatcher',()=>{
     await flaky.drain();
     await flaky.stop();
     expect(sent).toHaveLength(0);
-    // The credential must survive a failed delivery, otherwise the retry the resume exists for is impossible.
-    expect(store.getDispatchToken(reviewer.participant.participantId)).toBeTruthy();
+    // The queued item must survive a failed delivery, otherwise the retry the resume exists for is impossible.
+    expect(store.listInbox(reviewer.participant.participantId).filter(item=>item.type==='session_result')).toHaveLength(1);
 
     failing=false;
     const restarted=new CollabDispatcher(hub,{command:async(agentId,kind,message)=>{sent.push({agentId,kind,message})},agentStatus:()=>undefined,delayMs:0});
@@ -271,7 +274,7 @@ describe('collab dispatcher',()=>{
     await restarted.drain();
     await restarted.stop();
     expect(sent.at(-1)?.message).toContain('finished');
-    expect(store.getDispatchToken(reviewer.participant.participantId)).toBeUndefined();
+    expect(store.listInbox(reviewer.participant.participantId).filter(item=>item.type==='session_result')).toHaveLength(0);
   });
 
   it('rebinds a seat whose agent never answered and re-delivers the task it already had',async()=>{
