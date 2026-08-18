@@ -1,33 +1,18 @@
 import {afterEach,describe,expect,it} from 'vitest';
-import {mkdtemp} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
-import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {RemotePiServer} from '../src/server.js';
-import {WorkspaceStore} from '../src/workspaces.js';
-import {AgentManager,MockBackend} from '../src/agents.js';
+import {bootCollabServer} from './collab-harness.js';
 
 let server:RemotePiServer|undefined;
 afterEach(async()=>{await server?.stop();server=undefined});
 
-const temp=(prefix:string)=>mkdtemp(path.join(tmpdir(),prefix));
 const rid=()=>`req-${randomUUID()}`;
 
 async function boot(policy?:Record<string,unknown>){
-  const dataDir=await temp('remote-pi-scoring-'),root=await temp('scoring-workspace-');
-  const workspaces=new WorkspaceStore(),agents=new AgentManager(workspaces,(id,cwd,sessionFile)=>new MockBackend(id,cwd,sessionFile));
-  server=new RemotePiServer({port:0,dataDir,workspaces,agents});
-  const auth=await server.auth.init(),address=await server.start(),base=`http://127.0.0.1:${address!.port}`,human=auth.token!;
-  const call=async(method:string,url:string,body?:unknown,token=human)=>{
-    const response=await fetch(base+url,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});
-    const payload=await response.json().catch(()=>({}));
-    return {status:response.status,data:payload.data,error:payload.error};
-  };
-  const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
+  const {server:started,call,workspace,collabAgent}=await bootCollabServer('remote-pi-scoring');
+  server=started;
   const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'scoring',title:'Panel scoring of the payment refactor',workspaceId:workspace.id,
     subject:{type:'commit_range',value:'HEAD~3..HEAD'},...(policy?{policy}:{})})).data.sessionId;
-  // Each seat needs its own dedicated collaboration Agent; the hub refuses a seat it could never wake.
-  const collabAgent=async()=>(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data.agentId;
   const seat=async(role:string,displayName:string)=>(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role,displayName,agentId:await collabAgent()})).data;
   return {call,sessionId,seat,collabAgent};
 }

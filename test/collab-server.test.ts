@@ -7,6 +7,7 @@ import {WebSocket} from 'ws';
 import {RemotePiServer} from '../src/server.js';
 import {WorkspaceStore} from '../src/workspaces.js';
 import {AgentManager,MockBackend} from '../src/agents.js';
+import {bootCollabServer} from './collab-harness.js';
 
 let server:RemotePiServer|undefined;
 afterEach(async()=>{await server?.stop();server=undefined});
@@ -14,23 +15,10 @@ afterEach(async()=>{await server?.stop();server=undefined});
 const temp=(prefix:string)=>mkdtemp(path.join(tmpdir(),prefix));
 const rid=()=>`req-${randomUUID()}`;
 
-type Client={call:(method:string,url:string,body?:unknown,token?:string)=>Promise<{status:number,data:any,error:any}>};
-
 async function boot(){
-  const dataDir=await temp('remote-pi-collab-'),root=await temp('collab-workspace-');
-  const workspaces=new WorkspaceStore(),agents=new AgentManager(workspaces,(id,cwd,sessionFile)=>new MockBackend(id,cwd,sessionFile));
-  server=new RemotePiServer({port:0,dataDir,workspaces,agents});
-  const auth=await server.auth.init(),address=await server.start();
-  const base=`http://127.0.0.1:${address!.port}`,human=auth.token!;
-  const call:Client['call']=async(method,url,body,token=human)=>{
-    const response=await fetch(base+url,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});
-    const payload=await response.json().catch(()=>({}));
-    return {status:response.status,data:payload.data,error:payload.error};
-  };
-  const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
-  // Every seat must name a real, dedicated collaboration Agent: the hub can only wake one it can resolve.
-  const collabAgent=async()=>(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data.agentId;
-  return {base,human,call,workspace,root,collabAgent};
+  const harness=await bootCollabServer('remote-pi-collab');
+  server=harness.server;
+  return harness;
 }
 
 const finding=(overrides:Record<string,unknown>={})=>({title:'Callback signature is never verified',severity:'critical',category:'security',

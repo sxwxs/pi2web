@@ -8,9 +8,8 @@ import {CollabStore} from '../src/collab/store.js';
 import {CollabHub,type BaselineResolver} from '../src/collab/hub.js';
 import {CollabDispatcher,toolBriefing} from '../src/collab/dispatcher.js';
 import {RemotePiServer} from '../src/server.js';
-import {WorkspaceStore} from '../src/workspaces.js';
-import {AgentManager,MockBackend} from '../src/agents.js';
 import {MailNotifier} from '../src/mail-notifier.js';
+import {bootCollabServer} from './collab-harness.js';
 
 const temp=(prefix:string)=>mkdtemp(path.join(tmpdir(),prefix));
 const rid=()=>`req-${randomUUID()}`;
@@ -374,32 +373,22 @@ describe('collaboration wiring over HTTP',()=>{
   afterEach(async()=>{await server?.stop();server=undefined});
 
   it('wakes a managed pi2web agent and mails the human when an escalation is raised',async()=>{
-    const dataDir=await temp('remote-pi-collab-wire-'),root=await temp('collab-ws-');
     const mails:any[]=[];
     const mailNotifier=new MailNotifier({endpoint:'https://mail.example/send',apiKey:'key',recipient:'owner@example.com'},
       (async(_url:any,init:any)=>{mails.push(JSON.parse(init.body));return new Response(JSON.stringify({ok:true}),{status:200})}) as any);
-    const workspaces=new WorkspaceStore(),agents=new AgentManager(workspaces,(id,cwd)=>new MockBackend(id,cwd));
-    server=new RemotePiServer({port:0,dataDir,workspaces,agents,mailNotifier});
-    const auth=await server.auth.init(),address=await server.start();
-    const base=`http://127.0.0.1:${address!.port}`,human=auth.token!;
-    const call=async(method:string,url:string,body?:unknown,token=human)=>{
-      const response=await fetch(base+url,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});
-      const payload:any=await response.json().catch(()=>({}));
-      return {status:response.status,data:payload.data,error:payload.error};
-    };
+    const {server:started,agents,call,workspace,collabAgent}=await bootCollabServer('remote-pi-collab-wire',{mailNotifier});
+    server=started;
 
-    const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
-    const agent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data;
-    const implementerAgent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data;
+    const agentId=await collabAgent(),implementerAgentId=await collabAgent();
     const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Managed dispatch review',workspaceId:workspace.id,subject:{type:'free',value:'everything'}})).data.sessionId;
-    const managed=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-managed',agentId:agent.agentId})).data;
+    const managed=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-managed',agentId})).data;
     expect(managed.participantToken).toMatch(/^cpt_/);
-    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:implementerAgent.agentId})).data;
+    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:implementerAgentId})).data;
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
 
     // The managed reviewer must have been prompted by the hub, with a usable participant token.
     const prompt=await waitFor(async()=>{
-      const messages=await agents.messages(agent.agentId) as any[];
+      const messages=await agents.messages(agentId) as any[];
       return messages.map(entry=>String(entry.content??'')).find(text=>text.includes('[pi2web collaboration]'));
     });
     expect(prompt).toContain('action: file_findings');

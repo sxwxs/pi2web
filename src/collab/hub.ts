@@ -680,10 +680,7 @@ export class CollabHub {
     }
     if(session.phase==='collecting'){
       const collected=snapshot.completions.some(entry=>entry.phase==='collecting'&&entry.round===session.round&&entry.participantId===participant.participantId);
-      if(collected){
-        if(session.policy.consensusReview&&owedIssueVoteIds(snapshot,participant.participantId).length)return this.issueValidationDigest(session,participant,snapshot,base,true);
-        return this.waitDigest(session,base,'You finished the blind review. End your turn; the hub will prompt you if later findings need a vote or the panel moves on.');
-      }
+      if(collected)return this.crossVoteDigest(session,participant,snapshot,base,'You finished the blind review. End your turn; the hub will prompt you if later findings need a vote or the panel moves on.');
       const own=this.store.listIssues(session.sessionId,{reporterId:participant.participantId,round:session.round});
       const issuesToRecheck=this.store.listIssues(session.sessionId,{status:['confirmed'],reporterId:participant.participantId}).filter(issue=>issue.round<session.round).map(issue=>this.withHistory(issue));
       const required=participant.role==='reviewer',reviewerCount=panel.filter(entry=>entry.role==='reviewer').length;
@@ -693,12 +690,7 @@ export class CollabHub {
           scope:'Review exactly the subject, and when baseline.changedFiles is present, those files. Reporting something outside that scope is what the other reviewers vote down.'},
         instructions:`Review the code at the pinned baseline in ${session.cwd} and report every finding in ONE call to collab_submit_findings; that call closes your blind review and ends your turn, so gather everything first. location.path and evidence are mandatory, and evidence must be something you verified in this checkout. ${issuesToRecheck.length?`Also include one rechecks[] entry (outcome resolved or still_present, with a rationale) for each of the ${issuesToRecheck.length} issuesToRecheck entries. `:''}Rate severity and requiredAction by rules.severity and rules.requiredAction, not by how important the finding feels.`};
     }
-    if(session.phase==='validating'){
-      // Nothing owed means nothing to submit: the typed ballot tool has no empty form, so waking this seat would
-      // only burn a turn and the phase no longer waits for it either (requiredActors).
-      if(!owedIssueVoteIds(snapshot,participant.participantId).length)return this.waitDigest(session,base,'You have voted on every finding that needs your ballot. End your turn; the hub calls you back if later findings need one.');
-      return this.issueValidationDigest(session,participant,snapshot,base,false);
-    }
+    if(session.phase==='validating')return this.crossVoteDigest(session,participant,snapshot,base,'You have voted on every finding that needs your ballot. End your turn; the hub calls you back if later findings need one.');
     if(session.phase==='merge_voting'){
       const proposals=this.store.listMergeProposals(session.sessionId),owed=proposals.filter(proposal=>!proposal.votes.some(vote=>vote.participantId===participant.participantId));
       if(!owed.length)return this.waitDigest(session,base);
@@ -1293,11 +1285,19 @@ export class CollabHub {
     if(current.vcs!==baseline.vcs||current.commit!==baseline.commit||current.dirtyHash!==baseline.dirtyHash)
       throw Object.assign(flowError(COLLAB_ERRORS.staleBaseline,'The workspace changed after this collaboration baseline was captured. Refresh or restart the review against a new baseline.'),{currentBaseline:{...current,round:baseline.round}});
   }
-  private issueValidationDigest(session:CollabSession,participant:Participant,snapshot:ReviewSnapshot,base:Record<string,unknown>,early:boolean){
-    const all=this.store.listIssues(session.sessionId,{status:['open'],round:session.round}),owed=owedIssueVoteIds(snapshot,participant.participantId);
-    return {...base,task:'validate_issues',issues:all.map(issue=>this.withHistory(issue)),yourRequiredIssueIds:owed,currentVotes:currentIssueVotes(snapshot),mergeProposals:this.store.listMergeProposals(session.sessionId),
+  /**
+   * Cross-voting is one task with two entry points: a reviewer that already closed its blind review while the
+   * panel is still `collecting`, and the whole panel in `validating`. Both ask the same question - what do I
+   * still owe a ballot on - so both come through here, and a seat that owes nothing simply waits: the typed
+   * submission tool has no empty ballot, and `requiredActors` does not wait for that seat either.
+   */
+  private crossVoteDigest(session:CollabSession,participant:Participant,snapshot:ReviewSnapshot,base:Record<string,unknown>,idle:string){
+    const owed=owedIssueVoteIds(snapshot,participant.participantId);
+    if(!owed.length)return this.waitDigest(session,base,idle);
+    return {...base,task:'validate_issues',issues:this.store.listIssues(session.sessionId,{status:['open'],round:session.round}).map(issue=>this.withHistory(issue)),
+      yourRequiredIssueIds:owed,currentVotes:currentIssueVotes(snapshot),mergeProposals:this.store.listMergeProposals(session.sessionId),
       rules:{...this.consensusRules(session),severity:SEVERITY_GUIDE},
-      instructions:early
+      instructions:session.phase==='collecting'
         ?'You finished your blind review; other reviewers are still filing. Verify each finding in yourRequiredIssueIds against the code yourself, then call collab_submit_issue_votes once with a vote for every one of them. Voting on the set you were given is enough: the hub calls you again for findings that arrive later. A reject needs a rationale. Do not wait, sleep or poll. Merge proposals wait until every reviewer has filed.'
         :'Every reviewer has finished the blind review. Verify each finding in yourRequiredIssueIds against the code yourself - approve and reject are claims about the code, not impressions - then call collab_submit_issue_votes once with a vote for each. A reject needs a rationale of at least 20 characters. Put findings that are genuinely the same defect into mergeProposals. Fixing is a separate, human-triggered cycle; this review ends at consensus.'};
   }
@@ -1331,9 +1331,7 @@ export class CollabHub {
     if(session.phase==='implementing')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'implement');
     // In build-then-review the implementer is writing code, not filing reverse findings, so it gets no task here.
     if(session.phase==='collecting')for(const participant of participants)if(participant.role!=='moderator'&&!(session.policy.implementationFirst&&participant.role==='implementer'))targets.set(participant.participantId,participant.role==='reviewer'?'file_findings':'file_findings_optional');
-    // A reviewer with nothing owed gets no ballot task: there is no empty submission for it to make, and the
-    // phase does not wait for it.
-    if(session.phase==='validating'){const snapshot=this.snapshot(sessionId);for(const participant of participants)if(participant.role==='reviewer'&&owedIssueVoteIds(snapshot,participant.participantId).length)targets.set(participant.participantId,'validate_issues')}
+    if(session.phase==='validating')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'validate_issues');
     if(session.phase==='merge_voting')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'vote_on_merges');
     if(session.phase==='issue_discussing')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'defend_approved_issues');
     if(session.phase==='issue_reconsidering')for(const participantId of waitingOn(this.snapshot(sessionId)))targets.set(participantId,'reconsider_issue_votes');

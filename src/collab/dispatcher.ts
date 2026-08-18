@@ -111,7 +111,7 @@ export class CollabDispatcher {
       return;
     }
     if(participant.state!=='active')return;                              // left or out of budget: a human has to act
-    if(this.deps.isCollabAgent&&!this.deps.isCollabAgent(agentId)){
+    if(this.deps.isCollabAgent?.(agentId)===false){                     // undefined: the check is not wired up
       this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,agentId,task,reason:'COLLAB_PROFILE_REQUIRED'});
       this.deps.log?.(`Collab dispatch skipped for ${participant.displayName}: the Agent is not profile=collab.`);
       return;
