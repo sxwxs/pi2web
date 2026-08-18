@@ -57,8 +57,21 @@ export const arr=<T>(item:Validator<T>,options:ArrayOptions={}):Validator<T[]>=>
 
 type Shape=Record<string,Validator<any>>;
 type Infer<S extends Shape>={[K in keyof S]:S[K] extends Validator<infer T>?T:never};
-export type ObjectOptions={allowUnknown?:boolean};
-export const obj=<S extends Shape>(shape:S,options:ObjectOptions={}):Validator<Infer<S>>=>({parse(value,ctx){
+/**
+ * A map whose keys are data, not schema - rubric anchors are `{"0":"...","10":"..."}`. `obj()` cannot express
+ * this: it only ever copies the fields its shape declares, so an empty shape silently parses to `{}`.
+ */
+export const record=<T>(value:Validator<T>,limits:{maxKeys?:number,maxKeyLength?:number}={}):Validator<Record<string,T>>=>({parse(input,ctx){
+  if(!input||typeof input!=='object'||Array.isArray(input)){fail(ctx,'NOT_AN_OBJECT','Expected an object','object');return {}}
+  const source=input as Record<string,unknown>,keys=Object.keys(source),result:Record<string,T>={};
+  if(limits.maxKeys!==undefined&&keys.length>limits.maxKeys)fail(ctx,'TOO_LONG',`At most ${limits.maxKeys} entries are accepted`,`<= ${limits.maxKeys} entries`);
+  for(const key of keys){
+    if(limits.maxKeyLength!==undefined&&key.length>limits.maxKeyLength)fail(child(ctx,key),'TOO_LONG',`A key may be at most ${limits.maxKeyLength} characters`);
+    result[key]=value.parse(source[key],child(ctx,key));
+  }
+  return result;
+}});
+export const obj=<S extends Shape>(shape:S):Validator<Infer<S>>=>({parse(value,ctx){
   if(!value||typeof value!=='object'||Array.isArray(value)){fail(ctx,'NOT_AN_OBJECT','Expected an object','object');return {} as Infer<S>}
   const source=value as Record<string,unknown>,result:Record<string,unknown>={};
   for(const [key,validator] of Object.entries(shape)){
@@ -69,7 +82,7 @@ export const obj=<S extends Shape>(shape:S,options:ObjectOptions={}):Validator<I
     }
     result[key]=validator.parse(entry,child(ctx,key));
   }
-  if(!options.allowUnknown)for(const key of Object.keys(source))if(!(key in shape))fail(child(ctx,key),'UNKNOWN_FIELD',`Unknown field. Allowed fields: ${Object.keys(shape).join(', ')}`);
+  for(const key of Object.keys(source))if(!(key in shape))fail(child(ctx,key),'UNKNOWN_FIELD',`Unknown field. Allowed fields: ${Object.keys(shape).join(', ')}`);
   return result as Infer<S>;
 }});
 

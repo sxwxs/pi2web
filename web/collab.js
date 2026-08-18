@@ -8,7 +8,7 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const state = {base: localStorage.rpBase || location.origin, token: localStorage.rpToken || '', connected: false,
     sessions: [], sessionId: new URLSearchParams(location.search).get('session') || '', detail: null, escalations: [],
-    workspaces: [], agents: [], ws: null, reconnectTimer: null, refreshTimer: null, lastToken: null,
+    workspaces: [], agents: [], ws: null, reconnectTimer: null, refreshTimer: null,
     modelCatalogs: new Map(), agentCapabilities: new Map()};
 
   const toast = text => {$('toast').textContent = text; $('toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => $('toast').hidden = true, 4000)};
@@ -99,7 +99,7 @@
     return {session, issues, events, escalations, criteria, consensus, rounds};
   }
   const select = async sessionId => {
-    state.sessionId = sessionId; state.lastToken = null;
+    state.sessionId = sessionId;
     history.replaceState({}, '', `?session=${encodeURIComponent(sessionId)}`);
     const detail = await loadDetail(sessionId).catch(error => {toast(error.message); return null});
     // Selecting A then B must not end up showing A while every action button targets B.
@@ -383,7 +383,6 @@
           <span id="pAgentHint" class="field-help">新 Agent 的名称会根据会话和角色自动生成；模型标注会从实际模型自动填写。</span>
           <button id="participantSubmit" type="submit">新建并加入</button>
         </form>
-        ${state.lastToken ? `<div class="token-box">participantToken（仅供 HTTP 兼容调用；内置协作 Agent 使用进程内工具，不会接触此 token）：<br>${esc(state.lastToken)}</div>` : ''}
       </div>
 
       ${pending.length ? `<div class="card">
@@ -560,7 +559,7 @@
         if (createdAgent) await post(`/api/v1/agents/${createdAgent.agentId}/archive`).catch(() => {});
         throw error;
       }
-      state.agentCapabilities.delete(agentId); state.lastToken = null;
+      state.agentCapabilities.delete(agentId);
       toast(`“${displayName}”已加入；中枢会在有任务时自动唤醒它`);
     });
     for (const button of $('detail').querySelectorAll('.rebind')) button.onclick = guard(async () => {
@@ -583,7 +582,7 @@
       if (!picked) throw Error('序号无效');
       const capabilities = await agentCapabilities(picked.agentId, true), actualModel = modelLabel(capabilities.model);
       await post(`/api/v1/collab/sessions/${sessionId}/participants/${button.dataset.participant}/binding`, {agentId: picked.agentId, ...(actualModel ? {model: actualModel} : {})});
-      state.agentCapabilities.delete(picked.agentId); state.lastToken = null;
+      state.agentCapabilities.delete(picked.agentId);
       toast('已改绑为协作专用 Agent；待办任务会立即推送（旧 token 已失效）');
     });
     for (const button of $('detail').querySelectorAll('.raise-budget')) button.onclick = guard(async () => {

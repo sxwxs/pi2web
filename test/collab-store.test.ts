@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {MetadataStore} from '../src/metadata-store.js';
 import {CollabStore,hashToken,mergePolicy} from '../src/collab/store.js';
-import {arr,bool,num,obj,oneOf,optional,parse,str,ValidationError,withDefault} from '../src/collab/validate.js';
+import {arr,bool,num,obj,oneOf,optional,parse,record,str,ValidationError,withDefault} from '../src/collab/validate.js';
 import {CAPABILITIES,DEFAULT_POLICY,can,COLLAB_ERRORS} from '../src/collab/types.js';
 
 const temp=()=>mkdtemp(path.join(tmpdir(),'collab-'));
@@ -23,6 +23,16 @@ describe('collab validator',()=>{
   it('accepts a valid payload and applies defaults',()=>{
     expect(parse(finding,{title:'Missing signature check',severity:'critical',location:{path:'src/pay.ts',startLine:42}}))
       .toEqual({title:'Missing signature check',severity:'critical',reviewComplete:false,location:{path:'src/pay.ts',startLine:42},tags:[]});
+  });
+
+  it('keeps the keys of a map, which a fixed shape would drop',()=>{
+    const anchors=record(str({min:1,max:400}),{maxKeys:2,maxKeyLength:4});
+    expect(parse(anchors,{'0':'exploitable','10':'tested'})).toEqual({'0':'exploitable','10':'tested'});
+    expect(errorsOf(()=>parse(anchors,{'0':''}))).toMatchObject([{path:'0',code:'TOO_SHORT'}]);
+    expect(errorsOf(()=>parse(anchors,{'0':1}))).toMatchObject([{path:'0',code:'NOT_A_STRING'}]);
+    expect(errorsOf(()=>parse(anchors,{'longer-than-four':'x'}))).toMatchObject([{path:'longer-than-four',code:'TOO_LONG'}]);
+    expect(errorsOf(()=>parse(anchors,{a:'1',b:'2',c:'3'}))).toMatchObject([{code:'TOO_LONG'}]);
+    expect(errorsOf(()=>parse(anchors,[]))).toMatchObject([{code:'NOT_AN_OBJECT'}]);
   });
 
   it('reports every field error at once with a machine-readable path and code',()=>{

@@ -1,5 +1,5 @@
 import {CATEGORIES,DEBATE_STANCES,ESCALATION_KINDS,REGISTRABLE_ROLES,REQUIRED_ACTIONS,SEVERITIES,VOTE_STANCES} from './types.js';
-import {anyJson,arr,bool,num,obj,oneOf,optional,refine,str,withDefault,type FieldError,type Validator} from './validate.js';
+import {anyJson,arr,bool,num,obj,oneOf,optional,record,refine,str,withDefault,type FieldError,type Validator} from './validate.js';
 
 /**
  * Request schemas for every collaboration endpoint. They are deliberately strict:
@@ -185,7 +185,7 @@ export const nominationsRequest=obj({
     name:str({min:2,max:80}),
     definition:str({min:20,max:2000}),
     weightSuggestion:optional(num({min:0,max:1})),
-    anchors:optional(obj({},{allowUnknown:true})),
+    anchors:optional(record(str({min:1,max:400}),{maxKeys:20,maxKeyLength:40})),
     rationale:optional(str({max:2000}))
   }),{max:20}),
   nominationsComplete:withDefault(bool(),()=>false),
