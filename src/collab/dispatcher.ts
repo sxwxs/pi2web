@@ -6,7 +6,8 @@ import type {CollabEvent,CollabSession,Participant} from './types.js';
  * hub pushes the task into its conversation via AgentManager.command(). This is the only delivery path.
  *
  * The wake-up message only tells the Pi extension to fetch its task. The extension owns transport and
- * submission details; every rule (baseline, evidence, phase) is enforced by the hub.
+ * submission details; every rule (baseline, evidence, phase) is enforced by the hub. No credential is
+ * carried by, or stored for, a wake-up: the extension submits through the in-process bridge.
  */
 export type DispatchDeps={
   command:(agentId:string,kind:'prompt'|'follow-up',message:string)=>Promise<unknown>,
@@ -56,8 +57,8 @@ export class CollabDispatcher {
           const last=pending[pending.length-1];
           // A finished session only ever has one deliverable left: its closing note.
           if(!last||(session.status!=='active'&&last.type!=='session_result'))continue;
-          // Past the retry window nobody is waiting any more: stop re-trying and stop holding the credential.
-          if(stale){this.hub.completeDelivery(participant.participantId,'session_result');this.hub.retireDispatchToken(participant.participantId);continue}
+          // Past the retry window nobody is waiting any more: stop re-trying.
+          if(stale){this.hub.completeDelivery(participant.participantId,'session_result');continue}
           this.schedule(session.sessionId,participant.participantId,last.type);
         }
       }
@@ -145,12 +146,12 @@ export class CollabDispatcher {
       this.hub.logDispatch(sessionId,'agent_dispatched',{participantId,agentId,task,kind,phase:session.phase,round:session.round});
       // Normal work is acknowledged by collab_get_task, not here: followUp() returning means queued, not run.
       // A closing note has no tool collection step, so successful completion remains its acknowledgement.
-      if(terminal){this.hub.completeDelivery(participantId,task);this.delivered.delete(participantId);this.hub.retireDispatchToken(participantId)}
+      if(terminal){this.hub.completeDelivery(participantId,task);this.delivered.delete(participantId)}
     }catch(error){
       this.hub.logDispatch(sessionId,'dispatch_failed',{participantId,agentId,task,reason:(error as Error).message});
       this.deps.log?.(`Collab dispatch to agent ${agentId} failed: ${(error as Error).message}`);
-      // The note did NOT arrive, so the item stays unacked and the credential stays: a restart retries it
-      // inside CLOSING_NOTE_RETRY_WINDOW_MS. Retiring the token here is what used to make that retry impossible.
+      // The note did NOT arrive, so the item stays unacked: a restart retries it inside
+      // CLOSING_NOTE_RETRY_WINDOW_MS.
     }
   }
 }

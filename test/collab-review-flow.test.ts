@@ -45,7 +45,17 @@ describe('review flow without a response phase',()=>{
   it('validates only new findings from the current recheck round',()=>{
     const old=issue({issueId:'old',status:'confirmed',round:1}),fresh=issue({issueId:'fresh',round:2});
     const state=snapshot({phase:'validating',round:2,policy:policy({consensusReview:true}),issues:[old,fresh]});
-    expect(requiredActors(state)).toEqual(['r1','r2']);
+    // r1 reported the only current finding, so it owes no ballot and the phase does not wait for it.
+    expect(requiredActors(state)).toEqual(['r2']);
+  });
+
+  it('does not wait for a reviewer that owes no ballot at all',()=>{
+    // One reviewer, one finding of its own: there is nothing to cross-vote, and an empty ballot is not a thing
+    // the typed agent tools can submit, so validation must simply not be required here.
+    const solo=snapshot({phase:'validating',policy:policy({consensusReview:true}),participants:[reviewer('r1'),implementer()],issues:[issue()]});
+    expect(requiredActors(solo)).toEqual([]);
+    expect(waitingOn(solo)).toEqual([]);
+    expect(nextPhase({...solo,phase:'consolidating'})).toMatchObject({phase:'finished',reason:'review_consensus_complete'});
   });
 
   it('uses discussion and reconsideration only for a contested current finding',()=>{

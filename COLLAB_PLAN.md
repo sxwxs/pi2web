@@ -10,7 +10,7 @@
 >
 > 实现补记：支持 **build-then-review**（`policy.implementationFirst`）——首次会话可先进入 `implementing` 阶段，由唯一的开发 Agent 施工；只有显式 `POST /sessions/{id}/ready` 才触发中枢召集 Reviewer。`agent_settled` 不再等同于完成，避免失败或漏交被误判为可评审。
 >
-> 实现补记：participantToken 的 HTTP 兼容路径仍保留 `collab_participants.dispatch_token` 明文副本；内置 Pi 扩展改走进程内 bridge，不把 URL、token 或内部 ID 放进模型上下文。会话结束后中枢丢弃明文副本。
+> 实现补记：participantToken 只存 hash，明文仅在登记/改绑/复核重开的响应里出现一次（`collab_participants.dispatch_token` 明文列已删除并在迁移时清空）；内置 Pi 扩展走进程内 bridge，按 `agentId` 认领任务，不把 URL、token 或内部 ID 放进模型上下文。
 >
 > 实现补记：中枢**全程推送**。唤醒消息只要求先调用 `collab_get_task`；扩展按任务激活一个强类型提交工具，并在 Agent 实际领取后才确认持久化队列。Review/Scoring 禁用直接 edit/write，只有 implement 可写；会话结束仍发送 `session_result`。
 >

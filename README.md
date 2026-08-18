@@ -171,13 +171,13 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 两个场景：
 
 - **Review Loop**（`kind:"review"`）：盲审提 Issue → 全体交叉投票 / 重复项合并投票 → 分轮讨论收敛 → 直接输出报告。确认的问题成为 `confirmed` Action Items；人可从 finished 状态直接复核，或指定开发 Agent 先修复再由原 Reviewer 复核。Web 看板新建的 Review 默认开启 `policy.consensusReview:true`；首次流程可选**先开发后评审**（`policy.implementationFirst:true`）。
-- **Panel Scoring**（`kind:"scoring"`）：盲提名维度 → 确定性重复项归并 → 投票锁 rubric → 盲打分 → 辩论与争议维度复评分 → 出分。下一轮会带回上一轮 tally/amendment；rubric、分数分布和辩论上下文通过强类型工具完整交给 Agent。
+- **Panel Scoring**（`kind:"scoring"`）：盲提名维度 → 确定性重复项归并 → 投票锁 rubric → 盲打分 → 辩论与争议维度复评分 → 出分。下一轮会带回上一轮 tally/amendment；rubric、分数分布和辩论上下文通过强类型工具完整交给 Agent。投票时 **reject 必须带理由，否则整批 422、一票不写**（旧行为是在 200 里把这一票标成 rejected，而 Agent 的回合已经结束，面板会永远等它）。
 
 两种凭证：**配对码**代表人，可以建会话、登记参与者、强制推进、裁定升级；**participantToken** 代表一个 Agent，只能操作自己所在的会话。会话和参与者只能由人创建，Agent 无法自助加入。
 
 参与者通常只在 `draft` / `implementing` / `collecting`——scoring 会话则是 `nominating`——阶段登记，中枢会当场派发当前任务。Review finished 后还允许追加 `implementer`，为下一次“修复后复核”做准备；Reviewer Panel 保持不变。`role` 只能是 `implementer` / `reviewer`，人使用配对码而不是参与者席位。
 
-每个座位都绑定一个**本机 pi2web Agent**（`agentId` 必填）；同一个协作 Agent 在任意时刻只能占一个 active seat，避免进程内工具无法确定它代表哪个会话。每个 implementation wave 也只允许一个 implementer，因为所有 Agent 仍共享同一工作区。轮到它干活时，中枢直接 prompt（忙碌时用 follow-up 排队）。任务会一直保留在持久化队列中，直到 Agent 真正调用 `collab_get_task` 领取，而不是在 follow-up 刚入队时就当成已送达。
+每个座位都绑定一个**本机 pi2web Agent**（`agentId` 必填，且必须是一个已存在的 `profile=collab` Agent——中枢唤不醒的座位只会卡住整个阶段，因此登记/改绑时直接 403）；同一个协作 Agent 在任意时刻只能占一个 active seat，避免进程内工具无法确定它代表哪个会话。每个 implementation wave 也只允许一个 implementer，因为所有 Agent 仍共享同一工作区。轮到它干活时，中枢直接 prompt（忙碌时用 follow-up 排队）。任务会一直保留在持久化队列中，直到 Agent 真正调用 `collab_get_task` 领取，而不是在 follow-up 刚入队时就当成已送达。
 
 协作座位要用**协作 Agent**：`POST /api/v1/agents -d '{...,"profile":"collab"}'`（看板新建 Agent 时自动带上）。它先调用 `collab_get_task`，扩展再按当前任务只激活一个强类型提交工具，例如 `collab_submit_findings`、`collab_submit_votes` 或 `collab_submit_scores`。工具在进程内直连中枢，自动补全 baseline 与幂等键，模型上下文里不会出现 URL、令牌或内部 ID；Review/Scoring 任务会禁用 `edit`/`write`，只有 `implement` 任务可以修改文件。`profile` 缺省是 `default`，普通 Agent 不受影响。
 
@@ -185,7 +185,7 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 **中枢是推送式的**：任何一方交完自己的活就应当结束回合，绝不要 sleep 轮询。正常 Review 不会回头要求开发方逐条回应；会话结束时中枢推送 `session_result`。人启动 `fix_then_review` 后，中枢才把全部 confirmed Action Items 推给选定开发 Agent；开发 `/ready` 后再主动唤醒原 Reviewer。
 
-> 兼容提示：座位的 participantToken 仍以明文存在 `remote-pi.db`（0600），供 HTTP 兼容接口和恢复流程使用；内置 Pi 协作扩展走进程内 bridge，不会把 token 写进模型上下文或 Agent 会话。会话结束后中枢丢弃自己保管的副本。
+> 凭证说明：participantToken 只以 SHA-256 hash 存储，明文只在登记（`/participants`）、改绑（`/binding`）和复核重开（`/recheck` 返回的 `participantTokens`）的响应里出现一次，数据库里没有任何明文副本。内置 Pi 协作扩展根本不使用它：它走进程内 bridge，按 `agentId` 认领任务，token 不会进入模型上下文或 Agent 会话。
 
 最小流程（review）：
 
@@ -212,7 +212,7 @@ finished ── recheck(fix_then_review) ──▶ implementing ──POST /read
 - `collecting` 是盲审。每个 Reviewer 必须提交 `reviewComplete=true`；新 Finding 强制带 `location.path`、evidence 和当前 baselineId。
 - 共识阶段中，每个 Reviewer 对本轮其他人的新 Finding 投 approve/reject，可提出重复项合并；合并必须全票通过。争议经过 `issue_discussing ↔ issue_reconsidering` 收敛。**争议的终局不再一律甩给人**：讨论结束（用满 `maxConsensusRounds`，或某条 Finding 的票型连续两轮完全没变而提前判定“已经吵不动了”）后，中枢按严重度裁决——除报告人外全员 reject 的问题直接 `wontfix`（`blocker`/`critical` 除外）、panel 分裂的 `major` 及以上升级人工、`minor`/`nit` 按多数决，平票保留。只有真正需要判断的分歧才进人工队列。
 - 报告人随时可以撤回自己不再坚持的 Finding：`collab_withdraw_issue`，或在 `collab_submit_issue_discussions` 的 `withdrawals[]` 里和其余答辩一次提交（提交工具会结束回合，所以两者必须同一次调用）。撤回是正常动作，不是失败。
-- Reviewer 的投票允许**分批**：只投当前工单列出的那些 Finding 即可，别人后来才提交的 Finding 会由中枢重新派工单回来，不会因为“集合在你读代码时变大了”而整批 422。
+- Reviewer 的投票允许**分批**：只投当前工单列出的那些 Finding 即可，别人后来才提交的 Finding 会由中枢重新派工单回来，不会因为“集合在你读代码时变大了”而整批 422。反过来，**没有任何可投票的 Finding 时，这个座位不会被派工单，阶段也不会等它**（单 Reviewer 会话，或它欠的 Finding 都被撤回/合并了）——强类型提交工具没有“空票”这种提交。
 - 共识完成后直接 `finished`。有效 Finding 从临时 `open` 转成 `confirmed`，不会触发开发方回应；报告结论为 `approved`、`follow_up_required` 或 `changes_required`。
 - finished 看板提供两个入口：**复核当前代码**调用 `POST /recheck {"mode":"review_only"}`；**推进到修复 → 复核**先选择一个已存在或新添加的 implementer，再调用 `POST /recheck {"mode":"fix_then_review","implementerParticipantIds":[...]}`。
 - 修复 Agent 收到全部 confirmed Action Items，完成后统一 `/ready`。原 Reviewer 在新 baseline 上收到 `issuesToRecheck`，并在 `/findings` 中提交 `rechecks:[{"issueId":"...","outcome":"resolved|still_present","rationale":"..."}]`；同时仍可发现新的 Finding。
@@ -239,7 +239,7 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET /api/v1/sessions`
 - `GET/POST /api/v1/agents`（创建时可带 `profile`：`default`（默认）或 `collab`；`collab` 会加载协作工具，供协作看板占座使用）
 - `GET/DELETE /api/v1/agents/:id`
-- `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/recheck`（**仅人**）、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/issue-votes`、`/merge-votes`、`/issue-discussions`、`/review-consensus`、`/review-rounds`（**仅人**）、`/retry-waiting`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
+- `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/recheck`（**仅人**，重开时轮换每个座位的 token 并在响应 `participantTokens` 里返回一次）、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/issue-votes`、`/merge-votes`、`/issue-discussions`、`/review-consensus`、`/review-rounds`（**仅人**）、`/retry-waiting`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
 - `GET /api/v1/collab/escalations`、`POST /api/v1/collab/escalations/:id/resolve`
 - `GET/POST /api/v1/terminals`
 - `GET/DELETE /api/v1/terminals/:id`

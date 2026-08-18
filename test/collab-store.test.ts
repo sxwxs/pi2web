@@ -225,6 +225,40 @@ describe('collab store',()=>{
     metadata=new MetadataStore(dir);metadata.init();
   });
 
+  it('stores only the hash of a seat token and drops a legacy plaintext column',()=>{
+    const session=newSession();
+    const {participant,token}=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',agentId:'agent-1',tokenBudget:1000});
+    const columns=(metadata.connection.prepare('PRAGMA table_info(collab_participants)').all() as {name:string}[]).map(column=>column.name);
+    expect(columns).not.toContain('dispatch_token');
+    const row=metadata.connection.prepare('SELECT * FROM collab_participants WHERE id=?').get(participant.participantId) as Record<string,unknown>;
+    expect(Object.values(row)).not.toContain(token);
+    expect(row.token_hash).toBe(hashToken(token));
+    expect(store.findParticipantByToken(token)?.participantId).toBe(participant.participantId);
+    // Rotating (recheck) and rebinding must not write the new plaintext anywhere either.
+    const rotated=store.rotateParticipantToken(participant.participantId);
+    const rebound=store.rebindParticipant(participant.participantId,'agent-2');
+    const after=metadata.connection.prepare('SELECT * FROM collab_participants WHERE id=?').get(participant.participantId) as Record<string,unknown>;
+    expect(Object.values(after)).not.toContain(rotated);
+    expect(Object.values(after)).not.toContain(rebound.token);
+    expect(store.findParticipantByToken(rebound.token)?.agentId).toBe('agent-2');
+  });
+
+  it('wipes a legacy plaintext token column on the next start',()=>{
+    const session=newSession();
+    const {participant,token}=store.createParticipant({sessionId:session.sessionId,role:'reviewer',displayName:'r1',agentId:'agent-1',tokenBudget:1000});
+    // Simulate a database written by the version that kept the seat's bearer token in clear text.
+    metadata.connection.exec('ALTER TABLE collab_participants ADD COLUMN dispatch_token TEXT');
+    metadata.connection.prepare('UPDATE collab_participants SET dispatch_token=? WHERE id=?').run(token,participant.participantId);
+
+    store.init();
+
+    const columns=(metadata.connection.prepare('PRAGMA table_info(collab_participants)').all() as {name:string}[]).map(column=>column.name);
+    const row=metadata.connection.prepare('SELECT * FROM collab_participants WHERE id=?').get(participant.participantId) as Record<string,unknown>;
+    expect(columns.includes('dispatch_token')?row.dispatch_token:undefined).toBeFalsy();   // dropped, or at least emptied
+    expect(Object.values(row)).not.toContain(token);
+    expect(store.findParticipantByToken(token)?.participantId).toBe(participant.participantId);
+  });
+
   it('keeps mergePolicy pure so defaults are never mutated',()=>{
     const merged=mergePolicy({maxTotalRounds:9,scoring:{scale:{min:0,max:100,step:1}} as any});
     expect(merged.maxTotalRounds).toBe(9);

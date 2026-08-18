@@ -4,6 +4,8 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {RemotePiServer} from '../src/server.js';
+import {WorkspaceStore} from '../src/workspaces.js';
+import {AgentManager,MockBackend} from '../src/agents.js';
 
 let server:RemotePiServer|undefined;
 afterEach(async()=>{await server?.stop();server=undefined});
@@ -11,20 +13,24 @@ const rid=()=>`req-${randomUUID()}`;
 
 async function boot(){
   const dataDir=await mkdtemp(path.join(tmpdir(),'remote-pi-consensus-')),root=await mkdtemp(path.join(tmpdir(),'consensus-workspace-'));
-  server=new RemotePiServer({port:0,dataDir});const auth=await server.auth.init(),address=await server.start();
+  const workspaces=new WorkspaceStore(),agents=new AgentManager(workspaces,(id,cwd,sessionFile)=>new MockBackend(id,cwd,sessionFile));
+  server=new RemotePiServer({port:0,dataDir,workspaces,agents});const auth=await server.auth.init(),address=await server.start();
   const base=`http://127.0.0.1:${address!.port}`,headers={authorization:`Bearer ${auth.token}`,'content-type':'application/json'};
   const call=async(method:string,url:string,body?:unknown,token?:string)=>{const response=await fetch(base+url,{method,headers:{...headers,...(token?{authorization:`Bearer ${token}`}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});const payload=await response.json();return {status:response.status,data:payload.data,error:payload.error}};
-  const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;return {call,workspace};
+  const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
+  // A seat is only accepted for a real collaboration Agent, so every reviewer here gets its own.
+  const collabAgent=async()=>(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data.agentId;
+  return {call,workspace,collabAgent};
 }
 const finding=(title:string,line:number)=>({title,severity:'major',category:'correctness',location:{path:'src/example.ts',startLine:line},evidence:`The implementation at line ${line} demonstrably violates the required behavior.`,suggestion:'Correct the implementation and add a regression test.'});
 
 describe('review consensus over HTTP',()=>{
   it('batches issue validation, unanimously votes on duplicate merges, debates rejects, and then finishes',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const created=await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Consensus review',workspaceId:workspace.id,subject:{type:'free',value:'current branch'},policy:{consensusReview:true,maxConsensusRounds:2}});
     const sessionId=created.data.sessionId,tokens:Record<string,string>={},participantIds:Record<string,string>={};
-    for(const name of ['A','B','C','D','E']){const seat=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:name,agentId:`agent-${name}`})).data;tokens[name]=seat.participantToken;participantIds[name]=seat.participant.participantId}
-    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'developer',agentId:'agent-dev'})).data;
+    for(const name of ['A','B','C','D','E']){const seat=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:name,agentId:await collabAgent()})).data;tokens[name]=seat.participantToken;participantIds[name]=seat.participant.participantId}
+    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'developer',agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,tokens.A)).data.baseline.baselineId;
     const submitFinding=async(name:string,findings:any[])=>call('POST',`/api/v1/collab/sessions/${sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings,reviewComplete:true},tokens[name]);
@@ -68,11 +74,11 @@ describe('review consensus over HTTP',()=>{
   });
 
   it('stops debating an unmoved vote early and escalates the split panel to a human',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Consensus deadlock',workspaceId:workspace.id,subject:{type:'free',value:'current branch'},policy:{consensusReview:true,maxConsensusRounds:3}})).data;
-    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:'agent-A'})).data;
-    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:'agent-B'})).data;
-    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:'agent-dev'});
+    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:await collabAgent()})).data;
+    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:await collabAgent()})).data;
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:await collabAgent()});
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,a.participantToken)).data.baseline.baselineId;
     const issueId=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[finding('A disputed but concrete correctness issue',40)],reviewComplete:true},a.participantToken)).data.accepted[0].issueId;
@@ -97,10 +103,10 @@ describe('review consensus over HTTP',()=>{
   });
 
   it('drops a finding every other reviewer rejected instead of handing the dispute to a human',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Panel rejection',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true,maxConsensusRounds:2}})).data;
     const seats:Record<string,any>={};
-    for(const name of ['A','B','C'])seats[name]=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:name,agentId:`agent-${name}`})).data;
+    for(const name of ['A','B','C'])seats[name]=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:name,agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,seats.A.participantToken)).data.baseline.baselineId;
     const issueId=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[finding('A finding the rest of the panel rejects',12)],reviewComplete:true},seats.A.participantToken)).data.accepted[0].issueId;
@@ -121,10 +127,10 @@ describe('review consensus over HTTP',()=>{
   });
 
   it('lets the reporter withdraw a finding inside the same call that defends the rest',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Withdrawal',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true,maxConsensusRounds:3}})).data;
-    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:'agent-A'})).data;
-    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:'agent-B'})).data;
+    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:await collabAgent()})).data;
+    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,a.participantToken)).data.baseline.baselineId;
     const filed=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,
@@ -149,10 +155,10 @@ describe('review consensus over HTTP',()=>{
   });
 
   it('treats a finding the reporter already withdrew standalone as a no-op inside the batch',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Repeated withdrawal',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true,maxConsensusRounds:3}})).data;
-    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:'agent-A'})).data;
-    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:'agent-B'})).data;
+    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:await collabAgent()})).data;
+    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,a.participantToken)).data.baseline.baselineId;
     const filed=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,
@@ -175,10 +181,10 @@ describe('review consensus over HTTP',()=>{
   });
 
   it('drops a finding that went stale between the wake-up and the ballot instead of failing the batch',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Stale ballot',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true,maxConsensusRounds:3}})).data;
     const seats:Record<string,any>={};
-    for(const name of ['A','B','C'])seats[name]=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:name,agentId:`agent-${name}`})).data;
+    for(const name of ['A','B','C'])seats[name]=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:name,agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,seats.A.participantToken)).data.baseline.baselineId;
     const filed=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,
@@ -207,11 +213,11 @@ describe('review consensus over HTTP',()=>{
   });
 
   it('rejects a withdrawal of somebody else\'s finding',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Withdrawal guard',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true,maxConsensusRounds:3}})).data;
-    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:'agent-A'})).data;
-    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:'agent-B'})).data;
-    const c=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'C',agentId:'agent-C'})).data;
+    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:await collabAgent()})).data;
+    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:await collabAgent()})).data;
+    const c=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'C',agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,a.participantToken)).data.baseline.baselineId;
     const issueId=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[finding('A finding only its reporter may withdraw',33)],reviewComplete:true},a.participantToken)).data.accepted[0].issueId;
@@ -226,10 +232,10 @@ describe('review consensus over HTTP',()=>{
   });
 
   it('accepts the ballot a reviewer was shown and calls it back for findings that arrived later',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Late findings',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true}})).data;
     const seats:Record<string,any>={};
-    for(const name of ['A','B','C'])seats[name]=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:name,agentId:`agent-${name}`})).data;
+    for(const name of ['A','B','C'])seats[name]=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:name,agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,seats.A.participantToken)).data.baseline.baselineId;
     const file=async(name:string,findings:any[])=>(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings,reviewComplete:true},seats[name].participantToken)).data.accepted.map((entry:any)=>entry.issueId);
@@ -250,11 +256,11 @@ describe('review consensus over HTTP',()=>{
   });
 
   it('lets any reviewer request human judgment during consensus instead of waiting three rounds',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Early human review',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true,maxConsensusRounds:3}})).data;
-    const reporter=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'reporter',agentId:'agent-reporter'})).data;
-    const dissenter=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'dissenter',agentId:'agent-dissenter'})).data;
-    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:'agent-dev'});await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
+    const reporter=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'reporter',agentId:await collabAgent()})).data;
+    const dissenter=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'dissenter',agentId:await collabAgent()})).data;
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:await collabAgent()});await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,reporter.participantToken)).data.baseline.baselineId;
     const issueId=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[finding('Issue needing early human expertise',55)],reviewComplete:true},reporter.participantToken)).data.accepted[0].issueId;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[],reviewComplete:true},dissenter.participantToken);
@@ -265,11 +271,11 @@ describe('review consensus over HTTP',()=>{
   });
 
   it('lets finished collectors cross-vote while a slower reviewer is still filing',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Overlap votes',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true}})).data;
-    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:'agent-A'})).data;
-    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:'agent-B'})).data;
-    const c=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'C',agentId:'agent-C'})).data;
+    const a=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'A',agentId:await collabAgent()})).data;
+    const b=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'B',agentId:await collabAgent()})).data;
+    const c=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'C',agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
     const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,a.participantToken)).data.baseline.baselineId;
     const one=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[finding('First collector correctness issue',10)],reviewComplete:true},a.participantToken)).data.accepted[0].issueId;
@@ -290,5 +296,20 @@ describe('review consensus over HTTP',()=>{
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/issue-votes`,{clientRequestId:rid(),votes:[],complete:true},a.participantToken);
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/issue-votes`,{clientRequestId:rid(),votes:[],complete:true},b.participantToken);
     expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data).toMatchObject({phase:'finished',status:'finished'});
+  });
+
+  it('never asks a reviewer for a ballot it does not owe',async()=>{
+    const {call,workspace,collabAgent}=await boot();
+    const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Nothing to cross-vote',workspaceId:workspace.id,subject:{type:'free',value:'branch'},policy:{consensusReview:true}})).data;
+    const solo=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'solo',agentId:await collabAgent()})).data;
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
+    const baseline=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,solo.participantToken)).data.baseline.baselineId;
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:baseline,findings:[finding('The only finding, filed by the only reviewer',14)],reviewComplete:true},solo.participantToken);
+
+    // The single reviewer cannot vote on its own finding. Parking in `validating` for a ballot that does not
+    // exist deadlocked the session, because the typed agent tools have no empty submission.
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data).toMatchObject({phase:'finished',status:'finished'});
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,solo.participantToken)).data.task).toBe('wait');
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}/events?tail=200`)).data.filter((event:any)=>event.type==='task_assigned'&&String(event.payload.task).startsWith('validate_issues'))).toHaveLength(0);
   });
 });

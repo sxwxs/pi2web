@@ -5,6 +5,8 @@ import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {WebSocket} from 'ws';
 import {RemotePiServer} from '../src/server.js';
+import {WorkspaceStore} from '../src/workspaces.js';
+import {AgentManager,MockBackend} from '../src/agents.js';
 
 let server:RemotePiServer|undefined;
 afterEach(async()=>{await server?.stop();server=undefined});
@@ -16,7 +18,8 @@ type Client={call:(method:string,url:string,body?:unknown,token?:string)=>Promis
 
 async function boot(){
   const dataDir=await temp('remote-pi-collab-'),root=await temp('collab-workspace-');
-  server=new RemotePiServer({port:0,dataDir});
+  const workspaces=new WorkspaceStore(),agents=new AgentManager(workspaces,(id,cwd,sessionFile)=>new MockBackend(id,cwd,sessionFile));
+  server=new RemotePiServer({port:0,dataDir,workspaces,agents});
   const auth=await server.auth.init(),address=await server.start();
   const base=`http://127.0.0.1:${address!.port}`,human=auth.token!;
   const call:Client['call']=async(method,url,body,token=human)=>{
@@ -25,7 +28,9 @@ async function boot(){
     return {status:response.status,data:payload.data,error:payload.error};
   };
   const workspace=(await call('POST','/api/v1/workspaces',{label:'w',rootPath:root})).data;
-  return {base,human,call,workspace,root};
+  // Every seat must name a real, dedicated collaboration Agent: the hub can only wake one it can resolve.
+  const collabAgent=async()=>(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data.agentId;
+  return {base,human,call,workspace,root,collabAgent};
 }
 
 const finding=(overrides:Record<string,unknown>={})=>({title:'Callback signature is never verified',severity:'critical',category:'security',
@@ -34,13 +39,13 @@ const finding=(overrides:Record<string,unknown>={})=>({title:'Callback signature
 
 describe('collaboration HTTP API',()=>{
   it('runs a full review loop over HTTP and closes the session',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const created=await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Payment callback review',workspaceId:workspace.id,subject:{type:'commit_range',value:'HEAD~1..HEAD'}});
     expect(created.status).toBe(201);
     const sessionId=created.data.sessionId;
 
-    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-security',agentId:'agent-reviewer-security'})).data;
-    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'implementer',agentId:'agent-implementer'})).data;
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-security',agentId:await collabAgent()})).data;
+    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'implementer',agentId:await collabAgent()})).data;
     expect(reviewer.participantToken).toMatch(/^cpt_/);
     expect(reviewer.briefing).toMatchObject({task:expect.any(String)});
 
@@ -62,10 +67,10 @@ describe('collaboration HTTP API',()=>{
   });
 
   it('rejects a malformed submission with per-field codes an agent can act on',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Review',workspaceId:workspace.id,subject:{type:'free',value:'everything'}})).data.sessionId;
-    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:'agent-r1'})).data;
-    await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:await collabAgent()})).data;
+    await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:await collabAgent()});
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
     const baselineId=(await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,reviewer.participantToken)).data.baseline.baselineId;
 
@@ -86,14 +91,14 @@ describe('collaboration HTTP API',()=>{
   });
 
   it('keeps human-only endpoints closed to participant tokens and scopes tokens to their session',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const first=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'First review',workspaceId:workspace.id,subject:{type:'free',value:'a'}})).data;
     const second=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Second review',workspaceId:workspace.id,subject:{type:'free',value:'b'}})).data;
-    const reviewer=(await call('POST',`/api/v1/collab/sessions/${first.sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:'agent-r1'})).data;
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${first.sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:await collabAgent()})).data;
     const token=reviewer.participantToken;
 
     expect((await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Agent made this',workspaceId:workspace.id,subject:{type:'free',value:'x'}},token)).status).toBe(403);
-    expect((await call('POST',`/api/v1/collab/sessions/${first.sessionId}/participants`,{role:'reviewer',displayName:'r2',agentId:'agent-r2'},token)).status).toBe(403);
+    expect((await call('POST',`/api/v1/collab/sessions/${first.sessionId}/participants`,{role:'reviewer',displayName:'r2',agentId:await collabAgent()},token)).status).toBe(403);
     expect((await call('POST',`/api/v1/collab/sessions/${first.sessionId}/advance`,{force:true,reason:'because I said so'},token)).status).toBe(403);
     expect((await call('POST',`/api/v1/collab/sessions/${first.sessionId}/recheck`,{mode:'review_only'},token)).status).toBe(403);
     expect((await call('GET','/api/v1/collab/escalations',undefined,token)).status).toBe(403);
@@ -108,19 +113,21 @@ describe('collaboration HTTP API',()=>{
   });
 
   it('routes a dispute to a human queue and applies the ruling',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Disputed review',workspaceId:workspace.id,subject:{type:'free',value:'a'},policy:{consensusReview:true}})).data.sessionId;
-    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:'agent-r1'})).data;
-    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:'agent-impl'})).data;
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:await collabAgent()})).data;
+    const second=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r2',agentId:await collabAgent()})).data;
+    const implementer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
     const baselineId=(await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,reviewer.participantToken)).data.baseline.baselineId;
     const issueId=(await call('POST',`/api/v1/collab/sessions/${sessionId}/findings`,{clientRequestId:rid(),baselineId,findings:[finding()],reviewComplete:true},reviewer.participantToken)).data.accepted[0].issueId;
+    await call('POST',`/api/v1/collab/sessions/${sessionId}/findings`,{clientRequestId:rid(),baselineId,findings:[],reviewComplete:true},second.participantToken);
 
     const escalated=await call('POST',`/api/v1/collab/sessions/${sessionId}/escalations`,{clientRequestId:rid(),kind:'issue_dispute',refId:issueId,
       summary:'We disagree about whether this callback path is reachable in production at all.',question:'Is the path reachable?',options:['yes','no'],urgency:'high'},implementer.participantToken);
     expect(escalated.status).toBe(202);
-    // The reviewer completes the now-empty validation batch; the pending dispute then parks on a human.
-    await call('POST',`/api/v1/collab/sessions/${sessionId}/issue-votes`,{clientRequestId:rid(),votes:[],complete:true},reviewer.participantToken);
+    // The second reviewer casts the ballot it owes; the pending dispute then parks the panel on a human.
+    await call('POST',`/api/v1/collab/sessions/${sessionId}/issue-votes`,{clientRequestId:rid(),votes:[{issueId,stance:'approve'}],complete:true},second.participantToken);
     expect((await call('GET',`/api/v1/collab/sessions/${sessionId}`)).data.phase).toBe('awaiting_human');
 
     const pending=(await call('GET','/api/v1/collab/escalations?status=pending')).data;
@@ -132,7 +139,7 @@ describe('collaboration HTTP API',()=>{
   });
 
   it('replays an idempotent submission and streams collaboration events over the WebSocket',async()=>{
-    const {base,human,call,workspace}=await boot();
+    const {base,human,call,workspace,collabAgent}=await boot();
     const socket=new WebSocket(`ws://127.0.0.1:${new URL(base).port}/api/v1/ws`,[`access-token.${human}`]);
     const messages:any[]=[];
     await new Promise<void>((resolve,reject)=>{socket.once('open',()=>resolve());socket.once('error',reject)});
@@ -141,8 +148,8 @@ describe('collaboration HTTP API',()=>{
     await new Promise(resolve=>setTimeout(resolve,50));
 
     const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Streamed review',workspaceId:workspace.id,subject:{type:'free',value:'a'}})).data.sessionId;
-    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:'agent-r1'})).data;
-    await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:'agent-impl'});
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:await collabAgent()})).data;
+    await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:await collabAgent()});
     await call('POST',`/api/v1/collab/sessions/${sessionId}/advance`,{});
     const baselineId=(await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,reviewer.participantToken)).data.baseline.baselineId;
 
@@ -162,9 +169,9 @@ describe('collaboration HTTP API',()=>{
   });
 
   it('routes the participant sub-resources over HTTP instead of swallowing them into registration',async()=>{
-    const {call,workspace}=await boot();
+    const {call,workspace,collabAgent}=await boot();
     const sessionId=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Repair paths',workspaceId:workspace.id,subject:{type:'free',value:'a'}})).data.sessionId;
-    const seat=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:'agent-r1',tokenBudget:1000})).data;
+    const seat=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:await collabAgent(),tokenBudget:1000})).data;
     const participantId=seat.participant.participantId;
 
     // These two are the documented repair paths for a stuck seat. They used to answer
@@ -172,18 +179,23 @@ describe('collaboration HTTP API',()=>{
     const budget=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/budget`,{tokenBudget:900_000});
     expect(budget.status).toBe(200);
     expect(budget.data).toMatchObject({participantId,tokenBudget:900_000});
-    const rebound=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/binding`,{agentId:'agent-r1-replacement',model:'anthropic/claude-sonnet-4'});
+    const replacement=await collabAgent();
+    const rebound=await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/binding`,{agentId:replacement,model:'anthropic/claude-sonnet-4'});
     expect(rebound.status).toBe(200);
-    expect(rebound.data.participant).toMatchObject({agentId:'agent-r1-replacement',model:'anthropic/claude-sonnet-4'});
+    expect(rebound.data.participant).toMatchObject({agentId:replacement,model:'anthropic/claude-sonnet-4'});
     expect(rebound.data.participantToken).toMatch(/^cpt_/);
     // A seat without an agent is not a thing any more: the hub has to know who to wake.
     expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/binding`,{})).status).toBe(422);
+    // Nor is a seat bound to an Agent that does not exist, or to a normal (non-collaboration) Agent.
+    const plainAgent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id})).data.agentId;
+    expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/binding`,{agentId:'agent-does-not-exist'})).status).toBe(403);
+    expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'plain',agentId:plainAgent})).status).toBe(403);
 
     const seats=(await call('GET',`/api/v1/collab/sessions/${sessionId}/participants`)).data;
     expect(seats).toHaveLength(1);                                   // no stray participant was registered
     expect(seats[0]).toMatchObject({tokenBudget:900_000});
     // Registration itself still works, and an unknown sub-resource is a 404, not a registration.
-    expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:'agent-impl'})).status).toBe(201);
+    expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'implementer',displayName:'impl',agentId:await collabAgent()})).status).toBe(201);
     expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/participants/${participantId}/nonsense`,{})).status).toBe(404);
     expect((await call('POST',`/api/v1/collab/sessions/${sessionId}/advance/nonsense`,{})).status).toBe(404);
     // A participant token must not be able to use the human repair paths (the rebind rotated it, so use the new one).
@@ -192,16 +204,18 @@ describe('collaboration HTTP API',()=>{
 
   it('keeps collaboration state across a restart',async()=>{
     const dataDir=await temp('remote-pi-collab-restart-'),root=await temp('collab-workspace-');
-    server=new RemotePiServer({port:0,dataDir});
+    const makeServer=()=>{const workspaces=new WorkspaceStore(),agents=new AgentManager(workspaces,(id,cwd,sessionFile)=>new MockBackend(id,cwd,sessionFile));return new RemotePiServer({port:0,dataDir,workspaces,agents})};
+    server=makeServer();
     const auth=await server.auth.init();let address=await server.start();
     const headers={authorization:`Bearer ${auth.token}`,'content-type':'application/json'};
     const post=async(port:number,url:string,body:unknown)=>(await (await fetch(`http://127.0.0.1:${port}${url}`,{method:'POST',headers,body:JSON.stringify(body)})).json()).data;
     const workspace=await post(address!.port,'/api/v1/workspaces',{label:'w',rootPath:root});
+    const agent=await post(address!.port,'/api/v1/agents',{workspaceId:workspace.id,profile:'collab'});
     const session=await post(address!.port,'/api/v1/collab/sessions',{kind:'review',title:'Persisted review',workspaceId:workspace.id,subject:{type:'free',value:'a'}});
-    await post(address!.port,`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:'agent-r1'});
+    await post(address!.port,`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'r1',agentId:agent.agentId});
 
     await server.stop();
-    server=new RemotePiServer({port:0,dataDir});address=await server.start();
+    server=makeServer();address=await server.start();
     const restored=await (await fetch(`http://127.0.0.1:${address!.port}/api/v1/collab/sessions/${session.sessionId}`,{headers})).json();
     expect(restored.data).toMatchObject({title:'Persisted review',phase:'draft'});
     expect(restored.data.participants).toHaveLength(1);

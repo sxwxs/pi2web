@@ -148,7 +148,7 @@ export function requiredActors(snapshot:ReviewSnapshot):string[]{
   switch(snapshot.phase){
     case 'implementing':return participants.filter(participant=>participant.role==='implementer').map(participant=>participant.participantId);
     case 'collecting':return participants.filter(participant=>participant.role==='reviewer').map(participant=>participant.participantId);
-    case 'validating':return reviewers(snapshot).map(participant=>participant.participantId);
+    case 'validating':return reviewers(snapshot).filter(participant=>owedIssueVoteIds(snapshot,participant.participantId).length).map(participant=>participant.participantId);
     case 'merge_voting':return reviewers(snapshot).filter(participant=>currentMergeProposals(snapshot).some(proposal=>!proposal.votes.some(vote=>vote.participantId===participant.participantId))).map(participant=>participant.participantId);
     case 'issue_discussing':{
       const contested=new Set(activeContestedIssueIds(snapshot));
@@ -209,7 +209,10 @@ export function nextPhase(snapshot:ReviewSnapshot,options:{forced?:boolean}={}):
     case 'consolidating':{
       if(!snapshot.policy.consensusReview)return {phase:'finished',round:snapshot.round,reason:'review_complete',...skipped};
       const panel=reviewers(snapshot),completed=(phase:ReviewPhase)=>new Set(snapshot.completions.filter(entry=>entry.phase===phase&&entry.round===snapshot.round).map(entry=>entry.participantId));
-      if(!panel.every(entry=>completed('validating').has(entry.participantId)))return {phase:'validating',round:snapshot.round,reason:'issue_validation_started',...skipped};
+      // A reviewer that owes no ballot (its own findings only, or everything it owed was withdrawn/merged away)
+      // is already done: demanding a completion marker it can only produce by submitting an empty ballot is
+      // what used to bounce such a panel between consolidating and validating forever.
+      if(!panel.every(entry=>completed('validating').has(entry.participantId)||!owedIssueVoteIds(snapshot,entry.participantId).length))return {phase:'validating',round:snapshot.round,reason:'issue_validation_started',...skipped};
       const proposals=currentMergeProposals(snapshot);
       if(proposals.length&&!completed('merge_voting').has('system'))return {phase:'merge_voting',round:snapshot.round,reason:'merge_voting_started',...skipped};
       return contestedIssueIds(snapshot).length
