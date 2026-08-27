@@ -108,6 +108,23 @@ pi2web \
 
 该模式不配置 `--voice-stt-model`，因此只启用 Agent 摘要播报，不启用语音识别。Edge TTS 使用非官方消费者服务，适合本地和实验性使用。
 
+## 自动 Session 命名
+
+自动命名是独立于语音的功能，**默认开启**：Agent 每次任务结束（`agent_settled`）后，如果 Session 还没有名字，就用一个 OpenAI 兼容的接口生成简短标题并写入 Session。不开语音时只生成标题，不会产生任何语音；开了语音播报时仍然只由命名器负责命名，语音负责朗读摘要。
+
+默认值：`--session-name-base-url http://localhost:8313/`、`--session-name-model gpt-5-mini`、无 API Key。可用参数：
+
+```
+--session-naming <on|off>            关闭或开启自动命名（默认 on）
+--session-name-base-url <url>        OpenAI 兼容的命名接口
+--session-name-model <id>            命名模型 ID
+--session-name-api-key-env <name>    存放 API Key 的环境变量名（默认不带 Key）
+--session-name-language <tag>        标题语言（默认 zh-CN）
+--session-name-request-timeout <ms>  命名请求超时（默认 60000）
+```
+
+命名失败不会影响 Agent，本次失败会通过 WebSocket 的 `session_namer_event`（`session_name_error`）上报。`GET /api/v1/system/status` 的 `sessionNamingEnabled` 可以确认是否开启。
+
 ## 本地开发
 
 项目 Review 中发现的问题、修复状态和暂缓的 Android 项目见 [`PROJECT_REVIEW_ISSUES.md`](https://github.com/sxwxs/pi2web/blob/main/PROJECT_REVIEW_ISSUES.md)。
