@@ -39,7 +39,7 @@ const VOTE_GUIDE={
 /** How long a queued task may sit undelivered before the human is told that the wake-up is not landing. */
 const UNDELIVERED_TASK_WARNING_MS=120_000;
 
-export type BaselineSnapshot={vcs:string,commit?:string,range?:string,dirtyHash?:string,paths:string[]};
+export type BaselineSnapshot={vcs:string,commit?:string,range?:string,rangeResolved?:string,dirtyHash?:string,paths:string[]};
 export type BaselineResolver=(input:{cwd:string,subject:CollabSubject,round:number})=>Promise<BaselineSnapshot>;
 export type HubOptions={resolveBaseline?:BaselineResolver,now?:()=>number,agentTokenUsage?:(agentId:string)=>Promise<number|undefined>,agentStatus?:(agentId:string)=>string|undefined};
 
@@ -64,7 +64,21 @@ export const gitBaseline:BaselineResolver=async({cwd,subject})=>{
       }
       dirtyHash=`sha256:${hash.digest('hex')}`;
     }
-    return {vcs:'git',commit,range:subject.type==='commit_range'?subject.value:undefined,dirtyHash,paths:subject.type==='paths'?subject.value.split(/[\n,]/).map(value=>value.trim()).filter(Boolean):[]};
+    // A commit range such as `main...feature` is only a name: either endpoint can move while HEAD and the
+    // working tree stay identical, which would silently change the code under review. Resolve both endpoints
+    // so the pinned identity covers the range, not just its spelling.
+    let rangeResolved:string|undefined;
+    if(subject.type==='commit_range'){
+      const expression=subject.value.trim();
+      const endpoints=expression.includes('...')?expression.split('...'):expression.includes('..')?expression.split('..'):[expression];
+      const resolved:string[]=[];
+      for(const endpoint of endpoints){
+        const name=endpoint.trim();
+        resolved.push(name?(await git(['rev-parse','--verify',`${name}^{commit}`]).catch(()=>'')).trim()||`unresolved:${name}`:'HEAD');
+      }
+      rangeResolved=resolved.join('...');
+    }
+    return {vcs:'git',commit,range:subject.type==='commit_range'?subject.value:undefined,rangeResolved,dirtyHash,paths:subject.type==='paths'?subject.value.split(/[\n,]/).map(value=>value.trim()).filter(Boolean):[]};
   }catch{
     // Not a git checkout (or git is missing). The hub still works; it just cannot prove code identity.
     return {vcs:'none',paths:[]};
@@ -154,10 +168,10 @@ export class CollabHub {
   }
   /** Phases in which a new seat can still be given a well-defined task; anywhere else it would only deadlock. */
   private registrationPhases(session:CollabSession){return session.kind==='scoring'?['nominating']:['draft','implementing','collecting']}
-  /** A dedicated collaboration Agent may own only one active seat globally; agentId alone is the bridge identity. */
+  /** A dedicated collaboration Agent may own only one live seat globally; agentId alone is the bridge identity. */
   private assertAgentAvailable(agentId:string,_sessionId:string,exceptParticipantId?:string){
-    const occupied=this.store.findActiveParticipantsByAgent(agentId).find(participant=>participant.participantId!==exceptParticipantId);
-    if(occupied)throw flowError(COLLAB_ERRORS.conflict,`That agent is already registered to an active seat in collaboration session ${occupied.sessionId}`);
+    const occupied=this.store.findOccupyingParticipantsByAgent(agentId).find(participant=>participant.participantId!==exceptParticipantId);
+    if(occupied)throw flowError(COLLAB_ERRORS.conflict,`That agent is already registered to a seat in collaboration session ${occupied.sessionId}`);
   }
   addParticipant(sessionId:string,body:unknown){
     const input=parse(createParticipantRequest,body),session=this.store.getSession(sessionId);
@@ -1303,7 +1317,7 @@ export class CollabHub {
   private async assertBaselineCurrent(session:CollabSession,baseline=this.store.getBaselineForRound(session.sessionId,session.kind==='scoring'?1:session.round)){
     if(!baseline||baseline.vcs==='none')return;
     const current=await this.resolveBaseline({cwd:session.cwd,subject:session.subject,round:baseline.round});
-    if(current.vcs!==baseline.vcs||current.commit!==baseline.commit||current.dirtyHash!==baseline.dirtyHash)
+    if(current.vcs!==baseline.vcs||current.commit!==baseline.commit||current.dirtyHash!==baseline.dirtyHash||(baseline.rangeResolved!==undefined&&current.rangeResolved!==baseline.rangeResolved))
       throw Object.assign(flowError(COLLAB_ERRORS.staleBaseline,'The workspace changed after this collaboration baseline was captured. Refresh or restart the review against a new baseline.'),{currentBaseline:{...current,round:baseline.round}});
   }
   /**

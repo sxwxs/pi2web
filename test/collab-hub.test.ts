@@ -137,12 +137,15 @@ describe('collab hub',()=>{
     expect(hub.digest(exhausted).you).toMatchObject({state:'budget_exhausted'});
   });
 
-  it('gives each local agent only one active seat globally and requires an agentId',async()=>{
+  it('gives each local agent only one live seat globally and requires an agentId',async()=>{
     const session=await newSession(),other=await newSession();
-    hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r1',agentId:'agent-1'});
+    const {participant:seat}=hub.addParticipant(session.sessionId,{role:"reviewer",displayName:"r1",agentId:"agent-1"});
     expect(()=>hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r2',agentId:'agent-1'})).toThrow(/already registered/);
-    expect(()=>hub.addParticipant(other.sessionId,{role:'reviewer',displayName:'r3',agentId:'agent-1'})).toThrow(/active seat/);
+    expect(()=>hub.addParticipant(other.sessionId,{role:'reviewer',displayName:'r3',agentId:'agent-1'})).toThrow(/already registered to a seat/);
     expect(()=>hub.addParticipant(session.sessionId,{role:'reviewer',displayName:'r4',binding:{type:'managed'}})).toThrow(ValidationError);
+    // A budget-exhausted seat can be revived through /budget, so it keeps reserving its Agent.
+    store.updateParticipant(seat.participantId,{state:'budget_exhausted'});
+    expect(()=>hub.addParticipant(other.sessionId,{role:'reviewer',displayName:'r5',agentId:'agent-1'})).toThrow(/already registered to a seat/);
   });
 
   it('requires a reviewer before a round opens and rejects a second open',async()=>{

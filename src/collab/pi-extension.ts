@@ -102,7 +102,10 @@ export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
       if(!value||typeof value!=='object'){
         if(typeof value!=='string')return value;for(const [id,alias] of aliases)if(alias===value)return id;return value;
       }
-      return Object.fromEntries(Object.entries(value as Record<string,unknown>).map(([key,entry])=>[key.replace(/Ref(s)?$/,'Id$1'),restore(entry)]));
+      // Only alias-carrying keys are translated back to hub ids. `codeRef` is a semantic field whose value is an
+      // object (commit/dirtyHash), so renaming it to `codeId` would make the hub reject a valid ready submission.
+      const isAliasKey=(key:string,entry:unknown)=>/Ref(s)?$/.test(key)&&(typeof entry==='string'||(Array.isArray(entry)&&entry.every(item=>typeof item==='string')));
+      return Object.fromEntries(Object.entries(value as Record<string,unknown>).map(([key,entry])=>[isAliasKey(key,entry)?key.replace(/Ref(s)?$/,'Id$1'):key,restore(entry)]));
     };
     const taskText=(task:Record<string,unknown>)=>{
       const safe=redact(task) as Record<string,unknown>,context={...safe};delete context.task;delete context.instructions;
@@ -147,10 +150,39 @@ export function createCollabExtension(agentId:string,bridge:CollabToolBridge){
     pi.on('session_start',()=>{baseTools=undefined;lastTask=undefined;aliases=new Map();activate()});
     pi.on('before_agent_start',event=>{
       lastTask=undefined;aliases=new Map();activate();
-      return {systemPrompt:`${event.systemPrompt}\n\n## Local collaboration\nThis is a local software-development workflow. Call collab_get_task first after every collaboration wake-up. Use only the collaboration submission tool activated for that task. Inspect code normally, but modify files only for an implement task; review and scoring tasks are read-only. The tools own transport and credentials: never use curl, invent endpoints or identifiers, sleep, or poll.`};
+      return {systemPrompt:`${event.systemPrompt}\n\n## Local collaboration\nThis is a local software-development workflow. Call collab_get_task first after every collaboration wake-up. Use only the collaboration submission tool activated for that task. Inspect code normally, but modify files only for an implement task; review and scoring tasks are read-only, and their shell is limited to read-only inspection commands. The tools own transport and credentials: never use curl, invent endpoints or identifiers, sleep, or poll.`};
     });
+    /**
+     * Review and scoring tasks are read-only, and blocking `edit`/`write` alone does not enforce that: a shell
+     * can `rm`, redirect, or check out something else and make the pinned baseline meaningless. So a shell used
+     * outside an implement task is restricted to an allowlist of inspection commands, with no redirection,
+     * command substitution or background/eval trickery.
+     */
+    const READ_ONLY_COMMANDS=new Set(['ls','cat','head','tail','wc','grep','rg','fgrep','egrep','find','fd','file','stat','tree','du','df','pwd','echo','basename','dirname','realpath','readlink','sort','uniq','cut','tr','diff','comm','jq','yq','nl','od','xxd','md5sum','sha1sum','sha256sum','date','env','which','type','awk','column','strings','ps']);
+    const READ_ONLY_GIT=new Set(['log','show','diff','status','rev-parse','rev-list','ls-files','ls-tree','blame','cat-file','describe','shortlog','name-rev','symbolic-ref','count-objects','grep','tag','branch','remote','config','whatchanged','merge-base','for-each-ref','stash']);
+    const readOnlyShell=(command:string):string|undefined=>{
+      if(/[>]|<\(|\$\(|`|&\s*$|\bsudo\b|\bnohup\b|\bxargs\b|\beval\b|\bsource\b|^\s*\./.test(command))return 'redirection, command substitution and background/eval constructs are not allowed';
+      for(const segment of command.split(/\n|;|\|\||&&|\|/)){
+        const words=segment.trim().split(/\s+/).filter(Boolean);if(!words.length)continue;
+        const program=words[0].replace(/^.*\//,'');
+        if(program==='git'){
+          const subcommand=words.slice(1).find(word=>!word.startsWith('-'));
+          if(!subcommand||!READ_ONLY_GIT.has(subcommand))return `git ${subcommand??''} can modify the checkout`;
+          if(words.some(word=>['-d','-D','--delete','--force','-f','--set-upstream','--prune','push','drop','pop','apply'].includes(word)))return `git ${subcommand} with a mutating flag is not allowed`;
+          continue;
+        }
+        if(program==='sed'&&!words.includes('-i')&&!words.some(word=>/^-[a-zA-Z]*i/.test(word)))continue;
+        if(!READ_ONLY_COMMANDS.has(program))return `${program} is not a read-only inspection command`;
+      }
+      return undefined;
+    };
     pi.on('tool_call',(event:any)=>{
-      if((event.toolName==='edit'||event.toolName==='write')&&currentTask()!=='implement')return {block:true,reason:'Collaboration review and scoring tasks are read-only. Only an implement task may modify files.'};
+      if(currentTask()==='implement')return;
+      if(event.toolName==='edit'||event.toolName==='write')return {block:true,reason:'Collaboration review and scoring tasks are read-only. Only an implement task may modify files.'};
+      if(event.toolName==='bash'){
+        const reason=readOnlyShell(String(event.input?.command??''));
+        if(reason)return {block:true,reason:`Collaboration review and scoring tasks are read-only, so this shell command is blocked: ${reason}. Inspect the code with read-only commands instead.`};
+      }
     });
     pi.registerTool({
       name:'collab_get_task',label:'Get Collaboration Task',description:'Get the complete current collaboration assignment and activate its exact typed submission tool.',

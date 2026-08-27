@@ -42,6 +42,33 @@ describe('git baseline',()=>{
     await rm(cwd,{recursive:true,force:true});
   },60_000);
 
+  it('pins the resolved endpoints of a commit range, not just its spelling',async()=>{
+    const cwd=await mkdtemp(path.join(tmpdir(),'collab-range-'));
+    git(cwd,'init','-b','main');
+    await writeFile(path.join(cwd,'a.txt'),'one');
+    git(cwd,'add','.');git(cwd,'commit','-m','one');
+    git(cwd,'checkout','-b','feature');
+    await writeFile(path.join(cwd,'a.txt'),'two');
+    git(cwd,'add','.');git(cwd,'commit','-m','two');
+
+    const range=(cwd:string)=>gitBaseline({cwd,subject:{type:'commit_range',value:'main...feature'},round:1});
+    const before=await range(cwd);
+    expect(before.rangeResolved).toMatch(/^[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/);
+
+    // `main` moves while the checked-out feature commit and the working tree stay identical: HEAD and dirtyHash
+    // are unchanged, so only the resolved range can catch that `main...feature` now means different code.
+    git(cwd,'checkout','main');
+    await writeFile(path.join(cwd,'b.txt'),'three');
+    git(cwd,'add','.');git(cwd,'commit','-m','three');
+    git(cwd,'checkout','feature');
+    const after=await range(cwd);
+    expect(after.commit).toBe(before.commit);
+    expect(after.dirtyHash).toBe(before.dirtyHash);
+    expect(after.rangeResolved).not.toBe(before.rangeResolved);
+
+    await rm(cwd,{recursive:true,force:true});
+  });
+
   it('reports no vcs instead of a fake identity outside a checkout',async()=>{
     const cwd=await mkdtemp(path.join(tmpdir(),'collab-nogit-'));
     expect(await capture(cwd)).toMatchObject({vcs:'none',paths:[]});

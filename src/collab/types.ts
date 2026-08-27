@@ -100,7 +100,7 @@ export type Participant={
 export type CollabEvent={sessionId:string;sequence:number;eventId:string;type:string;actorId?:string;payload:Record<string,unknown>;createdAt:string};
 export type CodeLocation={path:string;startLine?:number;endLine?:number};
 export type Evidence={path:string;startLine?:number;endLine?:number;excerpt?:string};
-export type Baseline={baselineId:string;sessionId:string;round:number;vcs:string;commit?:string;range?:string;dirtyHash?:string;paths:string[];capturedAt:string};
+export type Baseline={baselineId:string;sessionId:string;round:number;vcs:string;commit?:string;range?:string;rangeResolved?:string;dirtyHash?:string;paths:string[];capturedAt:string};
 export type Issue={
   issueId:string;number:number;sessionId:string;externalId?:string;reporterId:string;targetParticipantId:string;
   title:string;severity:Severity;category:Category;requiredAction:RequiredAction;confidence?:number;

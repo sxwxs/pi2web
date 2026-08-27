@@ -27,11 +27,12 @@
     </section>
     <section class="policy-section" id="optional"><span class="policy-number">05</span><h2>可选的外部服务</h2>
       <ul>
+        <li><strong>自动 Session 命名</strong>（<em>默认开启</em>）：一轮对话结束后，最近一次用户 Prompt 与 Agent 最终输出会被截断并提交到你配置的 OpenAI 兼容命名 endpoint（默认为 <code>http://localhost:8313/</code>，即本机）以生成 Session 名称。若你把 <code>--session-name-base-url</code> 指向远程服务，这部分会话内容会离开本机。可用 <code>--session-naming off</code> 关闭。</li>
         <li><strong>邮件通知</strong>：只有在你配置 MailDispatch 后才会把通知内容提交到你指定的 endpoint。是否包含 Agent 回复与 Session 信息由你自己决定。</li>
         <li><strong>语音摘要与识别</strong>：只有在你配置语音服务后，最终回复的摘要输入与录音才会发送到你指定的 endpoint。</li>
         <li><strong>隧道与反向代理</strong>：若你使用 devtunnel、Cloudflare Tunnel 或自建代理，流量会经过对应服务商，请参考其自身的隐私政策。</li>
       </ul>
-      <p>以上功能默认全部关闭。</p>
+      <p>除自动 Session 命名外，以上功能默认全部关闭；自动命名默认开启，且默认指向本机 endpoint。</p>
     </section>
     <section class="policy-section" id="contact"><span class="policy-number">06</span><h2>联系方式</h2>
       <p>问题、反馈和安全报告请通过 <a href="https://github.com/sxwxs/pi2web/issues" rel="noreferrer">GitHub Issues</a> 提交。项目以 MIT License 开源，你可以自行审计源码。</p>
