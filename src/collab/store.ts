@@ -54,7 +54,7 @@ export class CollabStore {
       );
       CREATE TABLE IF NOT EXISTS collab_baselines (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL, round INTEGER NOT NULL, vcs TEXT NOT NULL,
-        commit_sha TEXT, range_expr TEXT, dirty_hash TEXT, paths_json TEXT NOT NULL, captured_at INTEGER NOT NULL,
+        commit_sha TEXT, range_expr TEXT, range_resolved TEXT, dirty_hash TEXT, paths_json TEXT NOT NULL, captured_at INTEGER NOT NULL,
         UNIQUE(session_id, round),
         FOREIGN KEY(session_id) REFERENCES collab_sessions(id) ON DELETE CASCADE
       );
@@ -154,6 +154,9 @@ export class CollabStore {
     if(!issueColumns.some(column=>column.name==='issue_number'))this.db.exec('ALTER TABLE collab_issues ADD COLUMN issue_number INTEGER');
     this.db.exec(`UPDATE collab_issues AS current SET issue_number=(SELECT COUNT(*) FROM collab_issues AS older WHERE older.session_id=current.session_id AND (older.created_at<current.created_at OR (older.created_at=current.created_at AND older.rowid<=current.rowid))) WHERE issue_number IS NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS collab_issues_session_number ON collab_issues(session_id,issue_number);`);
+    // Additive migration: a commit range is pinned by its resolved endpoints, not by its spelling.
+    const baselineColumns=this.db.prepare('PRAGMA table_info(collab_baselines)').all() as {name:string}[];
+    if(!baselineColumns.some(column=>column.name==='range_resolved'))this.db.exec('ALTER TABLE collab_baselines ADD COLUMN range_resolved TEXT');
     // Additive migration: scoring sessions need a debate counter independent of the voting round.
     const columns=this.db.prepare('PRAGMA table_info(collab_sessions)').all() as {name:string}[];
     if(!columns.some(column=>column.name==='debate_round'))this.db.exec('ALTER TABLE collab_sessions ADD COLUMN debate_round INTEGER NOT NULL DEFAULT 0');
@@ -238,6 +241,11 @@ export class CollabStore {
   listParticipants(sessionId:string):Participant[]{return (this.db.prepare('SELECT * FROM collab_participants WHERE session_id=? ORDER BY created_at, rowid').all(sessionId) as any[]).map(participantFrom)}
   findActiveParticipantsByAgent(agentId:string):Participant[]{return (this.db.prepare(`SELECT p.* FROM collab_participants p JOIN collab_sessions s ON s.id=p.session_id WHERE p.agent_id=? AND p.state='active' AND s.status='active' ORDER BY p.created_at,p.rowid`).all(agentId) as any[]).map(participantFrom)}
   /**
+   * Seats that still own the Agent. A `budget_exhausted` seat is included because raising its budget
+   * reactivates it; letting the same Agent take a second seat meanwhile would make the bridge ambiguous.
+   */
+  findOccupyingParticipantsByAgent(agentId:string):Participant[]{return (this.db.prepare(`SELECT p.* FROM collab_participants p JOIN collab_sessions s ON s.id=p.session_id WHERE p.agent_id=? AND p.state<>'left' AND s.status='active' ORDER BY p.created_at,p.rowid`).all(agentId) as any[]).map(participantFrom)}
+  /**
    * Hands the seat to another local agent. The token is rotated because the old one is already in the old
    * agent's conversation; only its hash is stored, and the plaintext is returned to the human exactly once.
    */
@@ -299,9 +307,9 @@ export class CollabStore {
   // ---- baselines ----
   saveBaseline(input:Omit<Baseline,'baselineId'|'capturedAt'>&{baselineId?:string}):Baseline{
     const baselineId=input.baselineId??`b-${randomUUID()}`,timestamp=now();
-    this.db.prepare(`INSERT INTO collab_baselines(id,session_id,round,vcs,commit_sha,range_expr,dirty_hash,paths_json,captured_at) VALUES(?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(session_id,round) DO UPDATE SET vcs=excluded.vcs,commit_sha=excluded.commit_sha,range_expr=excluded.range_expr,dirty_hash=excluded.dirty_hash,paths_json=excluded.paths_json,captured_at=excluded.captured_at`)
-      .run(baselineId,input.sessionId,input.round,input.vcs,input.commit??null,input.range??null,input.dirtyHash??null,JSON.stringify(input.paths??[]),timestamp);
+    this.db.prepare(`INSERT INTO collab_baselines(id,session_id,round,vcs,commit_sha,range_expr,range_resolved,dirty_hash,paths_json,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(session_id,round) DO UPDATE SET vcs=excluded.vcs,commit_sha=excluded.commit_sha,range_expr=excluded.range_expr,range_resolved=excluded.range_resolved,dirty_hash=excluded.dirty_hash,paths_json=excluded.paths_json,captured_at=excluded.captured_at`)
+      .run(baselineId,input.sessionId,input.round,input.vcs,input.commit??null,input.range??null,input.rangeResolved??null,input.dirtyHash??null,JSON.stringify(input.paths??[]),timestamp);
     return this.getBaselineForRound(input.sessionId,input.round)!;
   }
   getBaseline(baselineId:string):Baseline|undefined{const row=this.db.prepare('SELECT * FROM collab_baselines WHERE id=?').get(baselineId) as any;return row?baselineFrom(row):undefined}
@@ -519,7 +527,7 @@ const participantFrom=(row:any):Participant=>({
   createdAt:iso(row.created_at),lastSeenAt:row.last_seen_at?iso(row.last_seen_at):undefined
 });
 const eventFrom=(row:any):CollabEvent=>({sessionId:row.session_id,sequence:row.sequence,eventId:row.id,type:row.type,actorId:row.actor_id??undefined,payload:json(row.payload_json,{}),createdAt:iso(row.created_at)});
-const baselineFrom=(row:any):Baseline=>({baselineId:row.id,sessionId:row.session_id,round:row.round,vcs:row.vcs,commit:row.commit_sha??undefined,range:row.range_expr??undefined,dirtyHash:row.dirty_hash??undefined,paths:json(row.paths_json,[] as string[]),capturedAt:iso(row.captured_at)});
+const baselineFrom=(row:any):Baseline=>({baselineId:row.id,sessionId:row.session_id,round:row.round,vcs:row.vcs,commit:row.commit_sha??undefined,range:row.range_expr??undefined,rangeResolved:row.range_resolved??undefined,dirtyHash:row.dirty_hash??undefined,paths:json(row.paths_json,[] as string[]),capturedAt:iso(row.captured_at)});
 const issueFrom=(row:any):Issue=>({
   issueId:row.id,number:Number(row.issue_number??0),sessionId:row.session_id,externalId:row.external_id??undefined,reporterId:row.reporter_id,targetParticipantId:row.target_participant_id,
   title:row.title,severity:row.severity,category:row.category,requiredAction:row.required_action,confidence:row.confidence??undefined,
