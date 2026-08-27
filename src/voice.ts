@@ -140,7 +140,9 @@ export class VoiceManager{
   private announcementQueue=Promise.resolve();
   private closed=false;
   private readonly config:Required<Pick<VoiceConfig,'language'|'maxInputChars'|'maxOutputTokens'|'sampleRate'|'ttsFormat'|'requestTimeoutMs'>>&VoiceConfig;
-  constructor(config:VoiceConfig,private fetcher:Fetcher=fetch){this.config={language:'zh-CN',maxInputChars:32000,maxOutputTokens:160,sampleRate:24000,ttsFormat:'pcm',requestTimeoutMs:120000,...config}}
+  // 2000, not ~160: reasoning models spend most of this budget on hidden reasoning tokens and return an
+  // empty message with finish_reason "length" when the cap is tight.
+  constructor(config:VoiceConfig,private fetcher:Fetcher=fetch){this.config={language:'zh-CN',maxInputChars:32000,maxOutputTokens:2000,sampleRate:24000,ttsFormat:'pcm',requestTimeoutMs:120000,...config}}
   subscribe(listener:(agentId:string,event:VoiceEvent)=>void){this.emitter.on('event',listener);return()=>this.emitter.off('event',listener)}
   capabilities(){return {tts:true,stt:!!this.config.sttModel}}
   recordUserPrompt(agentId:string,prompt:string){const value=prompt.trim();if(value)this.lastPrompt.set(agentId,value)}

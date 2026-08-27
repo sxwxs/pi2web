@@ -121,6 +121,7 @@ pi2web \
 --session-name-api-key-env <name>    存放 API Key 的环境变量名（默认不带 Key）
 --session-name-language <tag>        标题语言（默认 zh-CN）
 --session-name-request-timeout <ms>  命名请求超时（默认 60000）
+--session-name-max-output-tokens <n> 命名输出 token 上限（默认 2000，推理模型需要较大预算）
 ```
 
 命名失败不会影响 Agent，本次失败会通过 WebSocket 的 `session_namer_event`（`session_name_error`）上报。`GET /api/v1/system/status` 的 `sessionNamingEnabled` 可以确认是否开启。

@@ -21,7 +21,9 @@ type Fetcher=typeof fetch;
 
 export const DEFAULT_SESSION_NAMER:Required<Omit<SessionNamerConfig,'apiKey'>>={
   baseUrl:'http://localhost:8313/',model:'gpt-5-mini',language:'zh-CN',
-  maxInputChars:8000,maxOutputTokens:64,requestTimeoutMs:60000
+  // Reasoning models (gpt-5-mini and friends) burn this budget on hidden reasoning tokens before they
+  // emit the name, so a tight cap yields an empty message with finish_reason "length".
+  maxInputChars:8000,maxOutputTokens:2000,requestTimeoutMs:60000
 };
 
 export function parseSessionName(text:string):string|undefined{
@@ -84,9 +86,10 @@ export class SessionNamer{
     });
     if(!response.ok)throw new Error(`Session naming request failed (${response.status}): ${(await response.text()).slice(0,300)}`);
     const value:any=await response.json();
-    const content=value?.choices?.[0]?.message?.content;
+    const choice=value?.choices?.[0];
+    const content=choice?.message?.content;
     const text=typeof content==='string'?content:Array.isArray(content)?content.filter((part:any)=>part?.type==='text'&&typeof part.text==='string').map((part:any)=>part.text).join(''):'';
-    if(!text.trim())throw new Error('Naming endpoint returned no content');
+    if(!text.trim())throw new Error(choice?.finish_reason==='length'?`Naming endpoint returned no content: the model hit the ${this.config.maxOutputTokens}-token output budget (raise --session-name-max-output-tokens)`:'Naming endpoint returned no content');
     return parseSessionName(text);
   }
   private prompt(){
