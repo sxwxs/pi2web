@@ -1,0 +1,77 @@
+{% extends "blog_article.html" %}{% block kicker %}VOICE{% endblock %}{% block deck %}pi2web can read out a short summary when an agent finishes, and can transcribe dictated prompts. Both need two OpenAI-compatible services: a summary LLM and a speech endpoint. Here are the Speaches and Edge TTS setups.{% endblock %}{% block toc %}<a href="#how">How it works</a><a href="#edge">Option one: Edge TTS</a><a href="#speaches">Option two: Speaches</a><a href="#flags">Flag reference</a><a href="#ui">Using it in the web UI</a><a href="#limits">Limits and troubleshooting</a>{% endblock %}{% block article %}
+<h2 id="how">1. How it works</h2>
+<p>Voice is disabled unless <code>--voice-base-url</code> is set. Once enabled the flow is:</p>
+<ol>
+<li>Pi emits <code>agent_settled</code>: no more automatic retries, automatic compaction, or queued follow-ups.</li>
+<li>pi2web takes the last assistant message, strips code blocks, long links, and Markdown, and caps the summary input length.</li>
+<li>The summary LLM streams chat completions; as soon as a full sentence appears, streaming TTS starts, so playback does not wait for the whole summary.</li>
+<li>Audio is pushed to the browser over the authenticated agent WebSocket.</li>
+</ol>
+<p>When several sessions settle at nearly the same time, announcements enter a global queue and play one after another instead of overlapping. Named sessions are announced with the session name first. A new run cancels any pending announcement for that agent.</p>
+<div class="article-callout"><strong>Audio is never persisted.</strong><p>Voice streams are delivered live only; they are not written to sessions and do not take part in event replay.</p></div>
+
+<h2 id="edge">2. Option one: Edge TTS (playback only)</h2>
+<p>If you only want spoken summaries, the <code>packages/edge-tts-server</code> service in the repository is the lightest path: Python <code>edge-tts</code> plus <code>aiohttp</code>, returning MP3 directly with no Docker and no FFmpeg.</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="python -m pip install -e ."><span class="copy-label">Copy</span></button></div><pre><code>cd packages/edge-tts-server
+python -m venv .venv
+# Windows: .venv\Scripts\Activate.ps1
+# Linux/macOS: source .venv/bin/activate
+python -m pip install -e .
+remote-pi-edge-tts</code></pre></div>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:5050/v1"><span class="copy-label">Copy</span></button></div><pre><code>export SUMMARY_API_KEY=...
+pi2web \
+  --voice-base-url http://127.0.0.1:5050/v1 \
+  --voice-tts-model edge-tts \
+  --voice-tts-voice en-US-AriaNeural \
+  --voice-tts-format mp3 \
+  --voice-summary-base-url https://llm.example.com/v1 \
+  --voice-summary-model &lt;summary-model-id&gt; \
+  --voice-summary-api-key-env SUMMARY_API_KEY \
+  --voice-language en-US</code></pre></div>
+<p>Because <code>--voice-stt-model</code> is absent, this mode enables announcements only. Edge TTS relies on an unofficial consumer service and suits local, experimental use.</p>
+
+<h2 id="speaches">3. Option two: Speaches (playback and dictation)</h2>
+<p>For speech input, run one OpenAI-compatible service that provides both TTS and STT, such as Speaches. Windows setup, model downloads, and troubleshooting are documented in <code>VOICE_SERVER_SETUP.md</code> in the repository.</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:8000/v1"><span class="copy-label">Copy</span></button></div><pre><code># Replace the example IDs with models actually downloaded in your service
+export SUMMARY_API_KEY=...
+pi2web \
+  --voice-base-url http://127.0.0.1:8000/v1 \
+  --voice-stt-model &lt;stt-model-id&gt; \
+  --voice-tts-model &lt;tts-model-id&gt; \
+  --voice-tts-voice &lt;voice-id&gt; \
+  --voice-summary-base-url https://llm.example.com/v1 \
+  --voice-summary-model &lt;summary-model-id&gt; \
+  --voice-summary-api-key-env SUMMARY_API_KEY \
+  --voice-language en-US</code></pre></div>
+
+<h2 id="flags">4. Flag reference</h2>
+<table class="article-table"><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--voice-base-url</code></td><td>OpenAI-compatible speech endpoint. Without it, voice stays off entirely.</td></tr>
+<tr><td><code>--voice-tts-model</code> / <code>--voice-tts-voice</code></td><td>Required TTS model and voice IDs when voice is enabled.</td></tr>
+<tr><td><code>--voice-tts-format</code></td><td><code>pcm</code> (default) or <code>mp3</code>, depending on what your service returns.</td></tr>
+<tr><td><code>--voice-stt-model</code></td><td>Optional. Enables the microphone button in the web UI.</td></tr>
+<tr><td><code>--voice-api-key-env</code></td><td>Name of the environment variable holding the speech API key.</td></tr>
+<tr><td><code>--voice-summary-base-url</code> / <code>--voice-summary-model</code></td><td>Endpoint and model used to write the spoken summary.</td></tr>
+<tr><td><code>--voice-summary-api-key-env</code></td><td>Name of the environment variable holding the summary API key.</td></tr>
+<tr><td><code>--voice-language</code></td><td>Spoken summary language tag; defaults to <code>zh-CN</code>.</td></tr>
+<tr><td><code>--voice-request-timeout</code></td><td>Per-request timeout for summary, synthesis, and transcription. Defaults to <code>120000</code> ms, minimum 1000.</td></tr>
+</tbody></table>
+<p>API keys are always passed as environment variable names so they never appear in command lines or process listings.</p>
+
+<h2 id="ui">5. Using it in the web UI</h2>
+<ul>
+<li>Click "enable voice" to start playing PCM16 or MP3 audio pushed by the server. Browsers generally require a user gesture before audio can autoplay, which is why the button exists.</li>
+<li>With an STT model configured a microphone button appears; the transcript is inserted into the composer and <strong>never sent automatically</strong>, so you can edit it first.</li>
+<li>Microphone access requires a secure context (<code>localhost</code> excepted), so plain HTTP over a LAN IP will not work.</li>
+</ul>
+
+<h2 id="limits">6. Limits and troubleshooting</h2>
+<table class="article-table"><thead><tr><th>Symptom</th><th>Fix</th></tr></thead><tbody>
+<tr><td>No announcements at all</td><td>Confirm <code>--voice-base-url</code> is set and that you clicked "enable voice" in the page.</td></tr>
+<tr><td>Announcement degrades to a text notice</td><td>The summary or TTS request timed out. Raise <code>--voice-request-timeout</code> or check the speech service load.</td></tr>
+<tr><td>No microphone button</td><td><code>--voice-stt-model</code> is not configured, or the page is not in a secure context.</td></tr>
+<tr><td>Choppy or invalid audio</td><td>Switch <code>--voice-tts-format</code> between <code>pcm</code> and <code>mp3</code> to match what the service actually returns.</td></tr>
+<tr><td>No voice on Android</td><td>Streaming PCM playback and the recording UI are not wired into the Android client yet.</td></tr>
+</tbody></table>
+<p class="article-source">References: <a href="https://github.com/sxwxs/pi2web/blob/main/VOICE_SERVER_SETUP.md" rel="noreferrer">VOICE_SERVER_SETUP.md ↗</a> · <a href="https://github.com/sxwxs/pi2web/tree/main/packages/edge-tts-server" rel="noreferrer">edge-tts-server ↗</a></p>
+{% endblock %}

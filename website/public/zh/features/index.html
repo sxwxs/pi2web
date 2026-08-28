@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>产品能力 — pi2web 远程 Pi Agent 服务器</title>
+  <meta name="description" content="了解 pi2web 的 Web UI、Terminal、Workspace 文件浏览、Session 管理、配对码鉴权与限流、语音摘要、邮件通知、SQLite 持久化和 Android 原生客户端。">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/zh/features/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/features/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/features/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/features/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="产品能力 — pi2web 远程 Pi Agent 服务器">
+  <meta property="og:description" content="了解 pi2web 的 Web UI、Terminal、Workspace 文件浏览、Session 管理、配对码鉴权与限流、语音摘要、邮件通知、SQLite 持久化和 Android 原生客户端。">
+  <meta property="og:url" content="https://pi2web.es2q.com/zh/features/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="产品能力 — pi2web 远程 Pi Agent 服务器">
+  <meta name="twitter:description" content="了解 pi2web 的 Web UI、Terminal、Workspace 文件浏览、Session 管理、配对码鉴权与限流、语音摘要、邮件通知、SQLite 持久化和 Android 原生客户端。">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","headline":"\u4ea7\u54c1\u80fd\u529b \u2014 pi2web \u8fdc\u7a0b Pi Agent \u670d\u52a1\u5668","description":"\u4e86\u89e3 pi2web \u7684 Web UI\u3001Terminal\u3001Workspace \u6587\u4ef6\u6d4f\u89c8\u3001Session \u7ba1\u7406\u3001\u914d\u5bf9\u7801\u9274\u6743\u4e0e\u9650\u6d41\u3001\u8bed\u97f3\u6458\u8981\u3001\u90ae\u4ef6\u901a\u77e5\u3001SQLite \u6301\u4e45\u5316\u548c Android \u539f\u751f\u5ba2\u6237\u7aef\u3002","url":"https://pi2web.es2q.com/zh/features/","inLanguage":"zh-CN","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"}}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="features">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/zh/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/zh/features/" aria-current="page">产品能力</a>
+        <a href="/zh/blog/">使用指南</a>
+        <a href="/zh/faq/">常见问题</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/en/features/" lang="en" aria-label="Switch to English">EN</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<section class="page-hero section-pad"><div class="content-shell narrow reveal"><span class="section-kicker">PRODUCT CAPABILITIES</span><h1>远程操作 Pi Agent<br><span>需要的一切能力。</span></h1><p>pi2web 覆盖会话控制、文件浏览、终端、通知、语音与持久化，并且全部运行在你自己的机器上。</p><div class="page-hero-actions"><a class="button button-primary" href="/zh/blog/install-and-configure/">安装与配置指南</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub ↗</a></div><p class="updated-note">当前版本 0.2.0 · MIT License</p></div></section>
+
+<section class="section-pad feature-detail"><div class="content-shell">
+  <div class="detail-heading reveal"><span class="detail-number">01</span><div><span class="section-kicker">AGENT CONTROL</span><h2>完整的 Agent 生命周期控制。</h2><p>pi2web 使用真实的 Pi SDK 启动 Agent，因此浏览器里能做的事情，和你在终端里使用 Pi 时基本一致。</p></div></div>
+  <div class="protocol-layout reveal">
+    <div class="protocol-list"><article><span class="protocol-status stable">AVAILABLE</span><code>prompt · steer · follow-up</code><h3>对话与干预</h3><p>发送 Prompt、在运行中插入 steer、排队 follow-up，或直接 abort 当前运行。</p></article><article><span class="protocol-status stable">AVAILABLE</span><code>navigate · fork · undo</code><h3>Session 分支</h3><p>Tree Navigate 浏览历史节点，从任意节点 Fork 或 Undo，保留 Pi 原生的分支语义。</p></article><article><span class="protocol-status stable">AVAILABLE</span><code>model · thinking · compact</code><h3>运行参数</h3><p>随时切换模型和 Thinking level，必要时对上下文执行 Compact。</p></article><article><span class="protocol-status stable">AVAILABLE</span><code>archive · lazy start</code><h3>按需启动与归档</h3><p>重启后 Agent 为 <code>unloaded</code>，读取消息或发送命令时才创建 Pi Session；右键 Archive 只写数据库标记，不动 Session 文件。</p></article></div>
+    <aside class="capability-panel"><h3>事件通道还负责</h3><ul class="check-list"><li>WebSocket sequence 去重</li><li>断线指数退避重连</li><li>增量 replay 与 snapshot 恢复</li><li>Extension UI 事件与响应</li><li>Retry、Tool、Thinking 折叠展示</li><li>所有已知 Agent 的完成通知</li></ul><p class="panel-note">模型、Provider 认证与配额来自本机 <code>~/.pi/agent</code>。pi2web 不提供模型能力。</p></aside>
+  </div>
+</div></section>
+
+<section class="section-pad feature-detail dark-detail"><div class="content-shell">
+  <div class="detail-heading reveal"><span class="detail-number">02</span><div><span class="section-kicker">SECURITY MODEL</span><h2>访问控制简单，但边界必须清楚。</h2><p>只有一层配对码认证：拿到配对码就等于拿到服务进程用户的 Shell。所以限流、存储和暴露方式都需要认真对待。</p></div></div>
+  <div class="debug-grid"><article><strong>01</strong><h3>配对码</h3><p>首次启动仅显示一次，服务端只保存 SHA-256 hash，文件权限 <code>0600</code>。</p></article><article><strong>02</strong><h3>手动输入</h3><p>Web UI 不从 URL 或服务端自动注入配对码，必须由用户手动输入。</p></article><article><strong>03</strong><h3>可选保存</h3><p>连接成功后才询问是否写入 localStorage，只有明确确认才保存。</p></article><article><strong>04</strong><h3>失败限流</h3><p>同一来源 60 秒内失败 10 次即锁定，锁定时间翻倍最长 15 分钟，返回 <code>429</code> 与 <code>Retry-After</code>。</p></article><article><strong>05</strong><h3>轮换</h3><p><code>pi2web --rotate-access-token</code> 立即作废旧配对码并输出新的。</p></article><article><strong>06</strong><h3>默认本地</h3><p>默认监听 <code>127.0.0.1</code>；远程访问建议 SSH 隧道、Tailscale 或 HTTPS 反向代理。</p></article></div>
+  <div class="security-callout reveal"><span>!</span><p><strong>Terminal 不是沙箱。</strong> 它是以 pi2web 进程用户身份运行的完整宿主机 Shell，可以访问 Workspace 之外的文件和继承的环境变量。请阅读<a href="/zh/blog/remote-access/">安全远程访问指南</a>。</p></div>
+</div></section>
+
+<section class="section-pad feature-detail"><div class="content-shell">
+  <div class="detail-heading reveal"><span class="detail-number">03</span><div><span class="section-kicker">WORKSPACE & TERMINAL</span><h2>代码就在手边，不用来回切工具。</h2><p>Workspace 提供目录浏览与文件读取，Terminal 提供真实 Shell，两者与 Agent 显示在同一个列表中。</p></div></div>
+  <div class="workspace-detail-grid"><article><span>TREE</span><h3>目录浏览</h3><p>按 Workspace 浏览目录树，读取文本文件并分页，二进制文件给出明确提示。</p></article><article><span>MENTION</span><h3>@ 引用文件</h3><p>在输入框输入 <code>@</code> 浏览并引用 Workspace 内的文件或目录，直接带入 Prompt。</p></article><article><span>PTY</span><h3>交互式 Terminal</h3><p>目录右键即可打开终端，支持输入、resize、输出快照、清屏与关闭。</p></article><article><span>RECONNECT</span><h3>刷新重连</h3><p>刷新浏览器可重新连接仍在运行的终端，最近 512 KiB 输出用于重放。</p></article><article><span>LIMITS</span><h3>资源上限</h3><p>每个服务进程最多同时运行 8 个终端；终端只存在于进程内存，服务退出即结束。</p></article><article><span>SESSIONS</span><h3>Session 索引</h3><p>SQLite 中的轻量索引提供列表、排序与分页，不复制完整消息内容。</p></article></div>
+</div></section>
+
+<section class="section-pad feature-detail workspace-detail"><div class="content-shell">
+  <div class="detail-heading reveal"><span class="detail-number">04</span><div><span class="section-kicker">NOTIFICATIONS</span><h2>Agent 结束时，用你在意的方式提醒。</h2><p>浏览器通知、语音播报和邮件通知可以按需组合。语音和邮件默认关闭，需要显式配置才启用。</p></div></div>
+  <div class="workspace-detail-grid"><article><span>WEB PUSH</span><h3>浏览器通知</h3><p>授权后对所有已知 Agent 提供完成通知；需要 HTTPS 安全上下文（<code>localhost</code> 例外）。</p></article><article><span>SUMMARY</span><h3>语音摘要</h3><p>摘要 LLM 把最终输出压缩成短播报，按句子流式 TTS，多个 Session 排队播放不重叠。</p></article><article><span>STT</span><h3>语音输入</h3><p>配置 <code>--voice-stt-model</code> 后 Web UI 显示麦克风按钮；识别结果只插入输入框，不会自动发送。</p></article><article><span>MAILDISPATCH</span><h3>邮件通知</h3><p>Agent settle 后通过 MailDispatch 提交事务邮件，返回 <code>202</code> 即进入其持久队列。</p></article><article><span>AGGREGATION</span><h3>聚合等待</h3><p>首个任务完成后可等待若干秒，把期间完成的其他任务合并进同一封邮件。</p></article><article><span>CONTENT</span><h3>正文可控</h3><p>可选择是否包含 Agent 最终回复、Session 名称与工作路径；设置保存在服务端数据库。</p></article></div>
+</div></section>
+
+<section class="section-pad feature-detail"><div class="content-shell">
+  <div class="detail-heading reveal"><span class="detail-number">05</span><div><span class="section-kicker">API & CLIENTS</span><h2>Web UI 之外，还有 API 和 Android 客户端。</h2><p>除静态资源、<code>/health</code> 和登录接口外，所有请求都需要 <code>Authorization: Bearer &lt;token&gt;</code>，响应统一为 <code>{ data }</code> 或 <code>{ error }</code>。</p></div></div>
+  <div class="protocol-layout reveal">
+    <div class="protocol-list"><article><span class="protocol-status stable">REST</span><code>/api/v1/workspaces · /agents · /sessions</code><h3>资源管理</h3><p>创建与查询 Workspace、Agent 与 Session，浏览目录、读取文件与 stat 信息。</p></article><article><span class="protocol-status stable">REST</span><code>/api/v1/agents/:id/prompt · steer · abort</code><h3>Agent 命令</h3><p>发送指令、切换模型与 Thinking level、命名 Session、Fork、Compact、响应扩展 UI。</p></article><article><span class="protocol-status stable">WS</span><code>/api/v1/ws</code><h3>事件流</h3><p>支持 sequence、replay、snapshot、<code>fromNow</code> 与 Agent command 下发。</p></article><article><span class="protocol-status stable">WS</span><code>/api/v1/terminals/:id/ws</code><h3>终端通道</h3><p>输入、窗口 resize、输出快照与退出事件。</p></article></div>
+    <aside class="capability-panel"><h3>Android 客户端</h3><ul class="check-list"><li>Kotlin + Jetpack Compose 原生应用</li><li>与 Web UI 共用同一套 API 与配对码</li><li>Session、Agent 与流式对话</li><li>构建说明见仓库 <code>android/README.md</code></li><li>流式 PCM 播放与录音尚未接入</li></ul><p class="panel-note">完整能力列表见仓库中的 <code>ANDROID_APP_FEATURES.md</code>。</p></aside>
+  </div>
+</div></section>
+
+<section class="section-pad free-reminder"><div class="content-shell reminder-panel reveal"><div><span class="section-kicker">SELF-HOSTED & FREE</span><h2>免费的是这层远程外壳，不是模型。</h2><p>pi2web 以 MIT License 开源，不托管代码、不代理模型请求、不上传会话。你需要自备可用的 Pi Coding Agent 配置与模型 Provider。</p></div><a class="button button-primary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">查看源码 ↗</a></div></section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/zh/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>在你自己的机器上运行 Pi Coding Agent，用浏览器和 Android 手机安全地远程操作。</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/zh/features/">产品能力</a>
+          <a href="/zh/blog/">使用指南</a>
+          <a href="/zh/faq/">常见问题</a>
+          <a href="/zh/privacy/">隐私说明</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web 不提供任何 LLM、推理服务或模型额度。模型、Provider 认证和用量全部来自你本机的 Pi 配置。</strong></p>
+        <p>© 2026 pi2web · MIT License · 独立开源项目<br>与 Pi、GitHub、Google 及其他相关厂商不存在隶属或背书关系；相关商标归各自所有者。</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

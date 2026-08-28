@@ -25,12 +25,12 @@ type Fetcher=typeof fetch;
 const punctuation=new Set(['。','！','？','!','?','.']);
 const closing=new Set(['”','’','"','\'','）',')','】',']']);
 
-const endpoint=(base:string,path:string)=>`${base.replace(/\/$/,'')}${base.replace(/\/$/,'').endsWith('/v1')?'':'/v1'}${path}`;
-const authHeaders=(key?:string):Record<string,string>=>key?{authorization:`Bearer ${key}`}:{ };
+export const endpoint=(base:string,path:string)=>`${base.replace(/\/$/,'')}${base.replace(/\/$/,'').endsWith('/v1')?'':'/v1'}${path}`;
+export const authHeaders=(key?:string):Record<string,string>=>key?{authorization:`Bearer ${key}`}:{ };
 const abortError=(error:unknown)=>error instanceof Error&&error.name==='AbortError';
 const timeoutError=(error:unknown)=>error instanceof Error&&error.name==='TimeoutError';
 /** Combines caller cancellation with a hard timeout so a stalled speech server cannot block the announcement queue forever. */
-const deadline=(ms:number,signal?:AbortSignal)=>signal?AbortSignal.any([signal,AbortSignal.timeout(ms)]):AbortSignal.timeout(ms);
+export const deadline=(ms:number,signal?:AbortSignal)=>signal?AbortSignal.any([signal,AbortSignal.timeout(ms)]):AbortSignal.timeout(ms);
 
 export function assistantText(message:unknown):string|undefined{
   if(typeof message==='string')return message.trim()||undefined;
@@ -63,7 +63,7 @@ export function prepareSummaryInput(text:string,maxChars=32000):string{
   return cleaned;
 }
 
-function clipSummaryField(text:string,maxChars:number):string{
+export function clipSummaryField(text:string,maxChars:number):string{
   const normalized=text.replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();if(normalized.length<=maxChars)return normalized;
   const head=Math.floor(maxChars*0.375),tail=maxChars-head;return `${normalized.slice(0,head)}\n\n[中间内容已省略]\n\n${normalized.slice(-tail)}`;
 }
@@ -140,7 +140,9 @@ export class VoiceManager{
   private announcementQueue=Promise.resolve();
   private closed=false;
   private readonly config:Required<Pick<VoiceConfig,'language'|'maxInputChars'|'maxOutputTokens'|'sampleRate'|'ttsFormat'|'requestTimeoutMs'>>&VoiceConfig;
-  constructor(config:VoiceConfig,private fetcher:Fetcher=fetch){this.config={language:'zh-CN',maxInputChars:32000,maxOutputTokens:160,sampleRate:24000,ttsFormat:'pcm',requestTimeoutMs:120000,...config}}
+  // 2000, not ~160: reasoning models spend most of this budget on hidden reasoning tokens and return an
+  // empty message with finish_reason "length" when the cap is tight.
+  constructor(config:VoiceConfig,private fetcher:Fetcher=fetch){this.config={language:'zh-CN',maxInputChars:32000,maxOutputTokens:2000,sampleRate:24000,ttsFormat:'pcm',requestTimeoutMs:120000,...config}}
   subscribe(listener:(agentId:string,event:VoiceEvent)=>void){this.emitter.on('event',listener);return()=>this.emitter.off('event',listener)}
   capabilities(){return {tts:true,stt:!!this.config.sttModel}}
   recordUserPrompt(agentId:string,prompt:string){const value=prompt.trim();if(value)this.lastPrompt.set(agentId,value)}

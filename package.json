@@ -38,6 +38,7 @@
     "check": "npm run build",
     "test": "vitest run",
     "dev": "tsx src/main.ts",
+    "dev:watch": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build && npm test"
@@ -46,6 +47,7 @@
     "node": ">=20.10"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.80.6",
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
@@ -53,6 +55,7 @@
     "dompurify": "^3.4.12",
     "marked": "^18.0.6",
     "node-pty": "^1.1.0",
+    "typebox": "1.1.38",
     "ws": "^8.18.0"
   },
   "devDependencies": {

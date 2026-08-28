@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>配置 pi2web 的 Agent 完成邮件通知</title>
+  <meta name="description" content="通过 MailDispatch 在 Agent 任务结束时收到邮件：命令行参数、API key 环境变量、聚合等待时间、正文内容开关与失败排查。">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/zh/blog/mail-notifications/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/blog/mail-notifications/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/blog/mail-notifications/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/blog/mail-notifications/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="配置 pi2web 的 Agent 完成邮件通知">
+  <meta property="og:description" content="通过 MailDispatch 在 Agent 任务结束时收到邮件：命令行参数、API key 环境变量、聚合等待时间、正文内容开关与失败排查。">
+  <meta property="og:url" content="https://pi2web.es2q.com/zh/blog/mail-notifications/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="article:published_time" content="2026-07-25">
+  <meta property="article:modified_time" content="2026-07-25">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="配置 pi2web 的 Agent 完成邮件通知">
+  <meta name="twitter:description" content="通过 MailDispatch 在 Agent 任务结束时收到邮件：命令行参数、API key 环境变量、聚合等待时间、正文内容开关与失败排查。">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"\u914d\u7f6e pi2web \u7684 Agent \u5b8c\u6210\u90ae\u4ef6\u901a\u77e5","description":"\u901a\u8fc7 MailDispatch \u5728 Agent \u4efb\u52a1\u7ed3\u675f\u65f6\u6536\u5230\u90ae\u4ef6\uff1a\u547d\u4ee4\u884c\u53c2\u6570\u3001API key \u73af\u5883\u53d8\u91cf\u3001\u805a\u5408\u7b49\u5f85\u65f6\u95f4\u3001\u6b63\u6587\u5185\u5bb9\u5f00\u5173\u4e0e\u5931\u8d25\u6392\u67e5\u3002","url":"https://pi2web.es2q.com/zh/blog/mail-notifications/","inLanguage":"zh-CN","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"},"datePublished":"2026-07-25","dateModified":"2026-07-25","author":{"@type":"Person","name":"sxwxs"},"publisher":{"@type":"Organization","name":"pi2web"},"about":{"@type":"SoftwareApplication","name":"pi2web","applicationCategory":"DeveloperApplication"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"pi2web","item":"https://pi2web.es2q.com/zh/"},{"@type":"ListItem","position":2,"name":"\u4f7f\u7528\u6307\u5357","item":"https://pi2web.es2q.com/zh/blog/"},{"@type":"ListItem","position":3,"name":"\u914d\u7f6e pi2web \u7684 Agent \u5b8c\u6210\u90ae\u4ef6\u901a\u77e5","item":"https://pi2web.es2q.com/zh/blog/mail-notifications/"}]}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="blog_mail">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/zh/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/zh/features/">产品能力</a>
+        <a href="/zh/blog/" aria-current="page">使用指南</a>
+        <a href="/zh/faq/">常见问题</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/en/blog/mail-notifications/" lang="en" aria-label="Switch to English">EN</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<article class="article-page">
+<header class="article-hero section-pad"><div class="content-shell article-shell reveal"><nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/zh/">pi2web</a><span>/</span><a href="/zh/blog/">使用指南</a></nav><span class="section-kicker">EMAIL NOTIFICATIONS</span><h1>配置 pi2web 的 Agent 完成邮件通知</h1><p class="article-deck">离开电脑时，用一封邮件知道 Agent 已经跑完。pi2web 通过 MailDispatch 提交事务邮件，可配置聚合等待时间与正文内容。</p><div class="article-meta"><time datetime="2026-07-25">2026-07-25</time><span>pi2web</span><span>实践指南</span></div></div></header>
+<div class="content-shell article-layout"><aside class="article-toc"><strong>本文目录</strong><a href="#when">触发时机</a><a href="#config">启动参数</a><a href="#ui">在 Web UI 中调整</a><a href="#body">邮件内容</a><a href="#failure">失败处理</a></aside><div class="article-body"><h2 id="when">1. 什么时候发邮件</h2>
+<p>Pi 发出 <code>agent_settled</code> 时触发，也就是该 Agent 不会再自动重试、自动 compact 或执行排队的 follow-up。此时任务真的告一段落，适合提醒你回来查看。</p>
+<p>pi2web 只负责把邮件提交给 MailDispatch。MailDispatch 返回 <code>202</code> 后邮件进入其持久队列，实际投递由 MailDispatch 的 worker 完成。</p>
+
+<h2 id="config">2. 启动参数</h2>
+<p>三个参数必须同时提供，否则 pi2web 会拒绝启动：endpoint、API key 环境变量名和收件人。</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'"><span class="copy-label">复制</span></button></div><pre><code>export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
+pi2web \
+  --maildispatch-endpoint https://mail.example.com/api/v1/messages \
+  --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
+  --maildispatch-notify-to owner@example.com \
+  --maildispatch-sender-id system</code></pre></div>
+<table class="article-table"><thead><tr><th>参数</th><th>是否必需</th><th>说明</th></tr></thead><tbody>
+<tr><td><code>--maildispatch-endpoint</code></td><td>必需</td><td>MailDispatch 消息 API 地址，必须是 http 或 https URL。</td></tr>
+<tr><td><code>--maildispatch-api-key-env</code></td><td>必需</td><td>存放 API key 的<strong>环境变量名</strong>，而不是 key 本身。</td></tr>
+<tr><td><code>--maildispatch-notify-to</code></td><td>必需</td><td>接收通知的邮箱地址。</td></tr>
+<tr><td><code>--maildispatch-sender-id</code></td><td>可选</td><td>指定 sender；省略时由 MailDispatch 按 API key 与服务配置选择。</td></tr>
+</tbody></table>
+<div class="article-callout"><strong>API key 只从环境变量读取。</strong><p>这样密钥不会出现在命令行参数和进程列表中。该 key 至少需要 MailDispatch 的 <code>mail:send</code> scope。</p></div>
+
+<h2 id="ui">3. 在 Web UI 中调整</h2>
+<p>导航栏的“配置”窗口可以启用或关闭邮件通知，并设置：</p>
+<ul>
+<li><strong>聚合等待时间</strong>：首个任务完成后等待指定秒数，期间完成的其他任务合并进同一封邮件；<code>0</code> 表示立即发送。</li>
+<li><strong>是否包含 Agent 最终回复。</strong></li>
+<li><strong>是否包含 Session 名称和工作路径。</strong></li>
+</ul>
+<p>这些设置保存在 pi2web 的 SQLite 元数据数据库中，对所有浏览器客户端和 Agent 生效，服务重启后继续保留。</p>
+
+<h2 id="body">4. 邮件内容</h2>
+<p>如果关闭了“包含最终回复”和“包含 Session 信息”，邮件正文只说明一个或多个 Agent 任务已经完成，不含任何项目细节。</p>
+<div class="article-callout warning"><strong>注意内容敏感性。</strong><p>Agent 的最终回复可能包含代码片段、路径或内部信息。邮件会离开你的机器，请按收件邮箱的可信程度决定是否开启这两项。</p></div>
+
+<h2 id="failure">5. 失败处理</h2>
+<p>邮件通知失败只写入 pi2web 的标准错误输出，不会改变 Agent 任务状态，也不会阻塞后续运行。排查时可以按这个顺序检查：</p>
+<ol>
+<li>启动日志里是否有参数校验错误（三个必需参数是否齐全、endpoint 是否为合法 URL）。</li>
+<li>环境变量是否在启动 pi2web 的那个 Shell 中真的存在。</li>
+<li>API key 是否具备 <code>mail:send</code> scope，以及是否被撤销。</li>
+<li>MailDispatch 是否返回 <code>202</code>；若返回其他状态码，错误信息会打印在 pi2web 的 stderr 中。</li>
+<li>邮件已入队但没收到时，检查 MailDispatch 侧的投递日志与收件箱垃圾邮件过滤。</li>
+</ol>
+<p class="article-source">参考：<a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a></p>
+<div class="article-end"><strong>下一步</strong><p>在把服务开放给其他设备之前，先了解 pi2web 的威胁模型和安全远程访问方式。</p><a class="button button-secondary" href="/zh/blog/remote-access/">阅读安全远程访问指南 →</a></div></div></div>
+</article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/zh/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>在你自己的机器上运行 Pi Coding Agent，用浏览器和 Android 手机安全地远程操作。</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/zh/features/">产品能力</a>
+          <a href="/zh/blog/">使用指南</a>
+          <a href="/zh/faq/">常见问题</a>
+          <a href="/zh/privacy/">隐私说明</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web 不提供任何 LLM、推理服务或模型额度。模型、Provider 认证和用量全部来自你本机的 Pi 配置。</strong></p>
+        <p>© 2026 pi2web · MIT License · 独立开源项目<br>与 Pi、GitHub、Google 及其他相关厂商不存在隶属或背书关系；相关商标归各自所有者。</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>常见问题 — pi2web</title>
+  <meta name="description" content="关于 pi2web 的常见问题：配对码丢失怎么办、可以暴露到公网吗、是否需要 Pi 订阅、数据保存在哪里、支持哪些平台、如何升级和卸载。">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/zh/faq/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/faq/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/faq/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/faq/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="常见问题 — pi2web">
+  <meta property="og:description" content="关于 pi2web 的常见问题：配对码丢失怎么办、可以暴露到公网吗、是否需要 Pi 订阅、数据保存在哪里、支持哪些平台、如何升级和卸载。">
+  <meta property="og:url" content="https://pi2web.es2q.com/zh/faq/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="常见问题 — pi2web">
+  <meta name="twitter:description" content="关于 pi2web 的常见问题：配对码丢失怎么办、可以暴露到公网吗、是否需要 Pi 订阅、数据保存在哪里、支持哪些平台、如何升级和卸载。">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","headline":"\u5e38\u89c1\u95ee\u9898 \u2014 pi2web","description":"\u5173\u4e8e pi2web \u7684\u5e38\u89c1\u95ee\u9898\uff1a\u914d\u5bf9\u7801\u4e22\u5931\u600e\u4e48\u529e\u3001\u53ef\u4ee5\u66b4\u9732\u5230\u516c\u7f51\u5417\u3001\u662f\u5426\u9700\u8981 Pi \u8ba2\u9605\u3001\u6570\u636e\u4fdd\u5b58\u5728\u54ea\u91cc\u3001\u652f\u6301\u54ea\u4e9b\u5e73\u53f0\u3001\u5982\u4f55\u5347\u7ea7\u548c\u5378\u8f7d\u3002","url":"https://pi2web.es2q.com/zh/faq/","inLanguage":"zh-CN","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","inLanguage":"zh-CN","mainEntity":[{"@type":"Question","name":"pi2web \u662f\u4ec0\u4e48\uff1f","acceptedAnswer":{"@type":"Answer","text":"pi2web \u662f\u4e00\u4e2a\u5728\u5f00\u53d1\u673a\u4e0a\u8fd0\u884c Pi Coding Agent \u7684\u670d\u52a1\u5668\u3002\u5b83\u901a\u8fc7\u53d7\u914d\u5bf9\u7801\u4fdd\u62a4\u7684 HTTP/WebSocket API \u63d0\u4f9b Web UI \u548c Android \u539f\u751f\u5ba2\u6237\u7aef\uff0c\u8ba9\u4f60\u7528\u6d4f\u89c8\u5668\u6216\u624b\u673a\u7ee7\u7eed\u540c\u4e00\u4e2a\u7f16\u7801\u4f1a\u8bdd\u3002"}},{"@type":"Question","name":"\u600e\u6837\u5b89\u88c5 pi2web\uff1f","acceptedAnswer":{"@type":"Answer","text":"\u9700\u8981 Node.js 20.10 \u6216\u66f4\u9ad8\u7248\u672c\uff0c\u6267\u884c npm install -g pi2web\uff0c\u7136\u540e\u8fd0\u884c pi2web\uff0c\u9ed8\u8ba4\u76d1\u542c http://127.0.0.1:11318\u3002"}},{"@type":"Question","name":"\u914d\u5bf9\u7801\u5728\u54ea\u91cc\uff1f\u4e22\u5931\u4e86\u600e\u4e48\u529e\uff1f","acceptedAnswer":{"@type":"Answer","text":"\u670d\u52a1\u9996\u6b21\u542f\u52a8\u65f6\u5728\u7ec8\u7aef\u663e\u793a\u4e00\u6b21\u914d\u5bf9\u7801\uff0c\u670d\u52a1\u7aef\u53ea\u4fdd\u5b58 SHA-256 hash\u3002\u5fd8\u8bb0\u540e\u65e0\u6cd5\u627e\u56de\uff0c\u53ef\u8fd0\u884c pi2web --rotate-access-token \u751f\u6210\u65b0\u7684\u914d\u5bf9\u7801\uff0c\u65e7\u914d\u5bf9\u7801\u7acb\u5373\u5931\u6548\u3002"}},{"@type":"Question","name":"\u53ef\u4ee5\u628a pi2web \u76f4\u63a5\u66b4\u9732\u5230\u516c\u7f51\u5417\uff1f","acceptedAnswer":{"@type":"Answer","text":"\u4e0d\u5efa\u8bae\u3002Terminal \u662f\u4ee5\u670d\u52a1\u8fdb\u7a0b\u7528\u6237\u8eab\u4efd\u8fd0\u884c\u7684\u5b8c\u6574 Shell\uff0c\u83b7\u5f97\u914d\u5bf9\u7801\u7b49\u4e8e\u83b7\u5f97\u8be5\u7528\u6237\u7684 Shell \u6743\u9650\u3002\u8bf7\u4f7f\u7528 SSH \u96a7\u9053\u3001Tailscale\u3001devtunnel \u6216\u914d\u7f6e HTTPS \u4e0e\u8bbf\u95ee\u63a7\u5236\u7684\u53ef\u4fe1\u53cd\u5411\u4ee3\u7406\u3002"}},{"@type":"Question","name":"pi2web \u4f1a\u63d0\u4f9b\u6a21\u578b\u6216\u989d\u5ea6\u5417\uff1f","acceptedAnswer":{"@type":"Answer","text":"\u4e0d\u4f1a\u3002pi2web \u53ea\u662f Pi Coding Agent \u7684\u8fdc\u7a0b\u5916\u58f3\uff0c\u6a21\u578b\u914d\u7f6e\u3001Provider \u8ba4\u8bc1\u548c\u989d\u5ea6\u5168\u90e8\u590d\u7528\u672c\u673a ~/.pi/agent \u4e2d\u7684 Pi \u8bbe\u7f6e\u3002"}},{"@type":"Question","name":"\u6570\u636e\u4fdd\u5b58\u5728\u4ec0\u4e48\u5730\u65b9\uff1f","acceptedAnswer":{"@type":"Answer","text":"\u670d\u52a1\u7aef\u5143\u6570\u636e\u4fdd\u5b58\u5728 ~/.pi/remote-pi/remote-pi.db\uff08SQLite\uff09\uff0c\u5b8c\u6574\u5bf9\u8bdd\u7531 Pi \u7684 SessionManager \u4ee5 JSONL \u4fdd\u5b58\u5728 ~/.pi/agent/sessions/ \u4e0b\u3002pi2web \u4e0d\u4f1a\u628a\u4f1a\u8bdd\u4e0a\u4f20\u5230\u4efb\u4f55\u7b2c\u4e09\u65b9\u3002"}},{"@type":"Question","name":"\u652f\u6301\u54ea\u4e9b\u5e73\u53f0\uff1f","acceptedAnswer":{"@type":"Answer","text":"\u670d\u52a1\u7aef\u652f\u6301 Linux\u3001macOS \u548c Windows \u4e0a\u7684 Node.js 20.10+\u3002\u5ba2\u6237\u7aef\u652f\u6301\u73b0\u4ee3\u6d4f\u89c8\u5668\uff0c\u4ee5\u53ca\u4ed3\u5e93\u4e2d\u7684 Kotlin + Jetpack Compose Android \u5e94\u7528\u3002"}},{"@type":"Question","name":"\u8bed\u97f3\u64ad\u62a5\u548c\u90ae\u4ef6\u901a\u77e5\u662f\u5fc5\u987b\u7684\u5417\uff1f","acceptedAnswer":{"@type":"Answer","text":"\u4e0d\u662f\u3002\u4e24\u8005\u9ed8\u8ba4\u5173\u95ed\uff1a\u53ea\u6709\u914d\u7f6e --voice-base-url \u624d\u542f\u7528\u8bed\u97f3\uff0c\u53ea\u6709\u540c\u65f6\u914d\u7f6e MailDispatch endpoint\u3001API key \u73af\u5883\u53d8\u91cf\u548c\u6536\u4ef6\u4eba\u624d\u542f\u7528\u90ae\u4ef6\u901a\u77e5\u3002"}}]}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="faq">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/zh/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/zh/features/">产品能力</a>
+        <a href="/zh/blog/">使用指南</a>
+        <a href="/zh/faq/" aria-current="page">常见问题</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/en/faq/" lang="en" aria-label="Switch to English">EN</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<section class="page-hero section-pad"><div class="content-shell narrow reveal"><span class="section-kicker">FAQ</span><h1>关于 pi2web 的<br><span>常见问题。</span></h1><p>安装、配对码、安全边界、数据存储与平台支持。没找到答案时，可以在 GitHub Issues 中提问。</p><div class="page-hero-actions"><a class="button button-primary" href="/zh/blog/install-and-configure/">安装与配置指南</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web/issues" rel="noreferrer">提交 Issue ↗</a></div></div></section>
+<section class="section-pad faq-page"><div class="content-shell faq-layout">
+  <article class="faq-item reveal"><h2>pi2web 是什么？</h2><p>pi2web 是一个在开发机上运行 Pi Coding Agent 的服务器。它通过受配对码保护的 HTTP/WebSocket API 提供 Web UI 和 Android 原生客户端，让你用浏览器或手机继续同一个编码会话。</p></article>
+  <article class="faq-item reveal"><h2>怎样安装 pi2web？</h2><p>需要 Node.js 20.10 或更高版本，执行 npm install -g pi2web，然后运行 pi2web，默认监听 http://127.0.0.1:11318。</p></article>
+  <article class="faq-item reveal"><h2>配对码在哪里？丢失了怎么办？</h2><p>服务首次启动时在终端显示一次配对码，服务端只保存 SHA-256 hash。忘记后无法找回，可运行 pi2web --rotate-access-token 生成新的配对码，旧配对码立即失效。</p></article>
+  <article class="faq-item reveal"><h2>可以把 pi2web 直接暴露到公网吗？</h2><p>不建议。Terminal 是以服务进程用户身份运行的完整 Shell，获得配对码等于获得该用户的 Shell 权限。请使用 SSH 隧道、Tailscale、devtunnel 或配置 HTTPS 与访问控制的可信反向代理。</p></article>
+  <article class="faq-item reveal"><h2>pi2web 会提供模型或额度吗？</h2><p>不会。pi2web 只是 Pi Coding Agent 的远程外壳，模型配置、Provider 认证和额度全部复用本机 ~/.pi/agent 中的 Pi 设置。</p></article>
+  <article class="faq-item reveal"><h2>数据保存在什么地方？</h2><p>服务端元数据保存在 ~/.pi/remote-pi/remote-pi.db（SQLite），完整对话由 Pi 的 SessionManager 以 JSONL 保存在 ~/.pi/agent/sessions/ 下。pi2web 不会把会话上传到任何第三方。</p></article>
+  <article class="faq-item reveal"><h2>支持哪些平台？</h2><p>服务端支持 Linux、macOS 和 Windows 上的 Node.js 20.10+。客户端支持现代浏览器，以及仓库中的 Kotlin + Jetpack Compose Android 应用。</p></article>
+  <article class="faq-item reveal"><h2>语音播报和邮件通知是必须的吗？</h2><p>不是。两者默认关闭：只有配置 --voice-base-url 才启用语音，只有同时配置 MailDispatch endpoint、API key 环境变量和收件人才启用邮件通知。</p></article>
+  <div class="faq-more reveal">
+    <h2>还有其他问题？</h2>
+    <p>使用指南里有更详细的配置说明，包含命令行选项、远程访问方案、语音与邮件通知。</p>
+    <div class="hero-actions center-actions"><a class="button button-primary" href="/zh/blog/">查看全部指南</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub ↗</a></div>
+  </div>
+</div></section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/zh/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>在你自己的机器上运行 Pi Coding Agent，用浏览器和 Android 手机安全地远程操作。</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/zh/features/">产品能力</a>
+          <a href="/zh/blog/">使用指南</a>
+          <a href="/zh/faq/">常见问题</a>
+          <a href="/zh/privacy/">隐私说明</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web 不提供任何 LLM、推理服务或模型额度。模型、Provider 认证和用量全部来自你本机的 Pi 配置。</strong></p>
+        <p>© 2026 pi2web · MIT License · 独立开源项目<br>与 Pi、GitHub、Google 及其他相关厂商不存在隶属或背书关系；相关商标归各自所有者。</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

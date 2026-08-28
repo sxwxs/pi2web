@@ -1,0 +1,45 @@
+{% extends "blog_article.html" %}{% block kicker %}EMAIL NOTIFICATIONS{% endblock %}{% block deck %}Get an email when an agent finishes while you are away from the machine. pi2web submits transactional mail through MailDispatch with a configurable aggregation window and body options.{% endblock %}{% block toc %}<a href="#when">When mail is sent</a><a href="#config">CLI configuration</a><a href="#ui">Adjusting in the web UI</a><a href="#body">Message body</a><a href="#failure">Failure handling</a>{% endblock %}{% block article %}
+<h2 id="when">1. When mail is sent</h2>
+<p>Mail is triggered when Pi emits <code>agent_settled</code>, meaning the agent will not automatically retry, automatically compact, or run a queued follow-up. That is the moment the task genuinely paused and is worth your attention.</p>
+<p>pi2web only submits the message to MailDispatch. A <code>202</code> response means the mail entered MailDispatch's durable queue; actual delivery is handled by its workers.</p>
+
+<h2 id="config">2. CLI configuration</h2>
+<p>Three options must be provided together — endpoint, API key environment variable, and recipient — or pi2web refuses to start.</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'"><span class="copy-label">Copy</span></button></div><pre><code>export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
+pi2web \
+  --maildispatch-endpoint https://mail.example.com/api/v1/messages \
+  --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
+  --maildispatch-notify-to owner@example.com \
+  --maildispatch-sender-id system</code></pre></div>
+<table class="article-table"><thead><tr><th>Option</th><th>Required</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--maildispatch-endpoint</code></td><td>Yes</td><td>MailDispatch message API URL; must be http or https.</td></tr>
+<tr><td><code>--maildispatch-api-key-env</code></td><td>Yes</td><td>The <strong>name of the environment variable</strong> holding the API key, not the key itself.</td></tr>
+<tr><td><code>--maildispatch-notify-to</code></td><td>Yes</td><td>Recipient address for completion notifications.</td></tr>
+<tr><td><code>--maildispatch-sender-id</code></td><td>No</td><td>Explicit sender; otherwise MailDispatch picks one from the API key and service configuration.</td></tr>
+</tbody></table>
+<div class="article-callout"><strong>API keys are read from the environment only.</strong><p>This keeps the secret out of command lines and process listings. The key needs at least the MailDispatch <code>mail:send</code> scope.</p></div>
+
+<h2 id="ui">3. Adjusting in the web UI</h2>
+<p>The "settings" dialog in the navigation bar enables or disables email notifications and configures:</p>
+<ul>
+<li><strong>Aggregation window</strong> — wait N seconds after the first completion so tasks finishing in that window share one email; <code>0</code> sends immediately.</li>
+<li><strong>Include the agent's final reply.</strong></li>
+<li><strong>Include the session name and working path.</strong></li>
+</ul>
+<p>Settings persist in pi2web's SQLite metadata database, apply to every browser client and agent, and survive restarts.</p>
+
+<h2 id="body">4. Message body</h2>
+<p>With both "include final reply" and "include session info" disabled, the body only states that one or more agent tasks finished, without any project detail.</p>
+<div class="article-callout warning"><strong>Consider content sensitivity.</strong><p>A final reply may contain code snippets, paths, or internal information, and email leaves your machine. Enable those options according to how much you trust the mailbox and the mail provider.</p></div>
+
+<h2 id="failure">5. Failure handling</h2>
+<p>Notification failures are written to pi2web's standard error only. They never change agent state and never block subsequent runs. Debug in this order:</p>
+<ol>
+<li>Check startup logs for validation errors (all three required options present, endpoint a valid URL).</li>
+<li>Verify the environment variable really exists in the shell that started pi2web.</li>
+<li>Confirm the API key has the <code>mail:send</code> scope and has not been revoked.</li>
+<li>Check whether MailDispatch returned <code>202</code>; other status codes are printed to stderr.</li>
+<li>If mail was queued but never arrived, inspect MailDispatch delivery logs and the recipient's spam filter.</li>
+</ol>
+<p class="article-source">Reference: <a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a></p>
+{% endblock %}

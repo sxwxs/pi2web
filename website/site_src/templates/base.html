@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="{{ html_lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ meta.title }}</title>
+  <meta name="description" content="{{ meta.description }}">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+  {% if noindex %}<meta name="robots" content="noindex,nofollow">{% else %}<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">{% endif %}
+
+  <link rel="canonical" href="{{ canonical }}">
+  <link rel="alternate" hreflang="{{ 'zh-CN' if lang == 'zh' else 'en' }}" href="{{ canonical }}">
+  <link rel="alternate" hreflang="{{ alternate_lang }}" href="{{ alternate }}">
+  <link rel="alternate" hreflang="x-default" href="{{ x_default }}">
+  <meta property="og:type" content="{{ 'article' if is_article else 'website' }}">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="{{ meta.title }}">
+  <meta property="og:description" content="{{ meta.description }}">
+  <meta property="og:url" content="{{ canonical }}">
+  <meta property="og:image" content="{{ base_url }}/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="{{ 'zh_CN' if lang == 'zh' else 'en_US' }}">
+  <meta property="og:locale:alternate" content="{{ 'en_US' if lang == 'zh' else 'zh_CN' }}">
+  {% if is_article %}
+  <meta property="article:published_time" content="{{ published }}">
+  <meta property="article:modified_time" content="{{ modified }}">
+  {% endif %}
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ meta.title }}">
+  <meta name="twitter:description" content="{{ meta.description }}">
+  <meta name="twitter:image" content="{{ base_url }}/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"{{ 'TechArticle' if is_article else 'WebPage' }}","headline":{{ meta.title|tojson }},"description":{{ meta.description|tojson }},"url":{{ canonical|tojson }},"inLanguage":{{ html_lang|tojson }},"isPartOf":{"@type":"WebSite","name":"pi2web","url":"{{ base_url }}/"}{% if is_article %},"datePublished":"{{ published }}","dateModified":"{{ modified }}","author":{"@type":"Person","name":"sxwxs"},"publisher":{"@type":"Organization","name":"pi2web"},"about":{"@type":"SoftwareApplication","name":"pi2web","applicationCategory":"DeveloperApplication"}{% endif %}}</script>
+  {% if is_article %}
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"pi2web","item":"{{ base_url }}/{{ lang }}/"},{"@type":"ListItem","position":2,"name":{{ nav.blog|tojson }},"item":{{ blog_url|tojson }}},{"@type":"ListItem","position":3,"name":{{ meta.title|tojson }},"item":{{ canonical|tojson }}}]}</script>
+  {% endif %}
+  {% if is_home %}
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"pi2web","alternateName":"Remote Pi","applicationCategory":"DeveloperApplication","operatingSystem":"Linux, macOS, Windows, Android","description":{{ meta.description|tojson }},"url":"{{ base_url }}/{{ lang }}/","softwareVersion":"0.2.0","license":"https://opensource.org/licenses/MIT","downloadUrl":"https://www.npmjs.com/package/pi2web","installUrl":"https://www.npmjs.com/package/pi2web","codeRepository":"https://github.com/sxwxs/pi2web","author":{"@type":"Person","name":"sxwxs"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+  {% endif %}
+  {% if is_faq %}
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","inLanguage":{{ html_lang|tojson }},"mainEntity":[{% for question, answer in faq_items %}{"@type":"Question","name":{{ question|tojson }},"acceptedAnswer":{"@type":"Answer","text":{{ answer|tojson }}}}{% if not loop.last %},{% endif %}{% endfor %}]}</script>
+  {% endif %}
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="{{ page }}">
+  <a class="skip-link" href="#main">{{ nav.skip }}</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/{{ lang }}/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/{{ lang }}/features/"{% if page == 'features' %} aria-current="page"{% endif %}>{{ nav.features }}</a>
+        <a href="/{{ lang }}/blog/"{% if page == 'blog' or page.startswith('blog_') %} aria-current="page"{% endif %}>{{ nav.blog }}</a>
+        <a href="/{{ lang }}/faq/"{% if page == 'faq' %} aria-current="page"{% endif %}>{{ nav.faq }}</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">{{ nav.github }} <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="{{ language_url }}" lang="{{ 'en' if lang == 'zh' else 'zh-CN' }}" aria-label="{{ nav.language_label }}">{{ nav.language }}</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/{{ lang }}/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>{{ nav.footer_tagline }}</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/{{ lang }}/features/">{{ nav.features }}</a>
+          <a href="/{{ lang }}/blog/">{{ nav.blog }}</a>
+          <a href="/{{ lang }}/faq/">{{ nav.faq }}</a>
+          <a href="/{{ lang }}/privacy/">{{ nav.privacy }}</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>{{ nav.footer_note }}</strong></p>
+        <p>© 2026 pi2web · {{ nav.rights }}<br>{{ nav.trademark }}</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

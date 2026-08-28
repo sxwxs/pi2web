@@ -14,12 +14,14 @@ export type MailNotificationSettings={
   aggregationDelaySeconds:number;
   includeResponse:boolean;
   includeSessionDetails:boolean;
+  /** Collaboration escalations and stalls are sent immediately; they are never aggregated. */
+  collabEscalations:boolean;
 };
 export type MailNotificationContext={sessionName?:string;workspaceLabel?:string;cwd?:string};
 type Fetcher=typeof fetch;
 type PendingNotification={agentId:string;finalOutput:string;context:MailNotificationContext};
 
-const defaultSettings:MailNotificationSettings={enabled:true,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true};
+const defaultSettings:MailNotificationSettings={enabled:true,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true,collabEscalations:true};
 const clip=(value:string,max:number)=>value.length<=max?value:`${value.slice(0,max)}\n\n[内容过长，已截断]`;
 const oneLine=(value:string,max:number)=>value.replace(/[\r\n\t]+/g,' ').replace(/\s{2,}/g,' ').trim().slice(0,max);
 
@@ -35,7 +37,7 @@ export class MailNotifier{
   getSettings(){return {...this.settings}}
   updateSettings(value:Partial<MailNotificationSettings>){
     const next={...this.settings,...value};
-    next.enabled=Boolean(next.enabled);next.includeResponse=Boolean(next.includeResponse);next.includeSessionDetails=Boolean(next.includeSessionDetails);
+    next.enabled=Boolean(next.enabled);next.includeResponse=Boolean(next.includeResponse);next.includeSessionDetails=Boolean(next.includeSessionDetails);next.collabEscalations=Boolean(next.collabEscalations);
     next.aggregationDelaySeconds=Math.trunc(Number(next.aggregationDelaySeconds));
     if(!Number.isFinite(next.aggregationDelaySeconds)||next.aggregationDelaySeconds<0||next.aggregationDelaySeconds>86400)throw Object.assign(new Error('aggregationDelaySeconds must be an integer between 0 and 86400'),{code:'INVALID_MAIL_NOTIFICATION_SETTINGS'});
     this.settings=next;
@@ -51,6 +53,16 @@ export class MailNotifier{
     if(!this.settings.enabled)return;
     this.queue.push({agentId,finalOutput,context});
     if(!this.timer)this.scheduleFlush();
+  }
+  /**
+   * Fire-and-forget notification that bypasses the agent-completion queue. Used by the collaboration hub:
+   * a pending human ruling blocks the whole session, so it must not wait for the aggregation window.
+   */
+  notifyCollab(input:{subject:string,text:string}){
+    if(this.closed||!this.settings.enabled||!this.settings.collabEscalations)return;
+    const job=this.sendMail(input.subject,clip(input.text,24_000),{kind:'collab'}).catch(error=>console.error(`MailDispatch collaboration notification failed: ${(error as Error).message}`));
+    this.pending.add(job);void job.finally(()=>this.pending.delete(job));
+    return job;
   }
   async close(){
     this.closed=true;this.clearTimer();
@@ -84,9 +96,12 @@ export class MailNotifier{
       if(includeResponse){if(lines.length)lines.push('');lines.push('Agent 回复：',clip(item.finalOutput.trim()||'（没有可用的最终文本回复）',24_000))}
       return lines.join('\n');
     }).join('\n\n--------------------\n\n');
+    await this.sendMail(subject,text,{task_count:count});
+  }
+  private async sendMail(subject:string,text:string,metadata:Record<string,unknown>={}){
     const payload:Record<string,unknown>={
       to:[this.config.recipient],subject,text,priority:this.config.priority,purpose:'transactional',
-      metadata:{source:'remote-pi',task_count:count,notification_id:randomUUID()}
+      metadata:{source:'remote-pi',...metadata,notification_id:randomUUID()}
     };
     if(this.config.senderId)payload.sender_id=this.config.senderId;
     const response=await this.fetcher(this.config.endpoint,{method:'POST',signal:AbortSignal.timeout(this.config.timeoutMs),headers:{authorization:`Bearer ${this.config.apiKey}`,'content-type':'application/json; charset=utf-8',accept:'application/json','idempotency-key':randomUUID()},body:JSON.stringify(payload)});

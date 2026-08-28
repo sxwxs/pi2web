@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-hero section-pad blog-hero"><div class="content-shell narrow reveal"><span class="section-kicker">GUIDES & DOCS</span><h1>从安装到远程访问，<br><span>一步步配置 pi2web。</span></h1><p>这里整理 pi2web 的安装配置、Web UI 使用、安全暴露方式、语音与邮件通知，以及 Android 客户端。示例默认服务运行在 <code>http://127.0.0.1:11318</code>。</p></div></section>
+<section class="section-pad blog-index"><div class="content-shell"><div class="blog-grid">
+<a class="blog-card blog-card-featured reveal" href="/zh/blog/install-and-configure/"><span class="blog-tag">START HERE</span><h2>pi2web 安装与配置指南</h2><p>npm 安装、命令行选项、配对码管理、数据目录、Workspace 与 Terminal、邮件与语音开关、反向代理与故障排查。</p><span class="blog-read">约 12 分钟 · 阅读指南 →</span></a>
+<a class="blog-card reveal" href="/zh/blog/web-ui/"><span class="blog-tag">WEB UI</span><h2>Web UI 使用说明</h2><p>创建 Agent、发送 Prompt 与 steer、@ 引用文件、Terminal、Fork/Undo 与 Compact。</p><span class="blog-read">约 8 分钟 →</span></a>
+<a class="blog-card reveal" href="/zh/blog/remote-access/"><span class="blog-tag">SECURITY</span><h2>安全地远程访问</h2><p>威胁模型、配对码与限流，SSH 隧道、Tailscale、devtunnel 与 nginx HTTPS 反代。</p><span class="blog-read">约 9 分钟 →</span></a>
+<a class="blog-card reveal" href="/zh/blog/voice/"><span class="blog-tag">VOICE</span><h2>语音摘要与语音输入</h2><p>摘要 LLM 与 OpenAI 兼容语音服务的配置，Speaches 与 Edge TTS 两种方案。</p><span class="blog-read">约 9 分钟 →</span></a>
+<a class="blog-card reveal" href="/zh/blog/mail-notifications/"><span class="blog-tag">MAIL</span><h2>Agent 完成邮件通知</h2><p>MailDispatch 配置、API key 环境变量、聚合等待时间与正文内容开关。</p><span class="blog-read">约 6 分钟 →</span></a>
+<a class="blog-card reveal" href="/zh/blog/android-client/"><span class="blog-tag">ANDROID</span><h2>Android 客户端</h2><p>构建 Kotlin + Compose 客户端，配置服务地址与配对码，了解与 Web 的差异。</p><span class="blog-read">约 6 分钟 →</span></a>
+</div></div></section>
+{% endblock %}

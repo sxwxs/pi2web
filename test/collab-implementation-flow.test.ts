@@ -1,0 +1,87 @@
+import {afterEach,describe,expect,it} from 'vitest';
+import path from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {RemotePiServer} from '../src/server.js';
+import {MockBackend} from '../src/agents.js';
+import {bootCollabServer} from './collab-harness.js';
+
+let server:RemotePiServer|undefined;
+afterEach(async()=>{await server?.stop();server=undefined});
+const rid=()=>`req-${randomUUID()}`;
+
+async function boot(factory?:(id:string,cwd:string)=>MockBackend){
+  const harness=await bootCollabServer('remote-pi-impl',{factory});
+  server=harness.server;
+  return harness;
+}
+const finding=()=>({title:'Retry loop can double-charge a payment',severity:'critical',category:'correctness',location:{path:'src/pay/charge.ts',startLine:88},evidence:'chargeOnce retries on timeout without an idempotency key, so a slow gateway can be charged twice.',suggestion:'Send the order id as the idempotency key.'});
+
+describe('build, review, and explicit remediation',()=>{
+  it('ends review immediately after findings and only starts fixing when a human asks',async()=>{
+    const {call,workspace,collabAgent}=await boot();
+    const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Charge retry work',workspaceId:workspace.id,subject:{type:'free',value:'payment retry hardening'},policy:{implementationFirst:true}})).data;
+    const dev=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:await collabAgent()})).data;
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'reviewer',agentId:await collabAgent()})).data;
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/ready`,{clientRequestId:rid(),summary:'Initial implementation is ready for independent review.'},dev.participantToken);
+    const digest=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,reviewer.participantToken)).data;
+    const issueId=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:digest.baseline.baselineId,findings:[finding()],reviewComplete:true},reviewer.participantToken)).data.accepted[0].issueId;
+    const report=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/report`)).data;
+    expect(report.session).toMatchObject({phase:'finished',status:'finished',outcome:{verdict:'changes_required'}});
+    expect(report.issues[0]).toMatchObject({issueId,status:'confirmed'});
+    expect((await call('POST',`/api/v1/collab/sessions/${session.sessionId}/responses`,{clientRequestId:rid(),responses:[{issueId,responseType:'rejected'}]},dev.participantToken)).status).toBe(404);
+  });
+
+  it('adds a new developer to a finished review, fixes, and sends the result back to the original reviewer',async()=>{
+    const {call,workspace,collabAgent}=await boot();
+    const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Explicit remediation',workspaceId:workspace.id,subject:{type:'free',value:'payment callback'}})).data;
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'reviewer',agentId:await collabAgent()})).data;
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
+    const first=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,reviewer.participantToken)).data;
+    const issueId=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:first.baseline.baselineId,findings:[finding()],reviewComplete:true},reviewer.participantToken)).data.accepted[0].issueId;
+
+    const added=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'new developer',agentId:await collabAgent()})).data;
+    expect(added.participant.role).toBe('implementer');
+    const reopened=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/recheck`,{mode:'fix_then_review',implementerParticipantIds:[added.participant.participantId]})).data;
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data).toMatchObject({phase:'implementing',round:2,status:'active'});
+
+    // Reopening rotates every seat's bearer token; the fresh plaintext is returned here and stored only as a hash.
+    const tokenFor=(participantId:string)=>reopened.participantTokens.find((entry:any)=>entry.participantId===participantId).token;
+    const devToken=tokenFor(added.participant.participantId);
+    const devDigest=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,devToken)).data;
+    expect(devDigest).toMatchObject({task:'implement',issues:[expect.objectContaining({issueId,status:'confirmed'})]});
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/ready`,{clientRequestId:rid(),summary:'Added an idempotency key and a regression test.',changes:[{path:'src/pay/charge.ts',summary:'pass the order id as idempotency key'}],codeRef:{dirtyHash:'sha256:fixed'}},devToken);
+
+    const reviewerToken=tokenFor(reviewer.participant.participantId);
+    const recheck=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,reviewerToken)).data;
+    expect(recheck).toMatchObject({task:'file_findings',round:2,issuesToRecheck:[expect.objectContaining({issueId})]});
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/findings`,{clientRequestId:rid(),baselineId:recheck.baseline.baselineId,findings:[],rechecks:[{issueId,outcome:'resolved',rationale:'The retry path now supplies a stable order idempotency key.'}],reviewComplete:true},reviewerToken);
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data).toMatchObject({phase:'finished',round:2,status:'finished',outcome:{verdict:'approved'}});
+
+    // The board draws one section per wave, so every round must report its own fixed / still-open / new numbers.
+    const rounds=(await call('GET',`/api/v1/collab/sessions/${session.sessionId}/review-rounds`)).data;
+    expect(rounds).toHaveLength(2);
+    expect(rounds[0]).toMatchObject({round:1,mode:'initial',counts:{newIssues:1,resolved:0}});
+    expect(rounds[1]).toMatchObject({round:2,mode:'fix_then_review',status:'finished',verdict:'approved',counts:{carried:1,resolved:1,stillPresent:0,pending:0,newIssues:0}});
+    expect(rounds[1].rechecks[0]).toMatchObject({issueId,outcome:'resolved',foundInRound:1});
+    // A participant token would read every other reviewer's findings through this view, so it stays human-only.
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}/review-rounds`,undefined,reviewerToken)).status).toBe(403);
+  });
+
+  it('hands initial implementation to reviewers only after the developer explicitly submits ready',async()=>{
+    const {call,workspace,agents,collabAgent}=await boot((id,cwd)=>new MockBackend(id,cwd));
+    const agent=(await call('POST','/api/v1/agents',{workspaceId:workspace.id,profile:'collab'})).data;
+    const session=(await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Explicit hand-off',workspaceId:workspace.id,subject:{type:'free',value:'x'},policy:{implementationFirst:true}})).data;
+    const developer=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:agent.agentId})).data;
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'reviewer',agentId:await collabAgent()})).data;
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
+    await waitUntil(async()=>((await agents.messages(agent.agentId)) as any[]).some(entry=>String(entry.content??'').includes('action: implement')));
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data.phase).toBe('implementing');
+    await call('POST',`/api/v1/collab/sessions/${session.sessionId}/ready`,{clientRequestId:rid(),summary:'Implemented the requested change and verified the affected path.',changes:[]},developer.participantToken);
+    await waitUntil(async()=>(await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data.phase==='collecting');
+    const token=reviewer.participantToken;
+    expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}/digest`,undefined,token)).data.task).toBe('file_findings');
+  });
+});
+
+async function waitUntil(probe:()=>Promise<boolean>,timeoutMs=5000){const deadline=Date.now()+timeoutMs;while(!(await probe())){if(Date.now()>deadline)throw Error('Timed out waiting for collaboration progress');await new Promise(resolve=>setTimeout(resolve,25))}}

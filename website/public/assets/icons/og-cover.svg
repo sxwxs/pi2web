@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-label="pi2web — remote Pi Coding Agent">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1200" y2="630" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0b1628"/>
+      <stop offset="1" stop-color="#132a4d"/>
+    </linearGradient>
+    <linearGradient id="badge" x1="80" y1="70" x2="200" y2="190" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5b8cf5"/>
+      <stop offset="1" stop-color="#2f6bea"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#sky)"/>
+  <g opacity=".28" stroke="#7e9cc7" stroke-width="1">
+    <path d="M0 150h1200M0 300h1200M0 450h1200M300 0v630M600 0v630M900 0v630"/>
+  </g>
+  <rect x="80" y="70" width="120" height="120" rx="30" fill="url(#badge)"/>
+  <path d="M104 108c14-6 38-6 52 0M118 104v30M143 104v18c0 8 4 11 10 11" fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="240" y="152" fill="#f4f8ff" font-family="monospace" font-size="72" font-weight="800">pi2web</text>
+  <text x="80" y="330" fill="#ffffff" font-family="Helvetica, Arial, sans-serif" font-size="64" font-weight="700">Remote Pi Coding Agent</text>
+  <text x="80" y="410" fill="#9fb6d6" font-family="Helvetica, Arial, sans-serif" font-size="40">Browser + Android client · terminals · voice · email</text>
+  <rect x="80" y="470" width="560" height="76" rx="16" fill="#0a1526" stroke="#33507e"/>
+  <text x="108" y="519" fill="#7fe3b3" font-family="monospace" font-size="30">$ npm install -g pi2web</text>
+  <text x="700" y="519" fill="#7fa6dd" font-family="monospace" font-size="26">pi2web.es2q.com</text>
+</svg>

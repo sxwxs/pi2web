@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>安全地远程访问 pi2web：SSH 隧道、Tailscale 与 HTTPS 反代</title>
+  <meta name="description" content="pi2web 的威胁模型、配对码与限流机制，以及使用 SSH 端口转发、Tailscale、devtunnel 或 nginx HTTPS 反向代理安全暴露服务的方法。">
+  <meta name="theme-color" content="#f6f9fc">
+  <meta name="author" content="sxwxs">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <link rel="canonical" href="https://pi2web.es2q.com/zh/blog/remote-access/">
+  <link rel="alternate" hreflang="zh-CN" href="https://pi2web.es2q.com/zh/blog/remote-access/">
+  <link rel="alternate" hreflang="en" href="https://pi2web.es2q.com/en/blog/remote-access/">
+  <link rel="alternate" hreflang="x-default" href="https://pi2web.es2q.com/en/blog/remote-access/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="pi2web">
+  <meta property="og:title" content="安全地远程访问 pi2web：SSH 隧道、Tailscale 与 HTTPS 反代">
+  <meta property="og:description" content="pi2web 的威胁模型、配对码与限流机制，以及使用 SSH 端口转发、Tailscale、devtunnel 或 nginx HTTPS 反向代理安全暴露服务的方法。">
+  <meta property="og:url" content="https://pi2web.es2q.com/zh/blog/remote-access/">
+  <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="article:published_time" content="2026-07-25">
+  <meta property="article:modified_time" content="2026-07-25">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="安全地远程访问 pi2web：SSH 隧道、Tailscale 与 HTTPS 反代">
+  <meta name="twitter:description" content="pi2web 的威胁模型、配对码与限流机制，以及使用 SSH 端口转发、Tailscale、devtunnel 或 nginx HTTPS 反向代理安全暴露服务的方法。">
+  <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
+  <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"\u5b89\u5168\u5730\u8fdc\u7a0b\u8bbf\u95ee pi2web\uff1aSSH \u96a7\u9053\u3001Tailscale \u4e0e HTTPS \u53cd\u4ee3","description":"pi2web \u7684\u5a01\u80c1\u6a21\u578b\u3001\u914d\u5bf9\u7801\u4e0e\u9650\u6d41\u673a\u5236\uff0c\u4ee5\u53ca\u4f7f\u7528 SSH \u7aef\u53e3\u8f6c\u53d1\u3001Tailscale\u3001devtunnel \u6216 nginx HTTPS \u53cd\u5411\u4ee3\u7406\u5b89\u5168\u66b4\u9732\u670d\u52a1\u7684\u65b9\u6cd5\u3002","url":"https://pi2web.es2q.com/zh/blog/remote-access/","inLanguage":"zh-CN","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"},"datePublished":"2026-07-25","dateModified":"2026-07-25","author":{"@type":"Person","name":"sxwxs"},"publisher":{"@type":"Organization","name":"pi2web"},"about":{"@type":"SoftwareApplication","name":"pi2web","applicationCategory":"DeveloperApplication"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"pi2web","item":"https://pi2web.es2q.com/zh/"},{"@type":"ListItem","position":2,"name":"\u4f7f\u7528\u6307\u5357","item":"https://pi2web.es2q.com/zh/blog/"},{"@type":"ListItem","position":3,"name":"\u5b89\u5168\u5730\u8fdc\u7a0b\u8bbf\u95ee pi2web\uff1aSSH \u96a7\u9053\u3001Tailscale \u4e0e HTTPS \u53cd\u4ee3","item":"https://pi2web.es2q.com/zh/blog/remote-access/"}]}</script>
+  <link rel="stylesheet" href="/assets/css/site.css">
+  <script src="/assets/js/site.js" defer></script>
+</head>
+<body data-page="blog_remote">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header" data-header>
+    <div class="nav-shell">
+      <a class="brand" href="/zh/" aria-label="pi2web home">
+        <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+        <span class="brand-name">pi2web</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-nav-toggle>
+        <span></span><span></span><span></span>
+        <span class="sr-only">Menu</span>
+      </button>
+      <nav class="site-nav" id="site-nav" data-nav>
+        <a href="/zh/features/">产品能力</a>
+        <a href="/zh/blog/" aria-current="page">使用指南</a>
+        <a href="/zh/faq/">常见问题</a>
+        <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+        <a class="language-link" href="/en/blog/remote-access/" lang="en" aria-label="Switch to English">EN</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+<article class="article-page">
+<header class="article-hero section-pad"><div class="content-shell article-shell reveal"><nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/zh/">pi2web</a><span>/</span><a href="/zh/blog/">使用指南</a></nav><span class="section-kicker">SECURE REMOTE ACCESS</span><h1>安全地远程访问 pi2web：SSH 隧道、Tailscale 与 HTTPS 反代</h1><p class="article-deck">pi2web 只有一层配对码认证，而 Terminal 是完整的宿主机 Shell。这篇指南说明它的威胁模型，并给出 SSH 隧道、Tailscale、devtunnel 与 nginx HTTPS 反代四种可行方案。</p><div class="article-meta"><time datetime="2026-07-25">2026-07-25</time><span>pi2web</span><span>实践指南</span></div></div></header>
+<div class="content-shell article-layout"><aside class="article-toc"><strong>本文目录</strong><a href="#threat">威胁模型</a><a href="#auth">配对码与限流</a><a href="#ssh">SSH 端口转发</a><a href="#tailscale">Tailscale / 私有网络</a><a href="#tunnel">devtunnel 与穿透</a><a href="#nginx">nginx HTTPS 反代</a><a href="#checklist">上线检查清单</a></aside><div class="article-body"><h2 id="threat">1. 先理解威胁模型</h2>
+<p>使用 pi2web 前必须接受一个前提：<strong>获得配对码的人，实际上获得了运行 pi2web 那个用户的 Shell 权限。</strong></p>
+<ul>
+<li>Terminal 是以 pi2web 进程用户身份运行的完整宿主机 Shell，可以访问 Workspace 之外的文件和继承到的环境变量。</li>
+<li>Agent 本身也能读写文件、执行命令，这正是它的用途。</li>
+<li>Workspace 路径只决定初始 cwd，不是安全边界，也不是沙箱。</li>
+<li>pi2web 不校验 <code>Origin</code> / <code>Host</code>，方便配合内网穿透，但也意味着不要依赖这两项做防护。</li>
+</ul>
+<div class="article-callout warning"><strong>不要把端口直接暴露到公网。</strong><p>正确做法是先建立一条可信通道（SSH、私有网络或带访问控制的 HTTPS 反代），再在通道内访问服务。</p></div>
+
+<h2 id="auth">2. 配对码与限流机制</h2>
+<p>pi2web 的认证很直接：除 Web 静态资源、<code>/health</code> 和 <code>/api/v1/auth/login</code> 外，所有请求都需要 <code>Authorization: Bearer &lt;token&gt;</code>。</p>
+<ul>
+<li>配对码只在首次启动或轮换时显示一次，服务端只保存 SHA-256 hash，文件权限 <code>0600</code>。</li>
+<li>Web UI 必须手动输入配对码；连接成功后才询问是否保存到 <code>localStorage</code>。</li>
+<li>同一来源地址在 60 秒窗口内失败 10 次即被锁定，锁定时间从 60 秒起按次翻倍，最长 15 分钟，返回 <code>429</code> 与 <code>Retry-After</code>；WebSocket 升级同样受限；一次成功配对立即清零。</li>
+</ul>
+<div class="article-callout"><strong>限流按 TCP 来源地址统计。</strong><p>通过 devtunnel、Cloudflare Tunnel 或反向代理访问时，所有客户端共用同一个计数桶：一个人不断输错，可能把其他人也锁在门外。</p></div>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --rotate-access-token"><span class="copy-label">复制</span></button></div><pre><code># 怀疑配对码泄漏时立刻轮换
+pi2web --rotate-access-token</code></pre></div>
+
+<h2 id="ssh">3. 方案一：SSH 端口转发（推荐）</h2>
+<p>最简单也最安全：服务继续只监听 <code>127.0.0.1</code>，由 SSH 建立加密通道。</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="ssh -N -L 11318:127.0.0.1:11318 user@dev-host"><span class="copy-label">复制</span></button></div><pre><code># 在客户端机器上执行
+ssh -N -L 11318:127.0.0.1:11318 user@dev-host
+
+# 然后访问 http://127.0.0.1:11318</code></pre></div>
+<p>因为访问地址是 <code>localhost</code>，浏览器把它视为安全上下文，通知与麦克风也能正常使用。Android 手机可以用支持端口转发的 SSH 客户端达到同样效果。</p>
+
+<h2 id="tailscale">4. 方案二：Tailscale 等私有网络</h2>
+<p>如果需要长期从手机访问，私有网络比每次开隧道更省事。把服务绑定到 tailnet 地址，只有加入同一网络的设备可达：</p>
+<div class="article-code"><div><span>Shell</span><button type="button" data-copy="pi2web --host 100.x.y.z --port 11318"><span class="copy-label">复制</span></button></div><pre><code>pi2web --host 100.x.y.z --port 11318</code></pre></div>
+<p>建议配合 tailnet 的 ACL 限制哪些设备可以访问该端口。注意通过纯 HTTP 的私有 IP 访问时不是浏览器安全上下文，通知与麦克风会被禁用；Tailscale 的 HTTPS 证书功能可以解决这一点。</p>
+
+<h2 id="tunnel">5. 方案三：devtunnel 与内网穿透</h2>
+<p>没有公网 IP、也不方便装 VPN 时，devtunnel、Cloudflare Tunnel 一类工具可以直接把本地端口发布成 HTTPS 地址。pi2web 不校验 <code>Origin</code> / <code>Host</code>，所以可以直接使用。</p>
+<ul>
+<li>务必启用隧道服务自身的访问控制（登录、白名单或访问策略），不要发布成完全匿名的公开地址。</li>
+<li>限流会按隧道出口地址统计，多人共用时请特别注意。</li>
+<li>不用时关闭隧道，比让它一直挂着更安全。</li>
+</ul>
+
+<h2 id="nginx">6. 方案四：nginx + HTTPS 反向代理</h2>
+<p>如果你已经有一台带证书的服务器，也可以自己反代。关键是正确转发 WebSocket 升级头，并在代理层加一道访问控制。</p>
+<div class="article-code"><div><span>nginx</span><button type="button" data-copy="proxy_set_header Upgrade $http_upgrade;"><span class="copy-label">复制</span></button></div><pre><code>server {
+    listen 443 ssl http2;
+    server_name pi.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/pi.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pi.example.com/privkey.pem;
+
+    # 额外的访问控制：客户端证书、Basic Auth 或 IP 白名单
+    allow 203.0.113.0/24;
+    deny all;
+
+    location / {
+        proxy_pass http://127.0.0.1:11318;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}</code></pre></div>
+<p><code>proxy_read_timeout</code> 要足够长，否则长时间运行的 Agent 会被代理断开连接。反代后所有请求共用同一个来源地址，限流计数也会合并。</p>
+
+<h2 id="checklist">7. 上线检查清单</h2>
+<ul>
+<li>服务是否仍绑定在 <code>127.0.0.1</code> 或私有地址，而不是 <code>0.0.0.0</code>？</li>
+<li>访问通道是否有独立于配对码的第二层控制（SSH 密钥、tailnet ACL、隧道策略或代理鉴权）？</li>
+<li>配对码是否只在可信设备上保存到 <code>localStorage</code>？</li>
+<li>是否使用 HTTPS 或 <code>localhost</code>，以便启用浏览器通知与麦克风？</li>
+<li>是否知道如何在泄漏时立即轮换配对码？</li>
+<li>运行 pi2web 的用户权限是否已按最小化原则收敛（例如不用 root）？</li>
+</ul>
+<p class="article-source">参考：<a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a></p>
+<div class="article-end"><strong>下一步</strong><p>通道打通后，回到安装指南确认命令行选项、数据目录与可选功能的配置。</p><a class="button button-secondary" href="/zh/blog/install-and-configure/">阅读安装与配置指南 →</a></div></div></div>
+</article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-shell">
+      <div class="footer-main">
+        <div>
+          <a class="brand brand-footer" href="/zh/">
+            <span class="brand-mark" aria-hidden="true"><span>π</span><i></i><span>w</span></span>
+            <span class="brand-name">pi2web</span>
+          </a>
+          <p>在你自己的机器上运行 Pi Coding Agent，用浏览器和 Android 手机安全地远程操作。</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub</a>
+          <a href="https://www.npmjs.com/package/pi2web" rel="noreferrer">npm</a>
+          <a href="/zh/features/">产品能力</a>
+          <a href="/zh/blog/">使用指南</a>
+          <a href="/zh/faq/">常见问题</a>
+          <a href="/zh/privacy/">隐私说明</a>
+        </div>
+      </div>
+      <div class="footer-disclaimer">
+        <p><strong>pi2web 不提供任何 LLM、推理服务或模型额度。模型、Provider 认证和用量全部来自你本机的 Pi 配置。</strong></p>
+        <p>© 2026 pi2web · MIT License · 独立开源项目<br>与 Pi、GitHub、Google 及其他相关厂商不存在隶属或背书关系；相关商标归各自所有者。</p>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

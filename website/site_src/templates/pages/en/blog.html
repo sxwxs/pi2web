@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-hero section-pad blog-hero"><div class="content-shell narrow reveal"><span class="section-kicker">GUIDES & DOCS</span><h1>From installation<br><span>to safe remote access.</span></h1><p>Practical guides for installing and configuring pi2web, using the web UI, exposing the service safely, wiring up voice and email, and building the Android client. Examples assume the service runs at <code>http://127.0.0.1:11318</code>.</p></div></section>
+<section class="section-pad blog-index"><div class="content-shell"><div class="blog-grid">
+<a class="blog-card blog-card-featured reveal" href="/en/blog/install-and-configure/"><span class="blog-tag">START HERE</span><h2>Install and configure pi2web</h2><p>npm installation, CLI options, pairing codes, data directory, workspaces and terminals, email and voice switches, reverse proxies, and troubleshooting.</p><span class="blog-read">~12 min · Read the guide →</span></a>
+<a class="blog-card reveal" href="/en/blog/web-ui/"><span class="blog-tag">WEB UI</span><h2>Using the web UI</h2><p>Create agents, send prompts and steer, reference files with @, use terminals, fork/undo, and compact.</p><span class="blog-read">~8 min →</span></a>
+<a class="blog-card reveal" href="/en/blog/remote-access/"><span class="blog-tag">SECURITY</span><h2>Secure remote access</h2><p>Threat model, pairing code and rate limits, SSH tunnels, Tailscale, devtunnel, and nginx HTTPS proxies.</p><span class="blog-read">~9 min →</span></a>
+<a class="blog-card reveal" href="/en/blog/voice/"><span class="blog-tag">VOICE</span><h2>Voice summaries and dictation</h2><p>Configure a summary LLM and an OpenAI-compatible speech service, with Speaches and Edge TTS setups.</p><span class="blog-read">~9 min →</span></a>
+<a class="blog-card reveal" href="/en/blog/mail-notifications/"><span class="blog-tag">MAIL</span><h2>Agent completion emails</h2><p>MailDispatch configuration, API key environment variables, aggregation window, and body options.</p><span class="blog-read">~6 min →</span></a>
+<a class="blog-card reveal" href="/en/blog/android-client/"><span class="blog-tag">ANDROID</span><h2>The Android client</h2><p>Build the Kotlin + Compose app, configure server address and pairing code, and compare it with the web UI.</p><span class="blog-read">~6 min →</span></a>
+</div></div></section>
+{% endblock %}

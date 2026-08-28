@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-hero section-pad"><div class="content-shell narrow reveal"><span class="section-kicker">PRIVACY</span><h1>Your sessions<br><span>never leave your machine.</span></h1><p>pi2web is self-hosted software and this website is fully static. Here is what each of them touches.</p><p class="updated-note">Last updated: 2026-07-25</p></div></section>
+<section class="section-pad privacy-page"><div class="content-shell policy-layout">
+  <aside class="policy-nav"><strong>Contents</strong><a href="#site">1. This website</a><a href="#software">2. The software</a><a href="#local">3. Local data</a><a href="#network">4. Network traffic</a><a href="#optional">5. Optional services</a><a href="#contact">6. Contact</a></aside>
+  <div class="policy-content">
+    <section class="policy-section" id="site"><span class="policy-number">01</span><h2>This website</h2>
+      <p>pi2web.es2q.com is a static site with no accounts, comments, forms, or subscriptions, and no third-party analytics, advertising, or tracking scripts.</p>
+      <p>Pages load only same-origin CSS, JavaScript, and SVG icons — no external fonts or CDN resources. The web server may keep ordinary access logs (IP address, timestamp, path, user agent) for operations and security.</p>
+    </section>
+    <section class="policy-section" id="software"><span class="policy-number">02</span><h2>The pi2web software</h2>
+      <p>pi2web is open-source software running on your own machine. It never sends sessions, code, prompts, or agent output to this project's website or to any service controlled by the author.</p>
+      <p>The software contains no telemetry, usage statistics, or crash reporting.</p>
+    </section>
+    <section class="policy-section" id="local"><span class="policy-number">03</span><h2>Data stored locally</h2>
+      <div class="policy-table">
+        <div><strong>~/.pi/remote-pi/remote-pi.db</strong><span>Server metadata in SQLite: workspaces, agents, and the session index.</span></div>
+        <div><strong>~/.pi/remote-pi/auth.json</strong><span>SHA-256 hash of the pairing code plus creation and rotation times, mode 0600, never in clear text.</span></div>
+        <div><strong>~/.pi/agent/sessions/</strong><span>Full conversations stored as JSONL by Pi's SessionManager — managed by Pi, not pi2web.</span></div>
+        <div><strong>Browser localStorage</strong><span>Server address, current workspace/agent, and the event cursor. The pairing code is stored only after you explicitly confirm.</span></div>
+        <div><strong>Process memory</strong><span>Terminal sessions and their last 512 KiB of output, released when the service exits.</span></div>
+      </div>
+      <p class="policy-warning">Anyone with the pairing code can obtain a shell as the user running pi2web through the terminal feature. Treat it as a credential and store it only on trusted devices.</p>
+    </section>
+    <section class="policy-section" id="network"><span class="policy-number">04</span><h2>Network traffic</h2>
+      <p>With the default configuration pi2web listens on <code>127.0.0.1</code>, so traffic is limited to the local browser and the service, plus whatever Pi itself sends to the model providers you configured. Model requests are issued by Pi directly; pi2web does not proxy, cache, or log their contents.</p>
+    </section>
+    <section class="policy-section" id="optional"><span class="policy-number">05</span><h2>Optional external services</h2>
+      <ul>
+        <li><strong>Automatic session naming</strong> (<em>enabled by default</em>): after a turn ends, the latest user prompt and the Agent's final output are truncated and submitted to the configured OpenAI-compatible naming endpoint (default <code>http://localhost:8313/</code>, i.e. local) to generate a session name. If you point <code>--session-name-base-url</code> at a remote service, that session content leaves your machine. Disable it with <code>--session-naming off</code>.</li>
+        <li><strong>Email notifications</strong>: only after you configure MailDispatch is notification content submitted to the endpoint you specify. You decide whether the agent reply and session information are included.</li>
+        <li><strong>Voice summaries and transcription</strong>: only after you configure a speech service are summary inputs and recordings sent to the endpoint you specify.</li>
+        <li><strong>Tunnels and reverse proxies</strong>: if you use devtunnel, Cloudflare Tunnel, or your own proxy, traffic passes through that provider — consult its privacy policy.</li>
+      </ul>
+      <p>Every feature in this list except automatic session naming is disabled by default; naming is on by default and defaults to a local endpoint.</p>
+    </section>
+    <section class="policy-section" id="contact"><span class="policy-number">06</span><h2>Contact</h2>
+      <p>Questions, feedback, and security reports are welcome through <a href="https://github.com/sxwxs/pi2web/issues" rel="noreferrer">GitHub Issues</a>. The project is MIT-licensed, so you can audit the source yourself.</p>
+    </section>
+  </div>
+</div></section>
+{% endblock %}
