@@ -1,6 +1,7 @@
 # Remote Pi 实现要点、当前状态与 Android App 实施计划
 
 > 更新时间：2026-07-18  
+> **归档说明：Android 客户端已于 2026-08 从仓库移除，项目只维护 Web UI。本文中的 Android 章节仅作历史记录，协议/服务端章节仍然有效。**  
 > 当前阶段：Web Server + Native HTML5 Web UI + Android 原生 App 可用；protocol v1、snapshot、Session/Model/Thinking/Extension UI 已接入
 
 ## 1. 当前实现概览
