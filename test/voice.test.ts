@@ -80,6 +80,33 @@ describe('voice manager',()=>{
     expect(speechRequest.response_format).toBe('mp3');expect(events[0]).toMatchObject({type:'voice_start',encoding:'mp3'});
     expect(events.find(event=>event.type==='voice_audio_chunk')).toMatchObject({encoding:'mp3',audio:Buffer.from([0x49,0x44,0x33,1,2,3]).toString('base64')});
   });
+  it('omits optional sampling parameters by default and drops the ones a model rejects',async()=>{
+    const bodies:any[]=[];
+    const fetcher:typeof fetch=async(input,init)=>{
+      const url=String(input);
+      if(url.endsWith('/chat/completions')){
+        const body=JSON.parse(String(init?.body));bodies.push(body);
+        if('temperature' in body)return new Response(JSON.stringify({error:{message:"Unsupported parameter: 'temperature' is not supported with this model.",code:'invalid_request_body'}}),{status:400});
+        if('max_tokens' in body)return new Response(JSON.stringify({error:{message:"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}}),{status:400});
+        return new Response(stream(['data: {"choices":[{"delta":{"content":"{\\"summary\\":\\"已完成。\\",\\"sessionName\\":null}"}}]}\n\ndata: [DONE]\n\n']),{status:200});
+      }
+      if(url.endsWith('/audio/speech'))return new Response(new Uint8Array([1,2]));
+      throw new Error(`unexpected URL ${url}`);
+    };
+    const base={speechBaseUrl:'http://speech',ttsModel:'tts',ttsVoice:'voice',summaryBaseUrl:'http://llm',summaryModel:'gpt-5'};
+    const plain=new VoiceManager(base,fetcher);
+    await plain.announce('agent-1','done');
+    expect(bodies).toHaveLength(1);expect('temperature' in bodies[0]).toBe(false);expect('max_tokens' in bodies[0]).toBe(false);
+
+    const configured=new VoiceManager({...base,summaryTemperature:0.2,maxOutputTokens:2000},fetcher);
+    const events:any[]=[];configured.subscribe((_agent,event)=>events.push(event));
+    await configured.announce('agent-2','done');
+    expect(events.at(-1)).toMatchObject({type:'voice_end',summary:'已完成。'});
+    expect(events.some(event=>event.type==='voice_error')).toBe(false);
+    expect(bodies.slice(1).map(body=>[('temperature' in body),('max_tokens' in body),('max_completion_tokens' in body)])).toEqual([[true,true,false],[false,true,false],[false,false,true]]);
+    await configured.announce('agent-2','done again');
+    expect(bodies).toHaveLength(5);expect('temperature' in bodies[4]).toBe(false);expect(bodies[4].max_completion_tokens).toBe(2000);
+  });
   it('forwards recordings to an OpenAI-compatible transcription endpoint',async()=>{
     let requestBody:FormData|undefined;
     const fetcher:typeof fetch=async(_input,init)=>{requestBody=init?.body as FormData;return Response.json({text:'你好，Pi',language:'zh'})};

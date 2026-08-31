@@ -13,7 +13,10 @@ export type VoiceConfig={
   summaryModel:string;
   language?:string;
   maxInputChars?:number;
+  /** Optional hard cap on summary tokens. Left unset by default: the prompt already bounds the length, and a low cap starves reasoning models. */
   maxOutputTokens?:number;
+  /** Optional sampling temperature. Left unset by default because reasoning models reject it. */
+  summaryTemperature?:number;
   sampleRate?:number;
   /** Whole-request timeout for transcription, summary, and speech calls. */
   requestTimeoutMs?:number;
@@ -139,10 +142,10 @@ export class VoiceManager{
   private generations=new Map<string,number>();
   private announcementQueue=Promise.resolve();
   private closed=false;
-  private readonly config:Required<Pick<VoiceConfig,'language'|'maxInputChars'|'maxOutputTokens'|'sampleRate'|'ttsFormat'|'requestTimeoutMs'>>&VoiceConfig;
-  // 2000, not ~160: reasoning models spend most of this budget on hidden reasoning tokens and return an
-  // empty message with finish_reason "length" when the cap is tight.
-  constructor(config:VoiceConfig,private fetcher:Fetcher=fetch){this.config={language:'zh-CN',maxInputChars:32000,maxOutputTokens:2000,sampleRate:24000,ttsFormat:'pcm',requestTimeoutMs:120000,...config}}
+  /** Some backends rename or reject optional sampling parameters; the working shape is learned once and reused. */
+  private summaryParams:{temperature:boolean;tokenLimitField:'max_tokens'|'max_completion_tokens'|null}={temperature:true,tokenLimitField:'max_tokens'};
+  private readonly config:Required<Pick<VoiceConfig,'language'|'maxInputChars'|'sampleRate'|'ttsFormat'|'requestTimeoutMs'>>&VoiceConfig;
+  constructor(config:VoiceConfig,private fetcher:Fetcher=fetch){this.config={language:'zh-CN',maxInputChars:32000,sampleRate:24000,ttsFormat:'pcm',requestTimeoutMs:120000,...config}}
   subscribe(listener:(agentId:string,event:VoiceEvent)=>void){this.emitter.on('event',listener);return()=>this.emitter.off('event',listener)}
   capabilities(){return {tts:true,stt:!!this.config.sttModel}}
   recordUserPrompt(agentId:string,prompt:string){const value=prompt.trim();if(value)this.lastPrompt.set(agentId,value)}
@@ -179,8 +182,7 @@ export class VoiceManager{
     let rawResult='',spokenSummary='';
     try{
       const summaryInput=prepareSummaryContext(input,this.config.maxInputChars);
-      const response=await this.fetcher(endpoint(this.config.summaryBaseUrl,'/chat/completions'),{method:'POST',signal:deadline(this.config.requestTimeoutMs,controller.signal),headers:{'content-type':'application/json',...authHeaders(this.config.summaryApiKey)},body:JSON.stringify({model:this.config.summaryModel,stream:true,temperature:0.2,max_tokens:this.config.maxOutputTokens,messages:[{role:'system',content:this.summaryPrompt()},{role:'user',content:summaryInput}]})});
-      if(!response.ok)throw new Error(`Summary request failed (${response.status}): ${(await response.text()).slice(0,500)}`);
+      const response=await this.requestSummary(summaryInput,controller.signal);
       for await(const delta of sseText(response))rawResult+=delta;
       const result=parseSummaryResult(rawResult),sessionName=input.sessionName?.trim()||result.sessionName;spokenSummary=formatSpokenSummary(result.summary,sessionName,this.config.language);
       if(!input.sessionName?.trim()&&result.sessionName&&input.setSessionName){try{await input.setSessionName(result.sessionName)}catch(error){this.emit(agentId,{type:'voice_session_name_error',playbackId,message:(error as Error).message})}}
@@ -195,6 +197,29 @@ export class VoiceManager{
         else this.emit(agentId,{type:'voice_end',playbackId,summary:spokenSummary,partial:true});
       }
     }finally{if(this.active.get(agentId)===controller)this.active.delete(agentId);if(this.generations.get(agentId)!==generation)controller.abort()}
+  }
+  /** Retries once per unsupported parameter so a strict model still produces a summary instead of failing the announcement. */
+  private async requestSummary(summaryInput:string,signal:AbortSignal){
+    for(let attempt=0;;attempt++){
+      const body:Record<string,unknown>={model:this.config.summaryModel,stream:true,messages:[{role:'system',content:this.summaryPrompt()},{role:'user',content:summaryInput}]};
+      if(this.summaryParams.temperature&&typeof this.config.summaryTemperature==='number')body.temperature=this.config.summaryTemperature;
+      if(this.summaryParams.tokenLimitField&&this.config.maxOutputTokens)body[this.summaryParams.tokenLimitField]=this.config.maxOutputTokens;
+      const response=await this.fetcher(endpoint(this.config.summaryBaseUrl,'/chat/completions'),{method:'POST',signal:deadline(this.config.requestTimeoutMs,signal),headers:{'content-type':'application/json',...authHeaders(this.config.summaryApiKey)},body:JSON.stringify(body)});
+      if(response.ok)return response;
+      const detail=(await response.text()).slice(0,500);
+      if(response.status===400&&attempt<2&&this.relaxSummaryParams(detail))continue;
+      throw new Error(`Summary request failed (${response.status}): ${detail}`);
+    }
+  }
+  private relaxSummaryParams(detail:string){
+    const text=detail.toLowerCase();
+    if(!/unsupported|not supported|unrecognized|unknown|invalid/.test(text))return false;
+    let changed=false;
+    if(this.summaryParams.temperature&&text.includes('temperature')){this.summaryParams.temperature=false;changed=true}
+    const field=this.summaryParams.tokenLimitField;
+    if(field==='max_tokens'&&text.includes('max_tokens')){this.summaryParams.tokenLimitField=text.includes('max_completion_tokens')?'max_completion_tokens':null;changed=true}
+    else if(field==='max_completion_tokens'&&text.includes('max_completion_tokens')){this.summaryParams.tokenLimitField=null;changed=true}
+    return changed;
   }
   private summaryPrompt(){const language=this.config.language.toLowerCase().startsWith('zh')?'简体中文':'与用户输入相同的主要语言';return `你负责把一次 Pi 编程任务压缩成准确、自然、可直接朗读的完成通知，并在需要时为 Session 命名。\n\n输入是一个 JSON 对象：\n- userPrompt：用户本轮真正想完成的任务。\n- piFinalOutput：Pi 最后一次回复，包含完成情况、改动、验证结果和后续事项。\n- sessionNeedsName：只有为 true 时才需要生成 Session 名称。\n\n先结合 userPrompt 判断目标，再以 piFinalOutput 为事实依据总结。不要把用户的要求误说成已经完成；没有明确证据时不要声称测试通过或任务成功。摘要使用${language}，写 2 到 4 个短句，最多 120 个中文字符或 70 个英文单词。优先交代：是否完成、最重要的结果或修改、测试/验证结果、失败原因，以及用户必须采取的下一步。省略代码、命令、URL、完整路径、哈希、冗长文件清单、日志和 Markdown；不要使用标题、列表、“总结如下”等套话。\n\n如果 sessionNeedsName 为 true，请根据 userPrompt 生成一个具体、简短、便于检索的名称：中文建议 6 到 18 个字，英文建议 3 到 8 个词；使用任务主题或目标，不写“新会话”“任务总结”等空泛名称，不带句号、引号、Emoji 或路径。如果 sessionNeedsName 为 false，sessionName 必须为 null。\n\n只输出一个合法 JSON 对象，不要输出 Markdown 代码块、解释或任何额外文字。有名称时使用 {"summary":"适合直接朗读的摘要","sessionName":"简短名称"}；无需命名时使用 {"summary":"适合直接朗读的摘要","sessionName":null}。summary 必须是 JSON 字符串，sessionName 必须是 JSON 字符串或 null。`}
   private async speak(agentId:string,playbackId:string,text:string,signal:AbortSignal){
