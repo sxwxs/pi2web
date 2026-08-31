@@ -34,7 +34,7 @@ export class SdkBackend implements AgentBackend {
     const current=this.session.model as any;
     // ModelRuntime.getAvailable() is async since 0.80.8 and may consult provider auth; the snapshot keeps
     // an unauthenticated or offline call from blocking the capabilities endpoint.
-    const available=this.session.modelRegistry.getAvailable();
+    const available=await this.session.modelRuntime.getAvailable().catch(()=>this.session.modelRuntime.getAvailableSnapshot());
     return {model:current?this.modelInfo(current):null,models:available.map((model:any)=>this.modelInfo(model)),thinkingLevel:this.session.thinkingLevel,thinkingLevels:this.session.getAvailableThinkingLevels(),supportsThinking:this.session.supportsThinking()};
   }
   /** Slash commands the composer can offer: file-based prompt templates and skills discovered for this cwd. */
@@ -48,7 +48,7 @@ export class SdkBackend implements AgentBackend {
   async runBash(command:string,excludeFromContext=false){
     const id=randomUUID();
     try{
-      const result=await this.session.executeBash(command,chunk=>this.events.emit('event',{type:'bash_execution_update',id,delta:chunk}),{excludeFromContext});
+      const result=await this.session.executeBash(command,undefined,{excludeFromContext,id});
       this.events.emit('event',{type:'bash_execution_end',id,command,...result});
       return {id,...result};
     }catch(error){
@@ -60,7 +60,7 @@ export class SdkBackend implements AgentBackend {
   async getSession(){return {...await this.getSessionInfo(),leafId:this.session.sessionManager.getLeafId(),entries:this.session.sessionManager.getEntries(),tree:this.session.sessionManager.getTree(),userMessages:this.session.getUserMessagesForForking()}}
   async getSessionInfo(){return {sessionId:this.session.sessionId,sessionFile:this.session.sessionFile,sessionName:this.session.sessionName,stats:this.session.getSessionStats(),contextUsage:this.session.getContextUsage()}}
   compact(instructions?:string){return this.session.compact(instructions)}
-  async setModel(provider:string,modelId:string){const model=this.session.modelRegistry.find(provider,modelId);if(!model)throw Object.assign(new Error('Model not found'),{code:'MODEL_NOT_FOUND'});await this.session.setModel(model)}
+  async setModel(provider:string,modelId:string){const model=this.session.modelRuntime.getModel(provider,modelId);if(!model)throw Object.assign(new Error('Model not found'),{code:'MODEL_NOT_FOUND'});await this.session.setModel(model)}
   async setThinkingLevel(level:string){if(level!=='off'&&!this.session.getAvailableThinkingLevels().includes(level as any))throw Object.assign(new Error('Invalid thinking level'),{code:'INVALID_THINKING_LEVEL'});this.session.setThinkingLevel(level as any)}
   async setSessionName(name:string){const value=name.trim();if(!value||value.length>200)throw Object.assign(new Error('Session name must be 1-200 characters'),{code:'INVALID_SESSION_NAME'});this.session.setSessionName(value)}
   navigate(entryId:string){return this.session.navigateTree(entryId)}
