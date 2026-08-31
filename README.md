@@ -197,7 +197,7 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 每个座位都绑定一个**本机 pi2web Agent**（`agentId` 必填，且必须是一个已存在的 `profile=collab` Agent——中枢唤不醒的座位只会卡住整个阶段，因此登记/改绑时直接 403）；同一个协作 Agent 在任意时刻只能占一个 active seat，避免进程内工具无法确定它代表哪个会话。每个 implementation wave 也只允许一个 implementer，因为所有 Agent 仍共享同一工作区。轮到它干活时，中枢直接 prompt（忙碌时用 follow-up 排队）。任务会一直保留在持久化队列中，直到 Agent 真正调用 `collab_get_task` 领取，而不是在 follow-up 刚入队时就当成已送达。
 
-协作座位要用**协作 Agent**：`POST /api/v1/agents -d '{...,"profile":"collab"}'`（看板新建 Agent 时自动带上）。它先调用 `collab_get_task`，扩展再按当前任务只激活一个强类型提交工具，例如 `collab_submit_findings`、`collab_submit_votes` 或 `collab_submit_scores`。工具在进程内直连中枢，自动补全 baseline 与幂等键，模型上下文里不会出现 URL、令牌或内部 ID；Review/Scoring 任务会禁用 `edit`/`write`，只有 `implement` 任务可以修改文件。`profile` 缺省是 `default`，普通 Agent 不受影响。
+协作座位要用**协作 Agent**：`POST /api/v1/agents -d '{...,"profile":"collab"}'`（看板新建 Agent 时自动带上）。它先调用 `collab_get_task`，扩展再按当前任务只激活一个强类型提交工具，例如 `collab_submit_findings`、`collab_submit_votes` 或 `collab_submit_scores`。工具在进程内直连中枢，自动补全 baseline 与幂等键，模型上下文里不会出现 URL、令牌或内部 ID。Review/Scoring 不按工具名称做武断的“只读”限制：`bash`、`edit`、`write` 都保留，因为禁用其中两个并不能阻止另一个写文件，必要的工作区外临时操作也不应被误伤。任务与系统提示会明确要求不得在工作目录内创建、删除、重命名或修改任何内容，包括重定向输出、临时文件、生成物、缓存和格式化结果；提交时中枢再用 pinned baseline 校验工作区身份，任何实际变化都会得到 `STALE_BASELINE`。只有 `implement` 任务被允许修改工作区。`profile` 缺省是 `default`，普通 Agent 不受影响。
 
 绑错了 Agent（或该 Agent 被删了、卡死了）就改绑：`POST /sessions/{sessionId}/participants/{participantId}/binding -d '{"agentId":"agent-..."}'`——改绑会轮换 participantToken，并把这个座位当前欠的任务重新推给新 Agent（即使旧 Agent 已经收到过）。任务队列在中枢侧持久化，且只有 Agent 实际调用 `collab_get_task` 领取后条目才会销掉；所以看板上的“N 未送达”表示任务尚未被扩展领取，超过两分钟会直接报警。
 
