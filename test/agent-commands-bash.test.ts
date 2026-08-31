@@ -15,10 +15,13 @@ describe('slash commands and session bash',()=>{
   const result=(await (await post(`/api/v1/agents/${agent.agentId}/bash`,{command:'echo hi'})).json()).data;
   expect(result).toMatchObject({output:'Mock bash: echo hi',exitCode:0,cancelled:false});
   expect(events.some(event=>event.type==='bash_execution_update'&&event.id===result.id)).toBe(true);
-  // Bash output is recorded in the transcript unless the caller opts out with `!!`.
-  expect((await (await fetch(base+`/api/v1/agents/${agent.agentId}/messages`,{headers})).json()).data).toHaveLength(1);
+  expect(events.some(event=>event.type==='bash_execution_end'&&event.id===result.id)).toBe(true);
+  // Both ! and !! are recorded; !! only excludes the message from model context.
+  let messages=(await (await fetch(base+`/api/v1/agents/${agent.agentId}/messages`,{headers})).json()).data;
+  expect(messages).toHaveLength(1);expect(messages[0]).toMatchObject({role:'bashExecution',command:'echo hi',output:'Mock bash: echo hi',excludeFromContext:false});
   await post(`/api/v1/agents/${agent.agentId}/bash`,{command:'echo hidden',excludeFromContext:true});
-  expect((await (await fetch(base+`/api/v1/agents/${agent.agentId}/messages`,{headers})).json()).data).toHaveLength(1);
+  messages=(await (await fetch(base+`/api/v1/agents/${agent.agentId}/messages`,{headers})).json()).data;
+  expect(messages).toHaveLength(2);expect(messages[1]).toMatchObject({role:'bashExecution',command:'echo hidden',excludeFromContext:true});
   expect((await post(`/api/v1/agents/${agent.agentId}/bash`,{command:'   '})).status).toBe(400);
   expect((await post(`/api/v1/agents/${agent.agentId}/bash`,{command:'x'.repeat(8001)})).status).toBe(400);
   expect((await post(`/api/v1/agents/${agent.agentId}/bash-abort`)).status).toBe(200);
