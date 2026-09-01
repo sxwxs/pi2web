@@ -66,5 +66,5 @@ export class AgentManager {
  async listCommands(id:string){return (await this.ensureLoaded(id)).listCommands()}
  /** Session-scoped bash. Output is streamed as `bash_execution_update` events and recorded in the Session. */
  async runBash(id:string,command:string,excludeFromContext=false){return (await this.ensureLoaded(id)).runBash(command,excludeFromContext)}
- abortBash(id:string){this.get(id).backend?.abortBash()}
+ async abortBash(id:string){const entry=this.get(id);if(entry.loading)await entry.loading;entry.backend?.abortBash()}
 }

@@ -23,6 +23,7 @@ describe('slash commands and session bash',()=>{
   messages=(await (await fetch(base+`/api/v1/agents/${agent.agentId}/messages`,{headers})).json()).data;
   expect(messages).toHaveLength(2);expect(messages[1]).toMatchObject({role:'bashExecution',command:'echo hidden',excludeFromContext:true});
   expect((await post(`/api/v1/agents/${agent.agentId}/bash`,{command:'   '})).status).toBe(400);
+  expect((await post(`/api/v1/agents/${agent.agentId}/bash`,{command:{unexpected:true} as any})).status).toBe(400);
   expect((await post(`/api/v1/agents/${agent.agentId}/bash`,{command:'x'.repeat(8001)})).status).toBe(400);
   expect((await post(`/api/v1/agents/${agent.agentId}/bash-abort`)).status).toBe(200);
  });
