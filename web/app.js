@@ -333,6 +333,15 @@
     if (!Array.isArray(content)) return '';
     return content.map(part => part?.type === 'text' ? part.text : part?.type === 'thinking' ? part.thinking || part.text : part?.type === 'toolCall' ? `${part.name || 'Tool'}\n${JSON.stringify(part.arguments || {}, null, 2)}` : '').filter(Boolean).join('\n');
   }
+  // Pi persists failed provider responses as empty assistant messages with
+  // stopReason="error" and errorMessage. They have no content to render, so
+  // handle the error metadata explicitly instead of silently dropping them.
+  function assistantError(message) {
+    if(message?.role!=='assistant'||(message.stopReason!=='error'&&!message.errorMessage))return '';
+    const detail=String(message.errorMessage||'LLM request failed').trim();
+    const source=[message.provider,message.model].filter(Boolean).join(' · ');
+    return source?`${detail}\n\n${source}`:detail;
+  }
   function renderCardBody(body, content, markdown = false) {
     const value=String(content??'');body.classList.toggle('markdown',markdown);
     if(markdown&&window.marked&&window.DOMPurify){body.innerHTML=DOMPurify.sanitize(marked.parse(value,{gfm:true,breaks:true}));for(const link of body.querySelectorAll('a')){link.target='_blank';link.rel='noopener noreferrer';}}
@@ -422,6 +431,7 @@
           else if (part.type === 'thinking' && (part.thinking||part.text)) addCard('Thinking',part.thinking||part.text,'thinking',false,timestamp,target,false);
           else if (part.type === 'toolCall') addCard(`🔧 ${part.name||'Tool'}`,JSON.stringify(part.arguments||{},null,2),'tool',false,timestamp,target,false);
         }
+        const error=assistantError(message);if(error)addCard('LLM Error',error,'error',true,timestamp,target,false);
       } else { const content=textContent(message.content);if(content)addCard(['user','assistant'].includes(role)?null:role,content,role==='user'?'user':role==='assistant'?'assistant':role==='toolResult'?'tool':'system',false,timestamp,target,false); }
     }
     if(target===$('messages'))$('messages').scrollTop=$('messages').scrollHeight;
@@ -543,7 +553,7 @@
       const update = ev.assistantMessageEvent || {};
       if (update.type === 'text_delta') { const c=ensureStream('assistant',null,'assistant');c.content+=update.delta||'';scheduleStreamPaint(c); }
       else if (update.type === 'thinking_delta') {const c=ensureStream('thinking','Thinking','thinking');c.content+=update.delta||'';scheduleStreamPaint(c);}
-    } else if (ev.type === 'message_end') finalizeAgentStreams();
+    } else if (ev.type === 'message_end') {finalizeAgentStreams();const error=assistantError(ev.message);if(error)addCard('LLM Error',error,'error',true,message.timestamp);}
     else if (ev.type === 'tool_execution_start' || ev.type === 'tool_execution_update' || ev.type === 'tool_execution_end') upsertToolCard(ev, message.timestamp);
     else if (ev.type === 'bash_execution_update' || ev.type === 'bash_execution_end') updateBashCard(ev, message.timestamp);
     else if (ev.type === 'auto_retry_start' || ev.type === 'auto_retry_end') addCard('Retry', ev.errorMessage || ev.finalError || `${ev.type}${ev.attempt?` · attempt ${ev.attempt}`:''}`, 'system', false, message.timestamp);
