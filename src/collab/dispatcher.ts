@@ -156,7 +156,7 @@ export class CollabDispatcher {
   }
 }
 
-/** The only dispatcher prompt. Credentials, URLs, opaque ids, and task JSON are deliberately confined to the Pi extension. */
+/** The only dispatcher prompt. Transport credentials/URLs, opaque ids, and task JSON stay in the Pi extension; the human-authored review request is repeated here deliberately. */
 export function toolBriefing(input:{session:CollabSession,participant:Participant,task:string}):string{
   if(input.task==='session_result'){
     const verdict=typeof input.session.outcome?.verdict==='string'?` Result: ${input.session.outcome.verdict}.`:'';
@@ -165,7 +165,10 @@ export function toolBriefing(input:{session:CollabSession,participant:Participan
   return [
     '[pi2web collaboration] You have a local code collaboration task.',
     `role: ${input.participant.role}; action: ${input.task}; working directory: ${input.session.cwd}`,
-    'Call collab_get_task first. It activates the exact collab_submit_* tool for this task; use that tool to record the complete result.',
+    `user request: ${input.session.subject.value}`,
+    ...(input.session.subject.notes?[`user notes: ${input.session.subject.notes}`]:[]),
+    ...(input.task==='implement'?[]:['This is a non-mutating task. You may use bash to inspect (for example git diff/log), but do not create, delete, rename, or modify anything under the working directory, including redirected output, scratch files, generated files, caches, or formatter changes.']),
+    'Call collab_get_task first. It repeats the request, supplies the pinned baseline and activates the exact collab_submit_* tool; use that tool to record the complete result.',
     'Do not use curl, construct URLs, handle credentials, contact other agents, sleep, or poll. End your turn after submitting.'
   ].join('\n');
 }
