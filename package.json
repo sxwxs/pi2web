@@ -1,7 +1,7 @@
 {
   "name": "pi2web",
   "version": "0.2.0",
-  "description": "Secure remote web and Android client server for Pi coding agent",
+  "description": "Secure remote web client server for Pi coding agent",
   "type": "module",
   "author": "sxwxs",
   "license": "MIT",
@@ -25,7 +25,6 @@
     "packages/edge-tts-server/README.md",
     "README.md",
     "VOICE_SERVER_SETUP.md",
-    "ANDROID_APP_FEATURES.md",
     "LICENSE"
   ],
   "publishConfig": {
@@ -44,18 +43,18 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "engines": {
-    "node": ">=20.10"
+    "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.80.6",
-    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "better-sqlite3": "^12.11.1",
     "dompurify": "^3.4.12",
     "marked": "^18.0.6",
     "node-pty": "^1.1.0",
-    "typebox": "1.1.38",
+    "typebox": "1.3.7",
     "ws": "^8.18.0"
   },
   "devDependencies": {
