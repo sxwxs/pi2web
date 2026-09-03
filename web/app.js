@@ -6,6 +6,7 @@
     filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], terminals: [], terminal: null, selectedKind: 'agent', ws: null, terminalWs: null,
     terminalEmulator: null, terminalAssetsPromise: null, terminalConnectAttempt: 0, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
+    toolCards: new Map(), commands: [], commandsAgentId: null, commandFiltered: [], commandIndex: 0, commandRequest: 0,
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
     voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve(),generation:0}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
     mailNotificationsAvailable:false,mailSettings:{enabled:false,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true,collabEscalations:true},
@@ -187,6 +188,44 @@
   }
   function closeMention(){state.mentionRequest++;state.mentionStart=null;state.mentionEnd=null;state.mentionPrefix='';$('mentionPicker').hidden=true;}
 
+  // Slash commands: prompt templates and skills are expanded by the Pi session itself
+  // (AgentSession.prompt() expands them by default), so the composer only has to help discover them.
+  function commandContext() {
+    const input=$('input'),end=input.selectionStart,before=input.value.slice(0,end);
+    const match=before.match(/^\/([^\s]*)$/);return match?{end,query:match[1]}:null;
+  }
+  async function loadCommands(agentId) {
+    if(state.commandsAgentId===agentId)return state.commands;
+    const commands=await api(`/api/v1/agents/${agentId}/commands`);return Array.isArray(commands)?commands:[];
+  }
+  function setCommandSelection(index) {
+    const count=state.commandFiltered.length;if(!count){state.commandIndex=0;return;}state.commandIndex=(index+count)%count;
+    $('commandItems').querySelectorAll('.picker-item').forEach((element,i)=>element.classList.toggle('selected',i===state.commandIndex));
+    $('commandItems').querySelector('.picker-item.selected')?.scrollIntoView({block:'nearest'});
+  }
+  function chooseCommand(option) {
+    if(!option)return;const input=$('input'),context=commandContext();
+    input.setRangeText(`/${option.name} `,0,context?context.end:input.value.length,'end');closeCommandPicker();input.focus();
+  }
+  function renderCommandItems(query='') {
+    const filter=query.toLocaleLowerCase(),options=state.commands.filter(command=>!filter||command.name.toLocaleLowerCase().includes(filter));
+    state.commandFiltered=options;state.commandIndex=0;
+    if(!options.length){const empty=document.createElement('div');empty.className='picker-empty muted';empty.textContent=state.commands.length?'没有匹配的命令':'当前目录没有 prompt template 或 skill';$('commandItems').replaceChildren(empty);return;}
+    $('commandItems').replaceChildren(...options.map((option,index)=>{
+      const el=document.createElement('div');el.className=`picker-item${index===0?' selected':''}`;
+      const name=document.createElement('b');name.textContent=`/${option.name}${option.argumentHint?` ${option.argumentHint}`:''}`;
+      const description=document.createElement('small');description.className='muted';description.textContent=`${option.source==='skill'?'skill':'prompt'}${option.description?` · ${option.description}`:''}`;
+      el.append(name,description);el.onmouseenter=()=>setCommandSelection(index);el.onclick=()=>chooseCommand(option);return el;
+    }));
+  }
+  async function openCommandPicker(query='') {
+    if(!state.agent)return;const agentId=state.agent.agentId,request=++state.commandRequest;$('commandPicker').hidden=false;
+    if(state.commandsAgentId!==agentId){state.commands=[];$('commandItems').textContent='正在加载命令…';}
+    try{const commands=await loadCommands(agentId);if(request!==state.commandRequest||state.agent?.agentId!==agentId||$('commandPicker').hidden)return;state.commands=commands;state.commandsAgentId=agentId;renderCommandItems(query);}
+    catch(error){if(request===state.commandRequest&&state.agent?.agentId===agentId){state.commands=[];$('commandItems').textContent='无法加载命令';console.error('Unable to load slash commands',error);}}
+  }
+  function closeCommandPicker(){state.commandRequest++;$('commandPicker').hidden=true;state.commandFiltered=[];state.commandIndex=0;}
+
   function agentName(agent) { return agent.sessionName || agent.name; }
   function agentLabel(agent) { return agentName(agent) || agent.cwd || agent.agentId; }
   function agentSubtitle(agent) { return agentName(agent) ? agent.cwd : agent.agentId; }
@@ -278,7 +317,7 @@
     state.selectedKind='agent';state.terminalWs?.close();state.terminalWs=null;state.agent = agent; localStorage.rpAgentId = agent.agentId;localStorage.rpSelectedKind='agent';showAgentView();updateAgentHeader();
     if (openView) navigateMobile('agent');
     if (state.workspace && isInside(clean(agent.cwd), clean(state.workspace.rootPath))) $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
-    $('messages').replaceChildren(); discardStreams();state.messagePageStart=0;state.messageTotal=0;
+    $('messages').replaceChildren(); discardStreams();state.messagePageStart=0;state.messageTotal=0;closeCommandPicker();state.commands=[];state.commandsAgentId=null;
     try { await loadMessagePage(agent.agentId,undefined,true); await loadSessionIdentity(); } catch (error) { addCard('加载消息失败', error.message, 'error', true); }
     renderAgentList();
     connectSocket();
@@ -294,29 +333,109 @@
     if (!Array.isArray(content)) return '';
     return content.map(part => part?.type === 'text' ? part.text : part?.type === 'thinking' ? part.thinking || part.text : part?.type === 'toolCall' ? `${part.name || 'Tool'}\n${JSON.stringify(part.arguments || {}, null, 2)}` : '').filter(Boolean).join('\n');
   }
+  // Pi persists failed provider responses as empty assistant messages with
+  // stopReason="error" and errorMessage. They have no content to render, so
+  // handle the error metadata explicitly instead of silently dropping them.
+  function assistantError(message) {
+    if(message?.role!=='assistant'||(message.stopReason!=='error'&&!message.errorMessage))return '';
+    const detail=String(message.errorMessage||'LLM request failed').trim();
+    const source=[message.provider,message.model].filter(Boolean).join(' · ');
+    return source?`${detail}\n\n${source}`:detail;
+  }
   function renderCardBody(body, content, markdown = false) {
     const value=String(content??'');body.classList.toggle('markdown',markdown);
     if(markdown&&window.marked&&window.DOMPurify){body.innerHTML=DOMPurify.sanitize(marked.parse(value,{gfm:true,breaks:true}));for(const link of body.querySelectorAll('a')){link.target='_blank';link.rel='noopener noreferrer';}}
     else body.textContent=value;
   }
+  // The transcript only shows what a human reads linearly: prompts, answers, thinking, dialogs and errors.
+  // Everything else (tool calls, bash output, retries, extension chatter) is folded into one collapsed
+  // activity group per stretch of activity, whose summary tracks the most recent item while it streams.
+  const TRANSCRIPT_KINDS = new Set(['user','assistant','thinking','dialog','voice','error']);
+  function activityGroup(target) {
+    const last=target.lastElementChild;
+    if (last?.classList?.contains('activity-group')) return last;
+    const group=document.createElement('details'); group.className='msg activity-group';
+    const summary=document.createElement('summary'),text=document.createElement('span'),count=document.createElement('span'),time=document.createElement('span');
+    text.className='summary-text';text.textContent='活动';count.className='activity-count';time.className='event-time';
+    summary.append(text,count,time);
+    const items=document.createElement('div');items.className='activity-items';
+    group.append(summary,items);target.append(group);return group;
+  }
+  const eventTime = timestamp => {const value=Number(timestamp);return Number.isFinite(value)&&value>0?new Date(value>1e12?value:value*1000).toLocaleTimeString():'';};
+  function updateActivityGroup(group, title, timestamp) {
+    const count=group.querySelector('.activity-items').childElementCount;
+    group.querySelector('.summary-text').textContent=title||'活动';
+    group.querySelector('.activity-count').textContent=`${count} 项`;
+    const time=eventTime(timestamp);if(time)group.querySelector('.event-time').textContent=time;
+  }
   function addCard(title, content, kind = 'system', open = false, timestamp, target = $('messages'), autoScroll = true) {
     const derivedTitle=!title,details=document.createElement('details'); details.className = `msg ${kind}${derivedTitle?' derived-title':''}`; details.open = open;
     const summary=document.createElement('summary'),summaryText=document.createElement('span'),summaryLabel=document.createElement('span');summaryText.className='summary-text';summaryText.textContent=title||String(content).trim()||kind;summaryLabel.className='summary-label';summaryLabel.textContent=kind==='user'?'You':kind==='assistant'?'Assistant':kind;summary.append(summaryText,summaryLabel);
-    if (timestamp) { const time = document.createElement('span'); time.className = 'event-time'; time.textContent = new Date(timestamp * 1000).toLocaleTimeString(); summary.append(time); }
+    const time=document.createElement('span'); time.className='event-time'; time.textContent=eventTime(timestamp); summary.append(time);
     const body = document.createElement('div'); body.className = 'msg-content';renderCardBody(body,content,kind==='assistant');
-    details.append(summary, body); target.append(details); if(autoScroll&&target===$('messages'))$('messages').scrollTop = $('messages').scrollHeight; return {details, summary, summaryText, body, content:String(content??'')};
+    details.append(summary, body);
+    const group=TRANSCRIPT_KINDS.has(kind)?null:activityGroup(target);
+    (group?group.querySelector('.activity-items'):target).append(details);
+    if(group)updateActivityGroup(group,title||kind,timestamp);
+    if(autoScroll&&target===$('messages'))$('messages').scrollTop = $('messages').scrollHeight;
+    return {details, summary, summaryText, summaryTime:time, body, group, content:String(content??'')};
+  }
+  /** One card per tool call: `tool_execution_start` opens it, updates stream into it and `tool_execution_end` closes it. */
+  function upsertToolCard(ev, timestamp) {
+    const key=`tool:${ev.toolCallId||ev.toolName||'tool'}`,existing=state.toolCards.get(key);
+    const args=ev.args&&Object.keys(ev.args).length?JSON.stringify(ev.args,null,2):'';
+    if (ev.type==='tool_execution_start') {
+      const card=addCard(`🔧 ${ev.toolName||'Tool'}`,args,'tool',false,timestamp);card.toolName=ev.toolName||'Tool';card.args=args;state.toolCards.set(key,card);return card;
+    }
+    const card=existing||addCard(`🔧 ${ev.toolName||'Tool'}`,args,'tool',false,timestamp);
+    if(!existing){card.toolName=ev.toolName||'Tool';card.args=args;state.toolCards.set(key,card);}
+    if (ev.type==='tool_execution_update') {
+      const partial=textContent(ev.partialResult?.content??ev.partialResult)||(ev.partialResult?JSON.stringify(ev.partialResult):'');
+      if(partial)renderCardBody(card.body,`${card.args}\n\n— 输出 —\n${partial}`);
+      card.summaryTime.textContent=eventTime(timestamp);
+      if(card.group)updateActivityGroup(card.group,`🔧 ${card.toolName}`,timestamp);
+      return card;
+    }
+    const result=textContent(ev.result?.content??ev.result)||(ev.result&&!ev.result.content?JSON.stringify(ev.result,null,2):'')||(ev.isError?'执行失败':'执行完成');
+    card.details.classList.toggle('tool-error',!!ev.isError);
+    card.summaryText.textContent=`${ev.isError?'✗':'✓'} ${card.toolName}`;
+    renderCardBody(card.body,`${card.args}\n\n— 结果 —\n${result}`);
+    card.summaryTime.textContent=eventTime(timestamp);
+    if(card.group)updateActivityGroup(card.group,card.summaryText.textContent,timestamp);
+    state.toolCards.delete(key);
+    return card;
+  }
+  /** Session bash has streaming deltas followed by one server-generated completion event. */
+  function updateBashCard(ev, timestamp) {
+    const key=`bash:${ev.id||'default'}`;let card=state.toolCards.get(key);
+    if(!card){card=addCard(ev.command?`$ ${ev.command}`:'$ bash','','tool',false,timestamp);card.content='';state.toolCards.set(key,card);}
+    if(ev.type==='bash_execution_update')card.content+=String(ev.delta||'');
+    else {
+      card.content=String(ev.output??card.content);const failed=!!ev.isError||ev.cancelled||Number(ev.exitCode)>0;
+      const status=ev.isError?ev.errorMessage:ev.cancelled?'已取消':ev.exitCode===undefined?'完成':`exit ${ev.exitCode}${ev.truncated?' · 输出已截断':''}`;
+      card.details.classList.toggle('tool-error',failed);card.summaryText.textContent=`${failed?'✗':'✓'} ${ev.command?`$ ${ev.command}`:'bash'} · ${status}`;state.toolCards.delete(key);
+    }
+    renderCardBody(card.body,card.content);card.summaryTime.textContent=eventTime(timestamp);
+    if(card.group)updateActivityGroup(card.group,card.summaryText.textContent,timestamp);
   }
   function renderMessages(messages, target = $('messages'), showEmpty = true) {
     if (!messages?.length) { if(showEmpty&&target===$('messages'))$('messages').innerHTML = '<div class="empty">尚无消息</div>'; return; }
     for (const message of messages) {
-      const role = message.role || 'event';
-      if (Array.isArray(message.content) && role === 'assistant') {
+      const role=message.role||'event',timestamp=message.timestamp;
+      if(role==='bashExecution'){
+        const failed=message.cancelled||Number(message.exitCode)>0,status=message.cancelled?'已取消':message.exitCode===undefined?'完成':`exit ${message.exitCode}${message.truncated?' · 输出已截断':''}`;
+        const card=addCard(`${failed?'✗':'✓'} $ ${message.command} · ${status}`,message.output||'','tool',false,timestamp,target,false);card.details.classList.toggle('tool-error',!!failed);
+      } else if (Array.isArray(message.content) && role === 'assistant') {
         for (const part of message.content) {
-          if (part.type === 'text' && part.text) addCard(null,part.text,'assistant',false,undefined,target,false);
-          else if (part.type === 'thinking' && (part.thinking||part.text)) addCard('Thinking',part.thinking||part.text,'thinking',false,undefined,target,false);
-          else if (part.type === 'toolCall') addCard(`🔧 ${part.name||'Tool'}`,JSON.stringify(part.arguments||{},null,2),'tool',false,undefined,target,false);
+          if (part.type === 'text' && part.text) addCard(null,part.text,'assistant',false,timestamp,target,false);
+          else if (part.type === 'thinking' && (part.thinking||part.text)) addCard('Thinking',part.thinking||part.text,'thinking',false,timestamp,target,false);
+          // Completed historical tools are represented by their toolResult message below.
         }
-      } else { const content = textContent(message.content); if (content) addCard(['user','assistant'].includes(role)?null:role, content, role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : role === 'toolResult' ? 'tool' : 'system',false,undefined,target,false); }
+        const error=assistantError(message);if(error)addCard('LLM Error',error,'error',true,timestamp,target,false);
+      } else if(role==='toolResult'){
+        const failed=!!message.isError,content=textContent(message.content)||(failed?'执行失败':'执行完成');
+        const card=addCard(`${failed?'✗':'✓'} ${message.toolName||'Tool'}`,content,'tool',false,timestamp,target,false);card.details.classList.toggle('tool-error',failed);
+      } else { const content=textContent(message.content);if(content)addCard(['user','assistant'].includes(role)?null:role,content,role==='user'?'user':role==='assistant'?'assistant':'system',false,timestamp,target,false); }
     }
     if(target===$('messages'))$('messages').scrollTop=$('messages').scrollHeight;
   }
@@ -356,9 +475,9 @@
   function finalizeAgentStreams() {
     for(const key of ['assistant','thinking']){const card=state.streams.get(key);if(!card)continue;if(card.renderFrame!==null){cancelAnimationFrame(card.renderFrame);card.renderFrame=null;}renderCardBody(card.body,card.content,key==='assistant');card.summaryText.textContent=(card.content.trim().split('\n')[0]||key).slice(0,160);state.streams.delete(key);}
   }
-  function discardStreams() { for(const card of state.streams.values())if(card.renderFrame!==null&&card.renderFrame!==undefined)cancelAnimationFrame(card.renderFrame);state.streams.clear(); }
+  function discardStreams() { for(const card of state.streams.values())if(card.renderFrame!==null&&card.renderFrame!==undefined)cancelAnimationFrame(card.renderFrame);state.streams.clear();state.toolCards.clear(); }
   function extensionRequest(agentId, ev, timestamp) {
-    const card = addCard(ev.title || `Extension ${ev.kind}`, ev.message || ev.placeholder || ev.prefill || '', 'system', true, timestamp);
+    const card = addCard(ev.title || `Extension ${ev.kind}`, ev.message || ev.placeholder || ev.prefill || '', 'dialog', true, timestamp);
     const controls = document.createElement('div'); controls.className = 'dialog-actions';
     const send = async value => { try { await post(`/api/v1/agents/${agentId}/extension-response`, {requestId:ev.requestId, value}); controls.replaceChildren(document.createTextNode('已响应')); } catch (e) { toast(e.message); } };
     if (ev.kind === 'select') for (const option of ev.options || []) { const b = document.createElement('button'); b.textContent = option; b.onclick = () => send(option); controls.append(b); }
@@ -385,8 +504,8 @@
   }
   function handleVoiceEvent(message) {
     const ev=message.event||{},selected=state.selectedKind==='agent'&&state.agent?.agentId===message.agentId,key=`voice-${ev.playbackId||message.agentId}`;
-    if(ev.type==='voice_start'){if(state.voicePlaybackEnabled)void ensureAudioContext().catch(()=>{});if(selected){const c=ensureStream(key,'语音摘要','system');c.content='';renderCardBody(c.body,'正在生成语音摘要…',false);}}
-    else if(ev.type==='voice_summary_delta'){if(selected){const c=ensureStream(key,'语音摘要','system');c.content+=ev.text||'';renderCardBody(c.body,c.content,false);c.summaryText.textContent='语音摘要';}}
+    if(ev.type==='voice_start'){if(state.voicePlaybackEnabled)void ensureAudioContext().catch(()=>{});if(selected){const c=ensureStream(key,'语音摘要','voice');c.content='';renderCardBody(c.body,'正在生成语音摘要…',false);}}
+    else if(ev.type==='voice_summary_delta'){if(selected){const c=ensureStream(key,'语音摘要','voice');c.content+=ev.text||'';renderCardBody(c.body,c.content,false);c.summaryText.textContent='语音摘要';}}
     else if(ev.type==='voice_audio_chunk')playVoiceChunk(ev);
     else if(ev.type==='voice_cancelled'){stopVoiceAudio();}
     else if(ev.type==='voice_error'){if(selected)addCard('语音服务',ev.message||'语音生成失败','error',true);}
@@ -437,17 +556,18 @@
       const update = ev.assistantMessageEvent || {};
       if (update.type === 'text_delta') { const c=ensureStream('assistant',null,'assistant');c.content+=update.delta||'';scheduleStreamPaint(c); }
       else if (update.type === 'thinking_delta') {const c=ensureStream('thinking','Thinking','thinking');c.content+=update.delta||'';scheduleStreamPaint(c);}
-    } else if (ev.type === 'message_end') finalizeAgentStreams();
-    else if (ev.type === 'tool_execution_start') addCard(`🔧 ${ev.toolName || 'Tool'}`, JSON.stringify(ev.args || {}, null, 2), 'tool', false, message.timestamp);
-    else if (ev.type === 'tool_execution_end') addCard(`${ev.isError ? '✗' : '✓'} ${ev.toolName || 'Tool'}`, textContent(ev.result) || (ev.isError ? '执行失败' : '执行完成'), ev.isError ? 'error' : 'tool', false, message.timestamp);
-    else if (ev.type === 'auto_retry_start' || ev.type === 'auto_retry_end') addCard('Retry', ev.errorMessage || ev.type, 'system', false, message.timestamp);
+    } else if (ev.type === 'message_end') {finalizeAgentStreams();const error=assistantError(ev.message);if(error)addCard('LLM Error',error,'error',true,message.timestamp);}
+    else if (ev.type === 'tool_execution_start' || ev.type === 'tool_execution_update' || ev.type === 'tool_execution_end') upsertToolCard(ev, message.timestamp);
+    else if (ev.type === 'bash_execution_update' || ev.type === 'bash_execution_end') updateBashCard(ev, message.timestamp);
+    else if (ev.type === 'auto_retry_start' || ev.type === 'auto_retry_end') addCard('Retry', ev.errorMessage || ev.finalError || `${ev.type}${ev.attempt?` · attempt ${ev.attempt}`:''}`, 'system', false, message.timestamp);
+    else if (String(ev.type).startsWith('summarization_retry')) addCard('Summarization Retry', ev.errorMessage || `${ev.type}${ev.attempt?` · ${ev.attempt}/${ev.maxAttempts}`:''}`, 'system', false, message.timestamp);
     else if (ev.type === 'extension_ui_request') extensionRequest(message.agentId, ev, message.timestamp);
     else if (ev.type === 'extension_ui_notify') addCard(ev.notificationType || '通知', ev.message, 'system', false, message.timestamp);
     else if (ev.type === 'extension_ui_status') { ev.text ? state.extensionStatus.set(ev.key, ev.text) : state.extensionStatus.delete(ev.key); renderExtensionStatus(); }
     else if (ev.type === 'extension_ui_widget') { ev.content ? state.widgets.set(ev.key, ev.content) : state.widgets.delete(ev.key); renderWidgets(); }
     else if (ev.type === 'extension_ui_title') { state.agent.sessionName = ev.title; updateAgentHeader(); }
     else if (ev.type === 'extension_ui_working_message') { ev.message ? state.extensionStatus.set('working',ev.message) : state.extensionStatus.delete('working'); renderExtensionStatus(); }
-    else if (!['message_start','agent_end','agent_settled','session_info_changed'].includes(ev.type)) addCard(ev.title || ev.type || 'Event', JSON.stringify(ev, null, 2), 'system', false, message.timestamp);
+    else if (!['message_start','agent_end','agent_settled','session_info_changed','turn_start','turn_end','model_select','thinking_level_select','thinking_level_changed'].includes(ev.type)) addCard(ev.title || ev.type || 'Event', JSON.stringify(ev, null, 2), 'system', false, message.timestamp);
     $('messages').scrollTop = $('messages').scrollHeight;
   }
   function renderExtensionStatus() { let row=$('extensionStatus'); if (!state.extensionStatus.size) { row?.remove(); return; } if(!row){row=document.createElement('div');row.id='extensionStatus';row.className='status-row';$('widgets').after(row);} row.textContent=[...state.extensionStatus.values()].join(' · '); }
@@ -562,11 +682,16 @@
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
   $('menuStartAgent').onclick=()=>startAgent(state.contextTarget.relativePath);$('menuOpenTerminal').onclick=()=>openTerminal(state.contextTarget.relativePath);$('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuCloseTerminal').onclick=()=>{const terminal=agentContextTarget?.kind==='terminal'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal(terminal);};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await post(`/api/v1/agents/${agent.agentId}/archive`);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
-  $('newAgent').onclick=createAgent;$('newTerminal').onclick=()=>openTerminal($('agentCwd').value.trim()||'.');$('abort').onclick=()=>state.agent&&post(`/api/v1/agents/${state.agent.agentId}/abort`).catch(e=>toast(e.message));$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
+  $('newAgent').onclick=createAgent;$('newTerminal').onclick=()=>openTerminal($('agentCwd').value.trim()||'.');$('abort').onclick=()=>{if(!state.agent)return;const id=state.agent.agentId;Promise.all([post(`/api/v1/agents/${id}/abort`),post(`/api/v1/agents/${id}/bash-abort`)]).catch(e=>toast(e.message));};$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
   $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await post(`/api/v1/agents/${state.agent.agentId}/compact`,{instructions:instructions||undefined});toast('Compact 完成');}};
-  $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();addCard(null,text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
-  $('input').onkeydown=event=>{if(!$('mentionPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setMentionSelection(state.mentionIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||event.key==='Enter'){event.preventDefault();chooseMention(state.mentionFiltered[state.mentionIndex],event.key==='Enter');return;}if(event.key==='Escape'){event.preventDefault();closeMention();return;}}if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();}};$('input').oninput=()=>{const context=mentionContext();if(!context){if(!$('mentionPicker').hidden)closeMention();return;}const fresh=$('mentionPicker').hidden||state.mentionStart!==context.start;state.mentionStart=context.start;state.mentionEnd=context.replacementEnd;if(fresh){state.mentionPrefix='';void openMention(state.treePath,context.query);return;}const filter=state.mentionPrefix&&context.query.startsWith(state.mentionPrefix)?context.query.slice(state.mentionPrefix.length):context.query;renderMentionItems(filter);};
+  $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;closeCommandPicker();const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();
+    // `!cmd` runs inside the Agent session (output is recorded in the Session); `!!cmd` keeps the output out of the model context.
+    if(text.startsWith('!')){const excludeFromContext=text.startsWith('!!'),command=text.slice(excludeFromContext?2:1).trim();if(!command)return toast('请输入要执行的命令');addCard(null,text,'user');$('input').value='';
+      try{await post(`/api/v1/agents/${agentId}/bash`,{command,excludeFromContext});if(state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.toolCards.clear();}}catch(e){toast(`命令失败：${e.message}`);}return;}
+    addCard(null,text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
+  $('input').onkeydown=event=>{if(!$('commandPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setCommandSelection(state.commandIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||(event.key==='Enter'&&!event.ctrlKey&&!event.metaKey)){event.preventDefault();chooseCommand(state.commandFiltered[state.commandIndex]);return;}if(event.key==='Escape'){event.preventDefault();closeCommandPicker();return;}}if(!$('mentionPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setMentionSelection(state.mentionIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||event.key==='Enter'){event.preventDefault();chooseMention(state.mentionFiltered[state.mentionIndex],event.key==='Enter');return;}if(event.key==='Escape'){event.preventDefault();closeMention();return;}}if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();}};$('input').oninput=()=>{const command=commandContext();if(command){if(!$('mentionPicker').hidden)closeMention();void openCommandPicker(command.query);return;}if(!$('commandPicker').hidden)closeCommandPicker();const context=mentionContext();if(!context){if(!$('mentionPicker').hidden)closeMention();return;}const fresh=$('mentionPicker').hidden||state.mentionStart!==context.start;state.mentionStart=context.start;state.mentionEnd=context.replacementEnd;if(fresh){state.mentionPrefix='';void openMention(state.treePath,context.query);return;}const filter=state.mentionPrefix&&context.query.startsWith(state.mentionPrefix)?context.query.slice(state.mentionPrefix.length):context.query;renderMentionItems(filter);};
+  $('commandClose').onclick=closeCommandPicker;
   $('mentionUp').onclick=()=>browseMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
   $('workspaceBack').onclick=()=>mobileBack('home');$('fileBack').onclick=()=>mobileBack('workspace');$('agentBack').onclick=()=>mobileBack('home');$('terminalBack').onclick=()=>mobileBack('home');$('terminalClear').onclick=()=>state.terminalEmulator?.clear();$('terminalClose').onclick=()=>{if(state.terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal();};
   $('mobileAgentActions').onclick=()=>$('mobileAgentActions').closest('.toolbar').classList.toggle('actions-open');

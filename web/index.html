@@ -60,9 +60,10 @@
     <div id="messages" aria-live="polite"><div class="empty">选择或创建 Agent 开始对话</div></div>
     <form id="prompt">
       <div id="mentionPicker" hidden><div class="picker-head"><button type="button" id="mentionUp">↑</button><b id="mentionPath">.</b><button type="button" id="mentionClose">×</button></div><div id="mentionItems"></div></div>
+      <div id="commandPicker" hidden><div class="picker-head"><b>命令 · prompt template / skill</b><button type="button" id="commandClose">×</button></div><div id="commandItems"></div></div>
       <div class="composer-row">
         <select id="sendMode" title="发送方式"><option value="prompt">Prompt</option><option value="steer">Steer</option><option value="follow-up">Follow-up</option></select>
-        <textarea id="input" placeholder="输入 @ 引用文件；Ctrl/⌘+Enter 发送"></textarea>
+        <textarea id="input" placeholder="输入 @ 引用文件，/ 使用命令，! 执行 Shell；Ctrl/⌘+Enter 发送"></textarea>
         <button id="voiceInput" type="button" title="开始语音输入" hidden>🎙</button>
         <button type="submit">发送</button>
       </div>

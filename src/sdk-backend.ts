@@ -22,6 +22,8 @@ export class SdkBackend implements AgentBackend {
     await session.bindExtensions({uiContext:backend.extensionUi()});
     return backend;
   }
+  // Slash commands, skills and prompt templates are expanded by prompt() itself (expandPromptTemplates defaults to true),
+  // so `/name args` typed in the web composer behaves exactly like the Pi TUI.
   prompt(message:string){return this.session.prompt(message)}
   steer(message:string){return this.session.steer(message)}
   followUp(message:string){return this.session.followUp(message)}
@@ -30,14 +32,36 @@ export class SdkBackend implements AgentBackend {
   async getMessages():Promise<unknown[]>{return [...this.session.state.messages]}
   async getCapabilities(){
     const current=this.session.model as any;
-    const available=this.session.modelRegistry.getAvailable();
-    return {model:current?this.modelInfo(current):null,models:available.map(model=>this.modelInfo(model)),thinkingLevel:this.session.thinkingLevel,thinkingLevels:this.session.getAvailableThinkingLevels(),supportsThinking:this.session.supportsThinking()};
+    // ModelRuntime.getAvailable() is async since 0.80.8 and may consult provider auth; the snapshot keeps
+    // an unauthenticated or offline call from blocking the capabilities endpoint.
+    const available=await this.session.modelRuntime.getAvailable().catch(()=>this.session.modelRuntime.getAvailableSnapshot());
+    return {model:current?this.modelInfo(current):null,models:available.map((model:any)=>this.modelInfo(model)),thinkingLevel:this.session.thinkingLevel,thinkingLevels:this.session.getAvailableThinkingLevels(),supportsThinking:this.session.supportsThinking()};
   }
+  /** Slash commands the composer can offer: file-based prompt templates and skills discovered for this cwd. */
+  async listCommands(){
+    const loader=this.session.resourceLoader;
+    const prompts=loader.getPrompts().prompts.map(prompt=>({name:prompt.name,description:prompt.description,argumentHint:prompt.argumentHint,source:'prompt' as const}));
+    const skills=loader.getSkills().skills.map(skill=>({name:`skill:${skill.name}`,description:skill.description,source:'skill' as const}));
+    return [...prompts,...skills].sort((a,b)=>a.name.localeCompare(b.name));
+  }
+  /** Run a command inside the Agent session so its output is recorded in the transcript (`!!` keeps it out of the model context). */
+  async runBash(command:string,excludeFromContext=false){
+    const id=randomUUID();
+    try{
+      const result=await this.session.executeBash(command,undefined,{excludeFromContext,id});
+      this.events.emit('event',{type:'bash_execution_end',id,command,...result});
+      return {id,...result};
+    }catch(error){
+      this.events.emit('event',{type:'bash_execution_end',id,command,isError:true,errorMessage:error instanceof Error?error.message:String(error)});
+      throw error;
+    }
+  }
+  abortBash(){this.session.abortBash()}
   async getSession(){return {...await this.getSessionInfo(),leafId:this.session.sessionManager.getLeafId(),entries:this.session.sessionManager.getEntries(),tree:this.session.sessionManager.getTree(),userMessages:this.session.getUserMessagesForForking()}}
   async getSessionInfo(){return {sessionId:this.session.sessionId,sessionFile:this.session.sessionFile,sessionName:this.session.sessionName,stats:this.session.getSessionStats(),contextUsage:this.session.getContextUsage()}}
   compact(instructions?:string){return this.session.compact(instructions)}
-  async setModel(provider:string,modelId:string){const model=this.session.modelRegistry.find(provider,modelId);if(!model)throw Object.assign(new Error('Model not found'),{code:'MODEL_NOT_FOUND'});await this.session.setModel(model)}
-  async setThinkingLevel(level:string){if(!['off','minimal','low','medium','high','xhigh'].includes(level))throw Object.assign(new Error('Invalid thinking level'),{code:'INVALID_THINKING_LEVEL'});this.session.setThinkingLevel(level as any)}
+  async setModel(provider:string,modelId:string){const model=this.session.modelRuntime.getModel(provider,modelId);if(!model)throw Object.assign(new Error('Model not found'),{code:'MODEL_NOT_FOUND'});await this.session.setModel(model)}
+  async setThinkingLevel(level:string){if(level!=='off'&&!this.session.getAvailableThinkingLevels().includes(level as any))throw Object.assign(new Error('Invalid thinking level'),{code:'INVALID_THINKING_LEVEL'});this.session.setThinkingLevel(level as any)}
   async setSessionName(name:string){const value=name.trim();if(!value||value.length>200)throw Object.assign(new Error('Session name must be 1-200 characters'),{code:'INVALID_SESSION_NAME'});this.session.setSessionName(value)}
   navigate(entryId:string){return this.session.navigateTree(entryId)}
   async fork(entryId:string){const entry:any=this.session.sessionManager.getEntry(entryId);if(!entry||entry.type!=='message'||entry.message?.role!=='user')throw Object.assign(new Error('A user message entry is required'),{code:'SESSION_ENTRY_NOT_FOUND'});const content=entry.message.content;const selectedText=typeof content==='string'?content:Array.isArray(content)?content.filter((part:any)=>part.type==='text').map((part:any)=>part.text).join('\n'):'';let sessionFile:string|undefined;if(entry.parentId){sessionFile=this.session.sessionManager.createBranchedSession(entry.parentId)}else{const current=this.session.sessionFile;if(!current)throw Object.assign(new Error('Session persistence is disabled'),{code:'SESSION_NOT_PERSISTED'});sessionFile=SessionManager.create(this.cwd,this.session.sessionManager.getSessionDir(),{parentSession:current}).getSessionFile()}return {sessionFile,selectedText}}

@@ -27,3 +27,26 @@
 .msg summary .summary-label{display:none;min-width:0;flex:1}
 .msg.derived-title[open] summary .summary-text{display:none}
 .msg.derived-title[open] summary .summary-label{display:block}
+
+/* Slash command picker reuses the @-mention picker chrome. */
+#commandPicker{position:absolute;left:115px;right:80px;bottom:88px;max-height:330px;overflow:auto;background:#252a33;border:1px solid #667085;border-radius:7px;box-shadow:0 8px 24px #0008;z-index:15}
+#commandPicker .picker-item b{display:block}
+#commandPicker .picker-item small{display:block;margin-top:2px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:700px){#commandPicker{left:8px;right:8px;bottom:116px;max-height:45vh}}
+@media(max-width:620px){#commandPicker{left:10px;right:10px}}
+
+/* Activity group: tool calls, bash output, retries and extension chatter collapse into one card
+   whose summary tracks the newest item so streaming stays visible without flooding the transcript. */
+.msg.activity-group{border-left-color:var(--yellow);background:#262b35}
+.msg.activity-group>summary{color:var(--muted)}
+.msg.activity-group>summary .summary-text{color:var(--text)}
+.msg.activity-group .activity-count{flex:0 0 auto;margin-left:10px;padding:1px 8px;border-radius:999px;font-size:11px;background:#3b4252;color:var(--muted)}
+.msg.activity-group>summary:before{content:'\25B8  \2699';margin-right:7px}
+.msg.activity-group[open]>summary:before{content:'\25BE  \2699'}
+.activity-items{padding:0 10px 10px}
+.activity-items .msg{margin:6px 0;background:#2f3542}
+.activity-items .msg summary{padding:7px 9px;font-size:13px}
+.activity-items .msg-content{padding:0 10px 10px;font-size:13px}
+.msg.tool.tool-error{border-left-color:var(--red)}
+.msg.dialog{border-left-color:var(--blue);background:#2f3644}
+.msg.voice{border-left-color:#b48ead}

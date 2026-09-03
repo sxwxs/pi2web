@@ -5,7 +5,9 @@ import type { WorkspaceStore } from './workspaces.js';
 import { createSdkBackend } from './sdk-backend.js';
 export type AgentState={status:'unloaded'|'starting'|'idle'|'streaming'|'waiting_for_user'|'error'|'stopping'|'stopped',agentId:string,sessionId:string,sessionFile?:string,sessionName?:string,cwd:string};
 export type AgentEvent={type:string,[key:string]:unknown};
-export interface AgentBackend {prompt(message:string):Promise<void>;steer(message:string):Promise<void>;followUp(message:string):Promise<void>;abort():Promise<void>;getState():Promise<AgentState>;getMessages():Promise<unknown[]>;getCapabilities():Promise<Record<string,unknown>>;getSession():Promise<Record<string,unknown>>;getSessionInfo():Promise<Record<string,unknown>>;compact(instructions?:string):Promise<unknown>;setModel(provider:string,modelId:string):Promise<void>;setThinkingLevel(level:string):Promise<void>;setSessionName(name:string):Promise<void>;navigate(entryId:string):Promise<unknown>;fork(entryId:string):Promise<{sessionFile?:string,selectedText?:string}>;extensionResponse(requestId:string,value:unknown):Promise<void>;subscribe(listener:(e:AgentEvent)=>void):()=>void;dispose():Promise<void>}
+export type SlashCommandSummary={name:string,description?:string,argumentHint?:string,source:'prompt'|'skill'};
+export type BashRunResult={id:string,output:string,exitCode:number|undefined,cancelled:boolean,truncated:boolean};
+export interface AgentBackend {prompt(message:string):Promise<void>;steer(message:string):Promise<void>;followUp(message:string):Promise<void>;abort():Promise<void>;getState():Promise<AgentState>;getMessages():Promise<unknown[]>;getCapabilities():Promise<Record<string,unknown>>;getSession():Promise<Record<string,unknown>>;getSessionInfo():Promise<Record<string,unknown>>;compact(instructions?:string):Promise<unknown>;setModel(provider:string,modelId:string):Promise<void>;setThinkingLevel(level:string):Promise<void>;setSessionName(name:string):Promise<void>;navigate(entryId:string):Promise<unknown>;fork(entryId:string):Promise<{sessionFile?:string,selectedText?:string}>;extensionResponse(requestId:string,value:unknown):Promise<void>;listCommands():Promise<SlashCommandSummary[]>;runBash(command:string,excludeFromContext?:boolean):Promise<BashRunResult>;abortBash():void;subscribe(listener:(e:AgentEvent)=>void):()=>void;dispose():Promise<void>}
 /** Deterministic backend used by the server and tests. The SDK adapter can implement the same contract. */
 export class MockBackend implements AgentBackend {
  private emitter=new EventEmitter(); private state:AgentState; private messages:unknown[]=[]; private timer?:ReturnType<typeof setTimeout>;
@@ -19,6 +21,9 @@ export class MockBackend implements AgentBackend {
  async getSession(){return {...await this.getSessionInfo(),entries:[],tree:[]}}
  async getSessionInfo(){return {sessionId:this.state.sessionId,sessionName:this.state.sessionName,stats:{totalMessages:this.messages.length,tokens:{total:0},cost:0},contextUsage:{tokens:null,contextWindow:0,percent:null}}}
  async compact(){return {summary:'mock'}} async setModel(_provider:string,_modelId:string){} async setThinkingLevel(_level:string){} async setSessionName(name:string){this.state.sessionName=name;this.emit({type:'session_info_changed',name})} async navigate(_entryId:string){return {cancelled:false}} async fork(_entryId:string):Promise<{sessionFile?:string,selectedText?:string}>{return {}} async extensionResponse(_requestId:string,_value:unknown){}
+ async listCommands(){return [{name:'mock',description:'Mock prompt template',source:'prompt' as const}]}
+ async runBash(command:string,excludeFromContext=false){const id=randomUUID(),output=`Mock bash: ${command}`;this.emit({type:'bash_execution_update',id,delta:`${output}\n`});const result={id,output,exitCode:0,cancelled:false,truncated:false};this.messages.push({role:'bashExecution',command,output,exitCode:0,cancelled:false,truncated:false,timestamp:Date.now(),excludeFromContext});this.emit({type:'bash_execution_end',command,...result});return result}
+ abortBash(){}
  subscribe(listener:(e:AgentEvent)=>void){this.emitter.on('event',listener);return()=>this.emitter.off('event',listener)}
  async dispose(){await this.abort();this.state.status='stopped';this.emitter.removeAllListeners()}
 }
@@ -58,4 +63,8 @@ export class AgentManager {
  async setThinkingLevel(id:string,level:string){return (await this.ensureLoaded(id)).setThinkingLevel(level)} async setSessionName(id:string,name:string){await (await this.ensureLoaded(id)).setSessionName(name);this.get(id).record.sessionName=name.trim()} async navigate(id:string,entryId:string){return (await this.ensureLoaded(id)).navigate(entryId)}
  async fork(id:string,entryId:string){const source=this.get(id),result=await (await this.ensureLoaded(id)).fork(entryId);if(!result.sessionFile)throw Object.assign(new Error('Session persistence is disabled'),{code:'SESSION_NOT_PERSISTED'});const ws=this.workspaces.get(source.record.workspaceId)!;const agent=await this.create(source.record.workspaceId,pathRelative(ws.rootPath,source.record.cwd),result.sessionFile,source.record.profile);return {agent,selectedText:result.selectedText}}
  async extensionResponse(id:string,requestId:string,value:unknown){return (await this.ensureLoaded(id)).extensionResponse(requestId,value)}
+ async listCommands(id:string){return (await this.ensureLoaded(id)).listCommands()}
+ /** Session-scoped bash. Output is streamed as `bash_execution_update` events and recorded in the Session. */
+ async runBash(id:string,command:string,excludeFromContext=false){return (await this.ensureLoaded(id)).runBash(command,excludeFromContext)}
+ async abortBash(id:string){const entry=this.get(id);if(entry.loading)await entry.loading;entry.backend?.abortBash()}
 }
