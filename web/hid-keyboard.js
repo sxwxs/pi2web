@@ -14,6 +14,19 @@
   // remain easy to distinguish when they are lit at the same time.
   const PALETTE = ['#FF3040', '#00D9FF', '#FFE600', '#3D5AFE', '#30E070', '#D840FF'];
   const BUSY_STATUSES = new Set(['starting', 'streaming', 'stopping']);
+  // codex-full firmware effects that remain meaningful on one independently
+  // bound key. Spatial effects such as snake/rainbow are intentionally unused.
+  const EFFECT_OFF = 0;
+  const EFFECT_SOLID = 1;
+  const EFFECT_BREATH = 4;
+  const EFFECT_SHALLOW_BREATH = 6;
+  const ACTIVITY_LIGHTS = {
+    llm: {effect:EFFECT_SHALLOW_BREATH, speed:0.35},
+    tool: {effect:EFFECT_BREATH, speed:0.65},
+    retry: {effect:EFFECT_BREATH, speed:1},
+    waiting: {effect:EFFECT_SHALLOW_BREATH, speed:0.15},
+  };
+  const BUSY_LIGHT = {effect:EFFECT_BREATH, speed:0.45};
 
   const normalizeColor = value => {
     const color = String(value || '').trim().toUpperCase();
@@ -48,14 +61,13 @@
       this.pending = new Map();
       this.assembler = new JsonLineAssembler();
       this.agents = new Map();
+      this.activities = new Map();
       this.sentLights = new Map();
       this.lastPress = new Map();
+      this.syncRequested = false;
+      this.forceSync = false;
+      this.syncPromise = null;
       this.bindings = this.loadBindings();
-      this.blinkOn = true;
-      this.blinkTimer = setInterval(() => {
-        this.blinkOn = !this.blinkOn;
-        if ([...this.bindings.values()].some(binding => this.isBusy(binding.agentId))) this.syncLights().catch(error => this.fail(error));
-      }, 1000);
       this.handleInputReport = this.handleInputReport.bind(this);
       this.handleDisconnect = this.handleDisconnect.bind(this);
       navigator.hid?.addEventListener('disconnect', this.handleDisconnect);
@@ -126,11 +138,20 @@
 
     setAgents(agents) {
       this.agents = new Map((agents || []).map(agent => [agent.agentId, agent]));
+      for (const agentId of this.activities.keys()) if (!this.agents.has(agentId)) this.activities.delete(agentId);
       this.syncLights().catch(error => this.fail(error));
     }
 
     updateAgent(agent) {
       if (agent?.agentId) this.agents.set(agent.agentId, agent);
+      this.syncLights().catch(error => this.fail(error));
+    }
+
+    setActivity(agentId, activity = 'idle') {
+      if (!['idle', 'llm', 'tool', 'retry', 'waiting'].includes(activity)) throw Error(`无效的键盘活动状态：${activity}`);
+      const previous = this.activities.get(agentId) || 'idle';
+      if (previous === activity) return;
+      if (activity === 'idle') this.activities.delete(agentId); else this.activities.set(agentId, activity);
       this.syncLights().catch(error => this.fail(error));
     }
 
@@ -235,19 +256,37 @@
       return job;
     }
 
-    lightRequest(slot, color, enabled) {
-      return {id:this.nextId(), m:'v.oai.thstatus', p:[{id:slot, c:parseInt(color.slice(1), 16), b:enabled ? 1 : 0, e:enabled ? 1 : 0, s:0, sk:0, sa:0}]};
+    lightRequest(slot, color, effect, speed = 0) {
+      const enabled = effect !== EFFECT_OFF;
+      return {id:this.nextId(), m:'v.oai.thstatus', p:[{id:slot, c:parseInt(color.slice(1), 16), b:enabled ? 1 : 0, e:effect, s:speed, sk:0, sa:0}]};
+    }
+
+    lightState(slot) {
+      const binding = this.bindings.get(slot), active = Boolean(binding && this.agents.has(binding.agentId));
+      if (!active) return {color:binding?.color || '#000000', effect:EFFECT_OFF, speed:0};
+      const activity = this.activities.get(binding.agentId);
+      const animation = ACTIVITY_LIGHTS[activity] || (this.isBusy(binding.agentId) ? BUSY_LIGHT : null);
+      return {color:binding.color, effect:animation?.effect || EFFECT_SOLID, speed:animation?.speed || 0};
     }
 
     async syncLights(force = false) {
       if (!this.connected) return;
-      for (let slot = 0; slot < 6; slot++) {
-        const binding = this.bindings.get(slot), enabled = Boolean(binding && this.agents.has(binding.agentId)) && (!this.isBusy(binding.agentId) || this.blinkOn);
-        const color = binding?.color || '#000000', signature = `${color}:${enabled}`;
-        if (!force && this.sentLights.get(slot) === signature) continue;
-        await this.transmit(this.lightRequest(slot, color, enabled));
-        this.sentLights.set(slot, signature);
-      }
+      this.syncRequested = true;
+      this.forceSync ||= force;
+      if (this.syncPromise) return this.syncPromise;
+      this.syncPromise = (async () => {
+        do {
+          this.syncRequested = false;
+          const forcePass = this.forceSync; this.forceSync = false;
+          for (let slot = 0; slot < 6; slot++) {
+            const {color, effect, speed} = this.lightState(slot), signature = `${color}:${effect}:${speed}`;
+            if (!forcePass && this.sentLights.get(slot) === signature) continue;
+            await this.transmit(this.lightRequest(slot, color, effect, speed));
+            this.sentLights.set(slot, signature);
+          }
+        } while (this.syncRequested && this.connected);
+      })();
+      try { await this.syncPromise; } finally { this.syncPromise = null; }
     }
 
     fail(error) { this.onError?.(error instanceof Error ? error : Error(String(error))); }

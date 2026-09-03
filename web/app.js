@@ -9,7 +9,7 @@
     toolCards: new Map(), commands: [], commandsAgentId: null, commandFiltered: [], commandIndex: 0, commandRequest: 0,
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
     voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve(),generation:0}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
-    mailNotificationsAvailable:false,mailSettings:{enabled:false,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true,collabEscalations:true},
+    mailNotificationsAvailable:false,mailSettings:{enabled:false,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true,collabEscalations:true},keyboardActivity:new Map(),
   };
   $('api').value = state.base;
   $('pairBase').value = state.base;
@@ -234,7 +234,7 @@
     $('keyboardConnect').hidden=connected;$('keyboardDisconnect').hidden=!connected;
     const unavailable=!window.isSecureContext?'需要 HTTPS 或 localhost':!navigator.hid?'当前浏览器不支持 WebHID':'';
     $('keyboardConnect').disabled=Boolean(unavailable);$('keyboardConnect').title=unavailable;
-    $('keyboardStatus').textContent=connected?`已连接 ${name} · 工作中亮 1 秒/灭 1 秒，空闲常亮`:unavailable||'未连接 · 绑定保存在当前浏览器';
+    $('keyboardStatus').textContent=connected?`已连接 ${name} · LLM 浅呼吸，Tool 完整呼吸，Retry 快速呼吸，空闲常亮`:unavailable||'未连接 · 绑定保存在当前浏览器';
     renderKeyboardBindings();
   }
   function renderKeyboardBindings() {
@@ -254,6 +254,29 @@
     onBindingsChange:()=>{renderAgentList();renderKeyboardBindings();},
     onError:error=>{console.error('Session keyboard error',error);toast(`键盘：${error.message}`);}
   });
+  function updateKeyboardActivity(agentId,event) {
+    const fresh=()=>({turnActive:false,activeTools:new Set(),retrying:false,waiting:false});
+    let activity=state.keyboardActivity.get(agentId)||fresh();const type=event?.type;
+    if(type==='agent_start'){activity=fresh();activity.turnActive=true;}
+    else if(type==='message_start'){activity.turnActive=true;activity.waiting=false;}
+    else if(type==='message_update'){activity.turnActive=true;activity.waiting=false;}
+    else if(type==='tool_execution_start'||type==='tool_execution_update'){
+      activity.turnActive=true;activity.waiting=false;activity.activeTools.add(`tool:${event.toolCallId||event.toolName||'default'}`);
+    } else if(type==='tool_execution_end'){activity.activeTools.delete(`tool:${event.toolCallId||event.toolName||'default'}`);activity.waiting=false;}
+    else if(type==='bash_execution_start'||type==='bash_execution_update') activity.activeTools.add(`bash:${event.id||'default'}`);
+    else if(type==='bash_execution_end') activity.activeTools.delete(`bash:${event.id||'default'}`);
+    else if(type==='auto_retry_start'){activity.activeTools.clear();activity.retrying=true;activity.waiting=false;activity.turnActive=true;}
+    else if(type==='auto_retry_end'){activity.retrying=false;activity.turnActive=true;}
+    else if(type==='extension_ui_request') activity.waiting=true;
+    else if(type==='extension_ui_response'){activity.waiting=false;activity.turnActive=true;}
+    else if(type==='agent_end'){
+      if(event.willRetry){activity.activeTools.clear();activity.retrying=true;activity.waiting=false;activity.turnActive=true;}else activity=fresh();
+    } else if(type==='agent_settled') activity=fresh();
+    state.keyboardActivity.set(agentId,activity);
+    const phase=activity.waiting?'waiting':activity.activeTools.size?'tool':activity.retrying?'retry':activity.turnActive?'llm':'idle';
+    sessionKeyboard.setActivity(agentId,phase);
+    if(phase==='idle')state.keyboardActivity.delete(agentId);
+  }
   const formatTokens = value => { const n=Number(value); if(!Number.isFinite(n)||n<=0)return '0'; if(n>=1e6)return `${(n/1e6).toFixed(1)}M`;if(n>=1e3)return `${(n/1e3).toFixed(n>=1e4?0:1)}k`;return String(Math.round(n)); };
   const usageLevel = usage => Number(usage?.percent)>90?'usage-danger':Number(usage?.percent)>70?'usage-warning':'';
   const usageText = usage => { if(!usage||!Number(usage.contextWindow))return 'Context ?';const percent=usage.percent==null?'?':`${Number(usage.percent).toFixed(1)}%`;return `${percent} · ${formatTokens(usage.tokens)}/${formatTokens(usage.contextWindow)}`; };
@@ -505,7 +528,7 @@
   function extensionRequest(agentId, ev, timestamp) {
     const card = addCard(ev.title || `Extension ${ev.kind}`, ev.message || ev.placeholder || ev.prefill || '', 'dialog', true, timestamp);
     const controls = document.createElement('div'); controls.className = 'dialog-actions';
-    const send = async value => { try { await post(`/api/v1/agents/${agentId}/extension-response`, {requestId:ev.requestId, value}); controls.replaceChildren(document.createTextNode('已响应')); } catch (e) { toast(e.message); } };
+    const send = async value => { try { await post(`/api/v1/agents/${agentId}/extension-response`, {requestId:ev.requestId, value}); updateKeyboardActivity(agentId,{type:'extension_ui_response'});controls.replaceChildren(document.createTextNode('已响应')); } catch (e) { toast(e.message); } };
     if (ev.kind === 'select') for (const option of ev.options || []) { const b = document.createElement('button'); b.textContent = option; b.onclick = () => send(option); controls.append(b); }
     else if (ev.kind === 'confirm') { for (const [label, value] of [['否',false],['是',true]]) { const b=document.createElement('button');b.textContent=label;b.onclick=()=>send(value);controls.append(b); } }
     else { const input = ev.kind === 'editor' ? document.createElement('textarea') : document.createElement('input'); input.value = ev.prefill || ''; input.placeholder = ev.placeholder || ''; const b = document.createElement('button'); b.textContent = '提交'; b.onclick = () => send(input.value); controls.append(input,b); }
@@ -568,6 +591,7 @@
     if (message.type !== 'agent_event') return;
     const key = `rpSeq:${message.agentId}`, last = Number(localStorage[key] || 0); if (message.sequence <= last) return; localStorage[key] = message.sequence;
     const ev = message.event || {}, selected = state.selectedKind==='agent'&&state.agent?.agentId === message.agentId;
+    updateKeyboardActivity(message.agentId,ev);
     let eventAgent=state.agents.find(x=>x.agentId===message.agentId);
     if(eventAgent&&Number(message.timestamp)>0)eventAgent.lastActiveAt=new Date(Number(message.timestamp)*1000).toISOString();
     if (ev.type === 'agent_start' || ev.type === 'auto_retry_start') eventAgent=setAgentStatus(message.agentId,'streaming')||eventAgent;
