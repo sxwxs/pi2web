@@ -20,13 +20,16 @@
   const EFFECT_SOLID = 1;
   const EFFECT_BREATH = 4;
   const EFFECT_SHALLOW_BREATH = 6;
+  // Idle stays continuously lit. Active work uses a slow, full-depth breath
+  // so each cycle clearly falls toward dark before returning to full brightness.
+  // Waiting remains a shallow breath to read as a separate third state.
   const ACTIVITY_LIGHTS = {
-    llm: {effect:EFFECT_SHALLOW_BREATH, speed:0.35},
-    tool: {effect:EFFECT_BREATH, speed:0.65},
-    retry: {effect:EFFECT_BREATH, speed:1},
-    waiting: {effect:EFFECT_SHALLOW_BREATH, speed:0.15},
+    llm: {effect:EFFECT_BREATH, speed:0.15},
+    tool: {effect:EFFECT_BREATH, speed:0.2},
+    retry: {effect:EFFECT_BREATH, speed:0.25},
+    waiting: {effect:EFFECT_SHALLOW_BREATH, speed:0.1},
   };
-  const BUSY_LIGHT = {effect:EFFECT_BREATH, speed:0.45};
+  const BUSY_LIGHT = {effect:EFFECT_BREATH, speed:0.15};
 
   const normalizeColor = value => {
     const color = String(value || '').trim().toUpperCase();
