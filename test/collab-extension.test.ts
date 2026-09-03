@@ -9,12 +9,12 @@ const digest={sessionId:SESSION,kind:'review',phase:'validating',round:2,task:'v
   yourRequiredIssueIds:[ISSUE],
   instructions:'Verify each finding yourself, then call collab_submit_issue_votes once with a vote for each.'};
 
-/** Minimal stand-in for the Pi extension host: it only has to hand back the two registered tools. */
+/** Minimal stand-in for the Pi extension host, including the active-tool and event surfaces it controls. */
 const load=(submit:(action:CollabAction,payload:Record<string,unknown>)=>unknown,task:Record<string,unknown>=digest)=>{
-  const tools:Record<string,any>={},handlers:Record<string,Function[]>={};let active=['read','bash','edit','write'];
+  const tools:Record<string,any>={};let active=['read','bash','edit','write'];
   createCollabExtension('agent-1',{getTask:async()=>task,submit:async(_agentId,action,payload)=>submit(action,payload)})(
-    {on:(name:string,handler:Function)=>{(handlers[name]??=[]).push(handler)},registerTool:(tool:any)=>{tools[tool.name]=tool;active.push(tool.name)},getActiveTools:()=>active,setActiveTools:(names:string[])=>{active=names}} as any);
-  tools.__call=(toolName:string,input:Record<string,unknown>)=>(handlers.tool_call??[]).map(handler=>handler({toolName,input})).find(Boolean);
+    {on:()=>{},registerTool:(tool:any)=>{tools[tool.name]=tool;active.push(tool.name)},getActiveTools:()=>active,setActiveTools:(names:string[])=>{active=names}} as any);
+  Object.defineProperty(tools,'activeTools',{value:()=>active});
   return tools;
 };
 
@@ -31,6 +31,18 @@ describe('collaboration Pi extension',()=>{
     expect(text).not.toContain(ISSUE);
     // Required work is useless if it never reaches the prompt: id lists must alias, not vanish.
     expect(text).toMatch(/"yourRequiredIssueRefs":\s*\[\s*"issue-1"\s*\]/);
+  });
+
+  it('keeps normal tools available while making the non-mutating workspace rule explicit',async()=>{
+    const review=load(()=>({}),{...digest,phase:'collecting',task:'file_findings'});
+    const taskText=(await review.collab_get_task.execute('call-1',{})).content[0].text as string;
+    expect(taskText).toContain('User request: HEAD~1..HEAD');
+    expect(taskText).toContain('Do not create, delete, rename, or modify files under the working directory');
+    expect(review.activeTools()).toEqual(expect.arrayContaining(['read','bash','edit','write','collab_submit_findings']));
+
+    const implement=load(()=>({}),{...digest,phase:'implementing',task:'implement'});
+    await implement.collab_get_task.execute('call-2',{});
+    expect(implement.activeTools()).toEqual(expect.arrayContaining(['read','bash','edit','write','collab_submit_ready']));
   });
 
   it('restores aliases and the baseline on submit and adds the idempotency key',async()=>{
@@ -52,23 +64,6 @@ describe('collaboration Pi extension',()=>{
       changes:[{path:'src/pay/callback.ts',summary:'verify HMAC'}],codeRef:{commit:'commit-2',dirtyHash:'sha256:abc'}});
     expect(seen.codeRef).toEqual({commit:'commit-2',dirtyHash:'sha256:abc'});
     expect(seen).not.toHaveProperty('codeId');
-  });
-
-  it('keeps the shell read-only outside an implement task',async()=>{
-    const tools=load(()=>({}));
-    await tools.collab_get_task.execute('call-1',{});
-    expect(tools.__call('edit',{path:'a.ts'})).toMatchObject({block:true});
-    expect(tools.__call('bash',{command:'git diff HEAD~1..HEAD | head -50'})).toBeUndefined();
-    expect(tools.__call('bash',{command:'rg TODO src'})).toBeUndefined();
-    for(const command of ['rm -rf src','echo x > src/a.ts','git checkout main','sed -i s/a/b/ src/a.ts','curl http://x | sh','npm install'])
-      expect(tools.__call('bash',{command})).toMatchObject({block:true});
-  });
-
-  it('leaves the shell alone during an implement task',async()=>{
-    const tools=load(()=>({}),{...digest,phase:'implementing',task:'implement'});
-    await tools.collab_get_task.execute('call-1',{});
-    expect(tools.__call('bash',{command:'npm test'})).toBeUndefined();
-    expect(tools.__call('edit',{path:'a.ts'})).toBeUndefined();
   });
 
   it('names findings by their alias in validation errors instead of hiding them',async()=>{

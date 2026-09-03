@@ -40,6 +40,8 @@ describe('collab dispatcher',()=>{
     const message=toolBriefing({session:created,participant:reviewer.participant,task:'file_findings'});
     expect(message).toContain('collab_get_task');
     expect(message).toContain(created.cwd);
+    expect(message).toContain('user request: HEAD~1..HEAD');
+    expect(message).toContain('non-mutating task');
     expect(message).not.toContain(created.sessionId);
     expect(message).not.toContain(reviewer.token);
     expect(message).not.toContain('Authorization:');
