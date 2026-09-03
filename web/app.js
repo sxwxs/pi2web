@@ -390,7 +390,7 @@
     const card=existing||addCard(`🔧 ${ev.toolName||'Tool'}`,args,'tool',false,timestamp);
     if(!existing){card.toolName=ev.toolName||'Tool';card.args=args;state.toolCards.set(key,card);}
     if (ev.type==='tool_execution_update') {
-      const partial=textContent(ev.partialResult)||(ev.partialResult?JSON.stringify(ev.partialResult):'');
+      const partial=textContent(ev.partialResult?.content??ev.partialResult)||(ev.partialResult?JSON.stringify(ev.partialResult):'');
       if(partial)renderCardBody(card.body,`${card.args}\n\n— 输出 —\n${partial}`);
       card.summaryTime.textContent=eventTime(timestamp);
       if(card.group)updateActivityGroup(card.group,`🔧 ${card.toolName}`,timestamp);
