@@ -24,9 +24,9 @@
   // so each cycle clearly falls toward dark before returning to full brightness.
   // Waiting remains a shallow breath to read as a separate third state.
   const ACTIVITY_LIGHTS = {
-    llm: {effect:EFFECT_BREATH, speed:0.15},
-    tool: {effect:EFFECT_BREATH, speed:0.2},
-    retry: {effect:EFFECT_BREATH, speed:0.25},
+    llm: {effect:EFFECT_BREATH, speed:0.12},
+    tool: {effect:EFFECT_BREATH, speed:0.45},
+    retry: {effect:EFFECT_BREATH, speed:0.8},
     waiting: {effect:EFFECT_SHALLOW_BREATH, speed:0.1},
   };
   const BUSY_LIGHT = {effect:EFFECT_BREATH, speed:0.15};
