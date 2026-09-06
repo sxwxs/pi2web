@@ -31,6 +31,16 @@
   };
   const BUSY_LIGHT = {effect:EFFECT_BREATH, speed:0.15};
 
+  // Keep activity in one place; the light phase is derived, never stored twice.
+  const newActivity = () => ({turn:'idle', tools:new Set(), bash:new Set(), dialogs:new Set()});
+  const resetTurn = (activity, turn = 'idle') => { activity.turn = turn; activity.tools.clear(); };
+  const activityPhase = activity => {
+    if (!activity) return 'idle';
+    if (activity.dialogs.size) return 'waiting';
+    if (activity.tools.size || activity.bash.size) return 'tool';
+    return activity.turn;
+  };
+
   const normalizeColor = value => {
     const color = String(value || '').trim().toUpperCase();
     return /^#[0-9A-F]{6}$/.test(color) ? color : null;
@@ -107,9 +117,9 @@
     bind(agentId, slot, color = this.nextColor()) {
       slot = Number(slot); color = normalizeColor(color);
       if (!agentId || !Number.isInteger(slot) || slot < 0 || slot > 5 || !color) throw Error('无效的键盘绑定');
-      for (const [boundSlot, binding] of this.bindings) if (binding.agentId === agentId) this.bindings.delete(boundSlot);
       const occupied = this.bindings.get(slot);
       if (occupied && occupied.agentId !== agentId) throw Error(`按键 ${slot + 1} 已被其他 Session 使用`);
+      for (const [boundSlot, binding] of this.bindings) if (binding.agentId === agentId) this.bindings.delete(boundSlot);
       this.bindings.set(slot, {agentId, color});
       this.saveBindings();
       return this.getSlot(slot);
@@ -141,21 +151,89 @@
 
     setAgents(agents) {
       this.agents = new Map((agents || []).map(agent => [agent.agentId, agent]));
-      for (const agentId of this.activities.keys()) if (!this.agents.has(agentId)) this.activities.delete(agentId);
+      for (const agentId of this.activities.keys()) this.reconcileActivity(agentId);
       this.syncLights().catch(error => this.fail(error));
     }
 
     updateAgent(agent) {
-      if (agent?.agentId) this.agents.set(agent.agentId, agent);
+      if (!agent?.agentId) return;
+      this.agents.set(agent.agentId, agent);
+      this.reconcileActivity(agent.agentId);
       this.syncLights().catch(error => this.fail(error));
     }
 
-    setActivity(agentId, activity = 'idle') {
-      if (!['idle', 'llm', 'tool', 'retry', 'waiting'].includes(activity)) throw Error(`无效的键盘活动状态：${activity}`);
-      const previous = this.activities.get(agentId) || 'idle';
-      if (previous === activity) return;
-      if (activity === 'idle') this.activities.delete(agentId); else this.activities.set(agentId, activity);
-      this.syncLights().catch(error => this.fail(error));
+    setAgentSnapshot(agent) {
+      // A replay gap invalidates all event-derived details. Until fresh events
+      // arrive, use the snapshot status rather than guessing the current phase.
+      this.activities.delete(agent.agentId);
+      this.updateAgent(agent);
+    }
+
+    reconcileActivity(agentId) {
+      const activity = this.activities.get(agentId), status = this.agents.get(agentId)?.status;
+      if (!activity) return;
+      if (!status || ['unloaded', 'stopped', 'error'].includes(status)) {
+        this.activities.delete(agentId);
+        return;
+      }
+      // Status describes the LLM run, not independent !bash commands or dialogs.
+      if (!BUSY_STATUSES.has(status)) resetTurn(activity);
+      if (activityPhase(activity) === 'idle') this.activities.delete(agentId);
+    }
+
+    handleAgentEvent(agentId, event) {
+      const activity = this.activities.get(agentId) || newActivity();
+      const previous = activityPhase(activity);
+      switch (event.type) {
+        case 'agent_start':
+          resetTurn(activity, 'llm');
+          break;
+        case 'message_start':
+          if ((event.message?.role || event.role) !== 'assistant') return;
+          activity.turn = 'llm';
+          break;
+        case 'message_update':
+          activity.turn = 'llm';
+          break;
+        case 'tool_execution_start':
+        case 'tool_execution_update':
+          activity.turn = 'llm';
+          activity.tools.add(event.toolCallId || event.toolName || 'default');
+          break;
+        case 'tool_execution_end':
+          activity.tools.delete(event.toolCallId || event.toolName || 'default');
+          break;
+        case 'bash_execution_start':
+        case 'bash_execution_update':
+          activity.bash.add(event.id || 'default');
+          break;
+        case 'bash_execution_end':
+          activity.bash.delete(event.id || 'default');
+          break;
+        case 'auto_retry_start':
+          resetTurn(activity, 'retry');
+          break;
+        case 'auto_retry_end':
+          activity.turn = event.success === false ? 'idle' : 'llm';
+          break;
+        case 'extension_ui_request':
+          activity.dialogs.add(event.requestId);
+          break;
+        case 'extension_ui_response':
+          activity.dialogs.delete(event.requestId);
+          break;
+        case 'agent_end':
+          resetTurn(activity, event.willRetry ? 'retry' : 'idle');
+          break;
+        case 'agent_settled':
+          resetTurn(activity);
+          break;
+        default:
+          return;
+      }
+      const phase = activityPhase(activity);
+      if (phase === 'idle') this.activities.delete(agentId); else this.activities.set(agentId, activity);
+      if (phase !== previous) this.syncLights().catch(error => this.fail(error));
     }
 
     isBusy(agentId) { return BUSY_STATUSES.has(this.agents.get(agentId)?.status); }
@@ -267,8 +345,10 @@
     lightState(slot) {
       const binding = this.bindings.get(slot), active = Boolean(binding && this.agents.has(binding.agentId));
       if (!active) return {color:binding?.color || '#000000', effect:EFFECT_OFF, speed:0};
-      const activity = this.activities.get(binding.agentId);
-      const animation = ACTIVITY_LIGHTS[activity] || (this.isBusy(binding.agentId) ? BUSY_LIGHT : null);
+      const phase = activityPhase(this.activities.get(binding.agentId));
+      let animation = ACTIVITY_LIGHTS[phase];
+      if (!animation && this.agents.get(binding.agentId)?.status === 'waiting_for_user') animation = ACTIVITY_LIGHTS.waiting;
+      if (!animation && this.isBusy(binding.agentId)) animation = BUSY_LIGHT;
       return {color:binding.color, effect:animation?.effect || EFFECT_SOLID, speed:animation?.speed || 0};
     }
 

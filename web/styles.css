@@ -58,4 +58,6 @@
 .keyboard-slot b,.keyboard-slot small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .keyboard-slot b{padding-left:9px;border-left:4px solid var(--key-color,#586174)}
 .keyboard-slot small{margin-top:3px;color:var(--muted)}
+.keyboard-slot-actions{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.keyboard-slot-actions button{padding:4px 6px;font-size:12px}
 @media(max-width:700px){.keyboard-slots{grid-template-columns:repeat(2,minmax(0,1fr))}}
