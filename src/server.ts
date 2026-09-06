@@ -113,9 +113,42 @@ export class RemotePiServer {
      subscriptions.set('*',this.agents.subscribeAll(forward));send({type:'subscribed_all',protocolVersion:1});return;
     }
     if(m.type==='subscribe'){
-     subscriptions.get(m.agentId)?.();const forward=(e:any)=>send({type:'agent_event',agentId:m.agentId,eventId:e.id,sequence:e.sequence,timestamp:e.timestamp,event:e.event});
-     subscriptions.set(m.agentId,this.agents.subscribe(m.agentId,forward));send({type:'subscribed',agentId:m.agentId,protocolVersion:1,currentSequence:this.agents.currentSequence(m.agentId)});if(m.fromNow===true)return;
-     const last=Number(m.lastSequence??0),replay=this.agents.events(m.agentId,last);if(this.agents.hasReplayGap(m.agentId,last)||replay.length>250){const messageLimit=m.messageLimit===undefined?undefined:Number(m.messageLimit);send({type:'agent_snapshot',agentId:m.agentId,...await this.agents.snapshot(m.agentId,Number.isFinite(messageLimit)?messageLimit:undefined)})}else for(const e of replay)forward(e);return;
+     const agentId=m.agentId,fromNow=m.fromNow===true;
+     subscriptions.get(agentId)?.();
+     const forward=(e:any)=>send({type:'agent_event',agentId,eventId:e.id,sequence:e.sequence,timestamp:e.timestamp,event:e.event});
+     let ready=false,active=true;
+     const unsubscribe=this.agents.subscribe(agentId,e=>{if(ready)forward(e)});
+     const stop=()=>{active=false;ready=false;unsubscribe()};
+     subscriptions.set(agentId,stop);
+     try{
+      send({type:'subscribed',agentId,protocolVersion:1,currentSequence:this.agents.currentSequence(agentId)});
+      if(!fromNow){
+       const last=Number(m.lastSequence??0),replay=this.agents.events(agentId,last);
+       if(this.agents.hasReplayGap(agentId,last)||replay.length>250){
+        const messageLimit=m.messageLimit===undefined?undefined:Number(m.messageLimit);
+        const snapshot=await this.agents.snapshot(agentId,Number.isFinite(messageLimit)?messageLimit:undefined);
+        if(!active)return; // Closed or replaced by a newer subscription while awaiting messages.
+        // Do not forward live events ahead of the snapshot. Catch up from the
+        // existing bounded replay cache instead of maintaining another buffer.
+        const updates=this.agents.events(agentId,snapshot.lastSequence);
+        if(this.agents.hasReplayGap(agentId,snapshot.lastSequence)||(updates.length&&updates[0].sequence!==snapshot.lastSequence+1)){
+         stop();ws.close(1013,'Replay gap during snapshot');return;
+        }
+        send({type:'agent_snapshot',agentId,...snapshot});
+        for(const event of updates)forward(event);
+       }else for(const event of replay)forward(event);
+      }
+      // Refresh/reconnect may already have a saved cursor but no in-memory
+      // activity. Send the current IDs after replay, even if replay was empty.
+      send({type:'agent_state',agentId,sequence:this.agents.currentSequence(agentId),state:this.agents.snapshotState(agentId)});
+      ready=true;
+     }catch(error){
+      if(!active)return;
+      stop();
+      if(subscriptions.get(agentId)===stop)subscriptions.delete(agentId);
+      throw error;
+     }
+     return;
     }
     if(['prompt','steer','follow-up','abort'].includes(m.type)){if(m.type!=='abort'){this.voice?.recordUserPrompt(m.agentId,String(m.message??''));this.sessionNamer?.recordUserPrompt(m.agentId,String(m.message??''))}await this.agents.command(m.agentId,m.type,m.message);send({type:'command_result',requestId:m.requestId,success:true});return}
     throw new Error('Unknown command');

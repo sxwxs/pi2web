@@ -162,13 +162,19 @@
     updateAgent(agent) {
       if (!agent?.agentId) return;
       this.agents.set(agent.agentId, agent);
+      if (agent.activity) {
+        const activity = this.activities.get(agent.agentId) || newActivity();
+        activity.bash = new Set(agent.activity.bashIds || []);
+        activity.dialogs = new Set(agent.activity.dialogIds || []);
+        this.activities.set(agent.agentId, activity);
+      }
       this.reconcileActivity(agent.agentId);
       this.syncLights().catch(error => this.fail(error));
     }
 
     setAgentSnapshot(agent) {
-      // A replay gap invalidates all event-derived details. Until fresh events
-      // arrive, use the snapshot status rather than guessing the current phase.
+      // A gap invalidates old details; restore independent work from the server.
+      // Older servers omit activity and fall back to ordinary Agent status.
       this.activities.delete(agent.agentId);
       this.updateAgent(agent);
     }
@@ -275,6 +281,7 @@
     }
 
     async restoreAuthorized() {
+      if (!window.isSecureContext || !navigator.hid) return false;
       try { return await this.connect({request:false}); }
       catch (error) { this.fail(error); return false; }
     }

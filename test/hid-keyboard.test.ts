@@ -118,6 +118,52 @@ describe('session keyboard activity', () => {
     expect(light(keyboard)).toMatchObject({effect, speed});
   });
 
+  it('rebuilds parallel operations from snapshot IDs instead of preserving old guesses', () => {
+    const keyboard = boundKeyboard();
+    event(keyboard, 'tool_execution_start', {toolCallId:'old-tool'});
+    event(keyboard, 'bash_execution_start', {id:'old-bash'});
+    event(keyboard, 'extension_ui_request', {requestId:'old-dialog'});
+    keyboard.setAgentSnapshot({...agent(), activity:{bashIds:['bash-1','bash-2'], dialogIds:['dialog-1','dialog-2']}});
+    expect(light(keyboard).effect).toBe(6);
+    event(keyboard, 'bash_execution_end', {id:'old-bash'});
+    event(keyboard, 'extension_ui_response', {requestId:'old-dialog'});
+    event(keyboard, 'extension_ui_response', {requestId:'dialog-1'});
+    expect(light(keyboard).effect).toBe(6);
+    event(keyboard, 'extension_ui_response', {requestId:'dialog-2'});
+    expect(light(keyboard).speed).toBe(0.45);
+    keyboard.setAgents([agent()]); // An idle LLM does not end standalone work.
+    event(keyboard, 'bash_execution_end', {id:'bash-1'});
+    expect(light(keyboard).speed).toBe(0.45);
+    event(keyboard, 'bash_execution_end', {id:'bash-2'});
+    expect(light(keyboard).effect).toBe(1);
+    expect(keyboard.activities.size).toBe(0);
+  });
+
+  it.each([
+    {activity:{bashIds:['bash'], dialogIds:[]}, effect:4},
+    {activity:{bashIds:[], dialogIds:['dialog']}, effect:6},
+  ])('restores activity without its start event and clears it on a later empty snapshot: $effect', ({activity, effect}) => {
+    const keyboard = boundKeyboard();
+    keyboard.setAgentSnapshot({...agent(), activity});
+    expect(light(keyboard).effect).toBe(effect);
+    keyboard.setAgentSnapshot({...agent(), activity:{bashIds:[], dialogIds:[]}});
+    expect(light(keyboard).effect).toBe(1);
+  });
+
+  it('applies the final activity baseline without discarding replayed tool/LLM details', () => {
+    const keyboard = boundKeyboard();
+    event(keyboard, 'agent_start');
+    event(keyboard, 'tool_execution_start', {toolCallId:'tool'});
+    event(keyboard, 'extension_ui_request', {requestId:'stale-dialog'});
+    keyboard.updateAgent({...agent('streaming'), activity:{bashIds:['bash'], dialogIds:[]}});
+    event(keyboard, 'bash_execution_end', {id:'bash'});
+    expect(light(keyboard).speed).toBe(0.45);
+    event(keyboard, 'tool_execution_end', {toolCallId:'tool'});
+    expect(light(keyboard).speed).toBe(0.12);
+    keyboard.updateAgent({...agent(), activity:{bashIds:[], dialogIds:[]}});
+    expect(light(keyboard).effect).toBe(1);
+  });
+
   it('does not start LLM activity when an idle extension dialog is answered', () => {
     const keyboard = boundKeyboard();
     event(keyboard, 'extension_ui_request', {requestId:'question'});

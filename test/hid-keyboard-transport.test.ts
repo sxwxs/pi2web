@@ -57,15 +57,16 @@ function setup(authorized = true) {
     requestDevice:vi.fn(async () => [device]),
   };
   const window = {isSecureContext:true} as any;
+  const navigator:{hid:typeof hid|undefined} = {hid};
   runInNewContext(source, {
-    window, navigator:{hid}, TextEncoder, TextDecoder, setTimeout, clearTimeout,
+    window, navigator, TextEncoder, TextDecoder, setTimeout, clearTimeout,
     localStorage:{getItem:() => null, setItem:() => {}},
   }, {filename:'web/hid-keyboard.js'});
   const onStateChange = vi.fn(), onError = vi.fn();
   const keyboard = new window.SessionKeyboardController({onStateChange, onError});
   keyboard.bind(agent.agentId, 0, '#FF3040');
   keyboard.setAgents([agent]);
-  return {keyboard, device, hid, onStateChange, onError};
+  return {keyboard, device, hid, window, navigator, onStateChange, onError};
 }
 
 async function connectKeyboard(keyboard:any) {
@@ -114,6 +115,27 @@ describe('WebHID connection lifecycle', () => {
     expect(await keyboard.connect()).toBe(false);
     expect(device.open).not.toHaveBeenCalled();
     expect(onStateChange).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing WebHID', 'insecure context'])('silently skips automatic restore in an unsupported environment: %s', async reason => {
+    const {keyboard, hid, window, navigator, onError, onStateChange} = setup();
+    if (reason === 'missing WebHID') navigator.hid = undefined;
+    else window.isSecureContext = false;
+    expect(await keyboard.restoreAuthorized()).toBe(false);
+    expect(hid.getDevices).not.toHaveBeenCalled();
+    expect(hid.requestDevice).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(onStateChange).not.toHaveBeenCalled();
+    // Explicit connection attempts must still explain why they cannot work.
+    await expect(keyboard.connect()).rejects.toThrow('WebHID');
+  });
+
+  it('still reports genuine device failures during authorized restore', async () => {
+    const {keyboard, device, onError} = setup();
+    device.open.mockRejectedValueOnce(Error('device unavailable'));
+    expect(await keyboard.restoreAuthorized()).toBe(false);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0][0].message).toContain('device unavailable');
   });
 
   it('closes an incompatible device returned by the picker', async () => {

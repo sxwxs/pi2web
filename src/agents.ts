@@ -5,6 +5,8 @@ import type { WorkspaceStore } from './workspaces.js';
 import { createSdkBackend } from './sdk-backend.js';
 export type AgentState={status:'unloaded'|'starting'|'idle'|'streaming'|'waiting_for_user'|'error'|'stopping'|'stopped',agentId:string,sessionId:string,sessionFile?:string,sessionName?:string,cwd:string};
 export type AgentEvent={type:string,[key:string]:unknown};
+export type AgentActivity={bashIds:string[],dialogIds:string[]};
+export type AgentSnapshotState=AgentState&{activity:AgentActivity};
 export type SlashCommandSummary={name:string,description?:string,argumentHint?:string,source:'prompt'|'skill'};
 export type BashRunResult={id:string,output:string,exitCode:number|undefined,cancelled:boolean,truncated:boolean};
 export interface AgentBackend {prompt(message:string):Promise<void>;steer(message:string):Promise<void>;followUp(message:string):Promise<void>;abort():Promise<void>;getState():Promise<AgentState>;getMessages():Promise<unknown[]>;getCapabilities():Promise<Record<string,unknown>>;getSession():Promise<Record<string,unknown>>;getSessionInfo():Promise<Record<string,unknown>>;compact(instructions?:string):Promise<unknown>;setModel(provider:string,modelId:string):Promise<void>;setThinkingLevel(level:string):Promise<void>;setSessionName(name:string):Promise<void>;navigate(entryId:string):Promise<unknown>;fork(entryId:string):Promise<{sessionFile?:string,selectedText?:string}>;extensionResponse(requestId:string,value:unknown):Promise<void>;listCommands():Promise<SlashCommandSummary[]>;runBash(command:string,excludeFromContext?:boolean):Promise<BashRunResult>;abortBash():void;subscribe(listener:(e:AgentEvent)=>void):()=>void;dispose():Promise<void>}
@@ -30,7 +32,7 @@ export class MockBackend implements AgentBackend {
 export type AgentProfile='default'|'collab';
 export type AgentRecord=AgentState&{workspaceId:string,profile:AgentProfile,createdAt:string,lastActiveAt:string};
 type StoredEvent={id:string,sequence:number,timestamp:number,event:AgentEvent};
-type AgentEntry={record:AgentRecord,backend?:AgentBackend,loading?:Promise<AgentBackend>,events:StoredEvent[],nextSequence:number};
+type AgentEntry={record:AgentRecord,backend?:AgentBackend,loading?:Promise<AgentBackend>,events:StoredEvent[],nextSequence:number,bashIds:Set<string>,dialogIds:Set<string>};
 export class AgentManager {
  private agents=new Map<string,AgentEntry>(); private listeners=new Map<string,Set<(e:StoredEvent)=>void>>(); private globalListeners=new Set<(agentId:string,e:StoredEvent)=>void>();
  constructor(private workspaces:WorkspaceStore,private factory:(id:string,cwd:string,sessionFile?:string,profile?:AgentProfile)=>AgentBackend|Promise<AgentBackend>=createSdkBackend){}
@@ -38,9 +40,34 @@ export class AgentManager {
  async create(workspaceId:string,relativeCwd='.',sessionFile?:string,profile:AgentProfile='default') {const cwd=await this.resolveCwd(workspaceId,relativeCwd);const id=`agent-${randomUUID()}`,backend=await this.factory(id,cwd,sessionFile,profile),now=new Date().toISOString();const record={...(await backend.getState()),workspaceId,profile,createdAt:now,lastActiveAt:now};this.attach(id,record,backend);return {...record}}
  /** Build a disposable session so the UI sees the models actually available for this project and its extensions. */
  async capabilityPreview(workspaceId:string,relativeCwd='.') {const cwd=await this.resolveCwd(workspaceId,relativeCwd),backend=await this.factory(`preview-${randomUUID()}`,cwd);try{return await backend.getCapabilities()}finally{await backend.dispose()}}
- private connect(entry:AgentEntry,backend:AgentBackend){entry.backend=backend;backend.subscribe(event=>{const record=entry.record;record.status=event.type==='agent_start'||event.type==='auto_retry_start'||(event.type==='agent_end'&&event.willRetry===true)?'streaming':event.type==='agent_end'||event.type==='agent_settled'?'idle':record.status;if(event.type==='session_info_changed')record.sessionName=typeof event.name==='string'&&event.name.trim()?event.name.trim():undefined;record.lastActiveAt=new Date().toISOString();const item={id:randomUUID(),sequence:entry.nextSequence++,timestamp:Math.floor(Date.now()/1000),event};entry.events.push(item);if(entry.events.length>1000)entry.events.shift();for(const listener of this.listeners.get(record.agentId)??[])listener(item);for(const listener of this.globalListeners)listener(record.agentId,item)})}
- private attach(id:string,record:AgentRecord,backend:AgentBackend){const entry:AgentEntry={record,backend,events:[],nextSequence:1};this.connect(entry,backend);this.agents.set(id,entry)}
- async restore(records:AgentRecord[]){for(const saved of records){try{const ws=this.workspaces.get(saved.workspaceId);if(!ws)continue;const cwd=await this.workspaces.resolve(ws,pathRelative(ws.rootPath,saved.cwd));const sessionModified=saved.sessionFile?await import('node:fs/promises').then(fs=>fs.stat(saved.sessionFile!).then(value=>value.mtime.toISOString()).catch(()=>undefined)):undefined;const record={...saved,profile:saved.profile??'default',cwd,status:'unloaded' as const,lastActiveAt:sessionModified&&sessionModified>saved.lastActiveAt?sessionModified:saved.lastActiveAt};this.agents.set(saved.agentId,{record,events:[],nextSequence:1})}catch{/* Keep server startup resilient to deleted workspaces. */}}}
+ private connect(entry:AgentEntry,backend:AgentBackend){
+  entry.backend=backend;
+  backend.subscribe(event=>{
+   if(entry.backend!==backend)return;
+   const record=entry.record,type=event.type;
+   if(type==='agent_start'||type==='auto_retry_start')record.status='streaming';
+   else if(type==='agent_end')record.status=event.willRetry===true?'streaming':'idle';
+   else if(type==='agent_settled')record.status='idle';
+   // Standalone shell runs and dialogs outlive LLM turns. Track their IDs with
+   // the event cursor, not in the persisted AgentRecord or a second SDK cache.
+   if(typeof event.id==='string'){
+    if(type==='bash_execution_start'||type==='bash_execution_update')entry.bashIds.add(event.id);
+    else if(type==='bash_execution_end')entry.bashIds.delete(event.id);
+   }
+   if(typeof event.requestId==='string'){
+    if(type==='extension_ui_request')entry.dialogIds.add(event.requestId);
+    else if(type==='extension_ui_response')entry.dialogIds.delete(event.requestId);
+   }
+   if(type==='session_info_changed')record.sessionName=typeof event.name==='string'&&event.name.trim()?event.name.trim():undefined;
+   record.lastActiveAt=new Date().toISOString();
+   const item={id:randomUUID(),sequence:entry.nextSequence++,timestamp:Math.floor(Date.now()/1000),event};
+   entry.events.push(item);if(entry.events.length>1000)entry.events.shift();
+   for(const listener of this.listeners.get(record.agentId)??[])listener(item);
+   for(const listener of this.globalListeners)listener(record.agentId,item);
+  });
+ }
+ private attach(id:string,record:AgentRecord,backend:AgentBackend){const entry:AgentEntry={record,backend,events:[],nextSequence:1,bashIds:new Set(),dialogIds:new Set()};this.connect(entry,backend);this.agents.set(id,entry)}
+ async restore(records:AgentRecord[]){for(const saved of records){try{const ws=this.workspaces.get(saved.workspaceId);if(!ws)continue;const cwd=await this.workspaces.resolve(ws,pathRelative(ws.rootPath,saved.cwd));const sessionModified=saved.sessionFile?await import('node:fs/promises').then(fs=>fs.stat(saved.sessionFile!).then(value=>value.mtime.toISOString()).catch(()=>undefined)):undefined;const record={...saved,profile:saved.profile??'default',cwd,status:'unloaded' as const,lastActiveAt:sessionModified&&sessionModified>saved.lastActiveAt?sessionModified:saved.lastActiveAt};this.agents.set(saved.agentId,{record,events:[],nextSequence:1,bashIds:new Set(),dialogIds:new Set()})}catch{/* Keep server startup resilient to deleted workspaces. */}}}
  get(id:string){const x=this.agents.get(id);if(!x)throw Object.assign(new Error('Agent not found'),{code:'AGENT_NOT_FOUND'});return x}
  list(){return [...this.agents.values()].map(x=>({...x.record}))}
  isLoaded(id:string){return !!this.get(id).backend}
@@ -48,12 +75,28 @@ export class AgentManager {
  async command(id:string,kind:'prompt'|'steer'|'follow-up'|'abort',message=''){const entry=this.get(id);if(kind==='abort'&&!entry.backend)return;if(entry.record.status==='stopped')throw Object.assign(new Error('Agent is not running'),{code:'AGENT_NOT_RUNNING'});const backend=await this.ensureLoaded(id);if(kind==='abort')return backend.abort();return backend[kind==='follow-up'?'followUp':kind](message)}
  events(id:string,last=0){return this.get(id).events.filter(e=>e.sequence>last)}
  currentSequence(id:string){return this.get(id).nextSequence-1}
- async snapshot(id:string,messageLimit?:number){const a=this.get(id),messages=a.backend?await a.backend.getMessages():[];if(messageLimit===undefined)return {state:a.backend?await a.backend.getState():{...a.record},messages,lastSequence:a.nextSequence-1};const page=this.paginateMessages(messages,messageLimit);return {state:a.backend?await a.backend.getState():{...a.record},messages:page.items,messagePage:page,lastSequence:a.nextSequence-1}}
+ snapshotState(id:string):AgentSnapshotState{
+  const a=this.get(id);
+  return {...a.record,activity:{bashIds:[...a.bashIds],dialogIds:[...a.dialogIds]}};
+ }
+ async snapshot(id:string,messageLimit?:number){
+  // Capture state and its cursor before yielding. Events emitted while messages
+  // are being read must be delivered after, not swallowed by, this snapshot.
+  const a=this.get(id),state=this.snapshotState(id),lastSequence=a.nextSequence-1;
+  const messages=a.backend?await a.backend.getMessages():[];
+  if(messageLimit===undefined)return {state,messages,lastSequence};
+  const page=this.paginateMessages(messages,messageLimit);
+  return {state,messages:page.items,messagePage:page,lastSequence};
+ }
  hasReplayGap(id:string,last:number){const a=this.get(id);const current=a.nextSequence-1;return last>current||(last>0&&a.events.length>0&&last<a.events[0].sequence-1)}
  subscribe(id:string,listener:(e:StoredEvent)=>void){this.get(id);if(!this.listeners.has(id))this.listeners.set(id,new Set());this.listeners.get(id)!.add(listener);return()=>this.listeners.get(id)?.delete(listener)}
  subscribeAll(listener:(agentId:string,e:StoredEvent)=>void){this.globalListeners.add(listener);return()=>this.globalListeners.delete(listener)}
- async dispose(id:string){const a=this.get(id);if(a.loading)await a.loading.catch(()=>{});await a.backend?.dispose();a.backend=undefined;a.record.status='unloaded'}
- async remove(id:string){const a=this.get(id);if(a.loading)await a.loading.catch(()=>{});await a.backend?.dispose();this.agents.delete(id);this.listeners.delete(id)}
+ async dispose(id:string){
+  const a=this.get(id);if(a.loading)await a.loading.catch(()=>{});
+  await a.backend?.dispose();a.backend=undefined;a.record.status='unloaded';
+  a.bashIds.clear();a.dialogIds.clear();
+ }
+ async remove(id:string){await this.dispose(id);this.agents.delete(id);this.listeners.delete(id)}
  async archive(id:string){const current=this.get(id).record;if(['starting','streaming','waiting_for_user','stopping'].includes(current.status))throw Object.assign(new Error('Active Agent cannot be archived'),{code:'AGENT_ACTIVE'});const record={...current,status:'unloaded' as const};await this.remove(id);return record}
  async state(id:string){const state=await (await this.ensureLoaded(id)).getState();return {...state,sessionName:state.sessionName?.trim()||this.get(id).record.sessionName}} async messages(id:string){return (await this.ensureLoaded(id)).getMessages()}
  async messagePage(id:string,limit=25,before?:number){return this.paginateMessages(await (await this.ensureLoaded(id)).getMessages(),limit,before)}
