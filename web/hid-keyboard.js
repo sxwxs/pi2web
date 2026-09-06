@@ -1,6 +1,10 @@
 (() => {
   'use strict';
 
+  // Wire contract: Nozzala v1-codex-full 1.0.0, build 51AE6B3BF94B49FF.
+  // Reference: CodexFull WebHID Console v0.1.0 (2026-08-31), DEVELOPMENT.md.
+  // Host requests use {id,m,p} without a newline; replies/notifications end in LF.
+  // RPCs are serialized, use IDs 0..998, and wait 50ms after each reply.
   const REPORT_ID = 6;
   const CHANNEL_JSON = 2;
   const REPORT_BYTES = 63;
@@ -249,15 +253,24 @@
       if (!devices.length && request) devices = await navigator.hid.requestDevice({filters:[{vendorId:VENDOR_ID, productId:PRODUCT_ID, usagePage:USAGE_PAGE, usage:USAGE}]});
       if (!devices.length) return false;
       const device = devices[0];
-      if (!device.opened) await device.open();
-      if (!this.collection(device)) { await device.close(); throw Error('键盘缺少兼容的 Vendor HID 接口'); }
-      if (this.device && this.device !== device) await this.disconnect();
-      if (this.device === device) this.device.removeEventListener('inputreport', this.handleInputReport);
-      this.device = device;
-      this.device.addEventListener('inputreport', this.handleInputReport);
-      this.assembler.reset(); this.sentLights.clear();
+      try {
+        if (!device.opened) await device.open();
+        if (!this.collection(device)) throw Error('键盘缺少兼容的 Vendor HID 接口');
+        if (this.device && this.device !== device) await this.disconnect();
+        if (this.device === device) device.removeEventListener('inputreport', this.handleInputReport);
+        this.device = device;
+        device.addEventListener('inputreport', this.handleInputReport);
+        this.assembler.reset(); this.sentLights.clear();
+        await this.syncLights(true);
+        if (this.device !== device || !device.opened) throw Error('键盘已断开');
+      } catch (error) {
+        // disconnect() clears local state even if close() fails. Keep the
+        // initialization error as the reason reported to the caller.
+        if (this.device === device) await this.disconnect().catch(() => undefined);
+        else if (device.opened) await device.close().catch(() => undefined);
+        throw error;
+      }
       this.onStateChange?.({connected:true, name:device.productName || 'Codex Micro'});
-      await this.syncLights(true);
       return true;
     }
 
@@ -268,13 +281,13 @@
 
     async disconnect() {
       const device = this.device; this.device = null;
-      if (device) {
-        device.removeEventListener('inputreport', this.handleInputReport);
-        if (device.opened) await device.close();
-      }
+      device?.removeEventListener('inputreport', this.handleInputReport);
+      // Detach and notify before awaiting the OS: close() can fail or stall.
       for (const waiter of this.pending.values()) { clearTimeout(waiter.timer); waiter.reject(Error('键盘已断开')); }
       this.pending.clear(); this.assembler.reset(); this.sentLights.clear();
+      this.syncRequested = false; this.forceSync = false;
       this.onStateChange?.({connected:false, name:''});
+      if (device?.opened) await device.close();
     }
 
     handleDisconnect(event) { if (event.device === this.device) this.disconnect().catch(error => this.fail(error)); }
@@ -314,14 +327,21 @@
     }
 
     transmit(request) {
+      const device = this.device;
       const job = this.queue.then(async () => {
-        if (!this.connected) throw Error('键盘未连接');
+        if (this.device !== device || !device?.opened) throw Error('键盘未连接');
         const response = new Promise((resolve, reject) => {
           const timer = setTimeout(() => { this.pending.delete(String(request.id)); reject(Error('键盘响应超时')); }, 5000);
           this.pending.set(String(request.id), {resolve, reject, timer});
         });
+        // A timeout/disconnect can reject the reply while sendReport is still
+        // pending. Observe it now; the await below still propagates the error.
+        response.catch(() => undefined);
         try {
-          for (const report of this.reports(JSON.stringify(request))) await this.device.sendReport(REPORT_ID, report);
+          for (const report of this.reports(JSON.stringify(request))) {
+            if (this.device !== device || !device.opened) throw Error('键盘已断开');
+            await device.sendReport(REPORT_ID, report);
+          }
           const result = await response;
           if (result?.error) throw Error(result.error.message || '键盘拒绝了灯光设置');
           await new Promise(resolve => setTimeout(resolve, 50));
@@ -357,19 +377,26 @@
       this.syncRequested = true;
       this.forceSync ||= force;
       if (this.syncPromise) return this.syncPromise;
-      this.syncPromise = (async () => {
-        do {
-          this.syncRequested = false;
-          const forcePass = this.forceSync; this.forceSync = false;
-          for (let slot = 0; slot < 6; slot++) {
-            const {color, effect, speed} = this.lightState(slot), signature = `${color}:${effect}:${speed}`;
-            if (!forcePass && this.sentLights.get(slot) === signature) continue;
-            await this.transmit(this.lightRequest(slot, color, effect, speed));
-            this.sentLights.set(slot, signature);
-          }
-        } while (this.syncRequested && this.connected);
-      })();
-      try { await this.syncPromise; } finally { this.syncPromise = null; }
+      const device = this.device;
+      // Defer the first pass so synchronous updates use the latest state. Clear
+      // the worker inside its own finally, even when every light is a cache hit.
+      this.syncPromise = Promise.resolve().then(async () => {
+        try {
+          if (this.device !== device || !device.opened) throw Error('键盘已断开');
+          do {
+            this.syncRequested = false;
+            const forcePass = this.forceSync; this.forceSync = false;
+            for (let slot = 0; slot < 6; slot++) {
+              const {color, effect, speed} = this.lightState(slot), signature = `${color}:${effect}:${speed}`;
+              if (!forcePass && this.sentLights.get(slot) === signature) continue;
+              await this.transmit(this.lightRequest(slot, color, effect, speed));
+              if (this.device !== device || !device.opened) throw Error('键盘已断开');
+              this.sentLights.set(slot, signature);
+            }
+          } while (this.syncRequested && this.connected);
+        } finally { this.syncPromise = null; }
+      });
+      return this.syncPromise;
     }
 
     fail(error) { this.onError?.(error instanceof Error ? error : Error(String(error))); }

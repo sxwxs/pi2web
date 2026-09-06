@@ -589,8 +589,8 @@
     if (message.type === 'agent_snapshot') {
       localStorage[`rpSeq:${message.agentId}`] = message.lastSequence;
       if (message.state) {
-        setAgentStatus(message.agentId, message.state.status);
         sessionKeyboard.setAgentSnapshot(message.state);
+        setAgentStatus(message.agentId, message.state.status);
       }
       if (state.agent?.agentId === message.agentId) {
         discardStreams(); $('messages').replaceChildren(); renderMessages(message.messages);
