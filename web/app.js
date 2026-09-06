@@ -586,6 +586,16 @@
       if (saved > current) localStorage[key] = current;
       return;
     }
+    if (message.type === 'agent_state') {
+      const key = `rpSeq:${message.agentId}`, last = Number(localStorage[key] || 0);
+      if (message.sequence < last) return;
+      localStorage[key] = message.sequence;
+      // This baseline follows replay. Keep recovered tool/LLM details while
+      // replacing standalone operation IDs, without touching the transcript.
+      sessionKeyboard.updateAgent(message.state);
+      setAgentStatus(message.agentId, message.state.status);
+      return;
+    }
     if (message.type === 'agent_snapshot') {
       localStorage[`rpSeq:${message.agentId}`] = message.lastSequence;
       if (message.state) {
@@ -640,8 +650,8 @@
     if (!state.connected) return;
     clearTimeout(state.reconnectTimer); state.manuallyClosed = true; const previous=state.ws; state.ws=null; previous?.close(); state.manuallyClosed = false;
     const ws = new WebSocket(state.base.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + state.token]); state.ws = ws;
-    ws.onopen = () => { state.reconnectAttempt = 0; $('status').textContent = '已配对 · 实时'; for (const agent of state.agents) { const key=`rpSeq:${agent.agentId}`, cursor=localStorage[key]; ws.send(JSON.stringify(cursor===undefined?{type:'subscribe',agentId:agent.agentId,fromNow:true,messageLimit:state.messagePageSize}:{type:'subscribe',agentId:agent.agentId,lastSequence:Number(cursor),messageLimit:state.messagePageSize})); } ws.send(JSON.stringify({type:'subscribe_all',fromNow:true})); };
-    ws.onmessage = event => { try { handleAgentEvent(JSON.parse(event.data)); } catch (error) { console.error(error); } };
+    ws.onopen = () => { if(ws!==state.ws)return;state.reconnectAttempt = 0; $('status').textContent = '已配对 · 实时'; for (const agent of state.agents) { const key=`rpSeq:${agent.agentId}`, cursor=localStorage[key]; ws.send(JSON.stringify(cursor===undefined?{type:'subscribe',agentId:agent.agentId,fromNow:true,messageLimit:state.messagePageSize}:{type:'subscribe',agentId:agent.agentId,lastSequence:Number(cursor),messageLimit:state.messagePageSize})); } ws.send(JSON.stringify({type:'subscribe_all',fromNow:true})); };
+    ws.onmessage = event => { if(ws!==state.ws)return;try { handleAgentEvent(JSON.parse(event.data)); } catch (error) { console.error(error); } };
     ws.onclose = () => { if (!state.connected || state.manuallyClosed || ws !== state.ws) return; $('status').textContent = '正在重连…'; const delays=[1000,2000,4000,8000,15000,30000], delay=delays[Math.min(state.reconnectAttempt++,delays.length-1)]; state.reconnectTimer=setTimeout(connectSocket,delay); };
     ws.onerror = () => {};
   }

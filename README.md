@@ -197,6 +197,8 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 这些约定针对上述 Nozzala 固件，不是所有相同 VID/PID 设备的通用规范。连接前请退出其他控制该键盘的 ChatGPT/Codex App，避免设备占用或灯光互相覆盖。
 
+灯效恢复使用服务器活动快照：`state.activity.bashIds` 表示在途的独立 Shell，`state.activity.dialogIds` 表示待回答的扩展对话框。这些 ID 只保存在服务进程内存中，不写入数据库或 Pi Session；LLM 的 `idle` 不代表它们已结束。回放缺口通过 `agent_snapshot.state` 恢复，随后按序补发快照构建期间的事件。每次订阅在回放完成后、实时事件开始前发送 `agent_state` 当前状态；首次 `fromNow` 订阅或已有游标但无新事件时也会发送，因此刷新页面无需等下一段 Shell 输出才能恢复灯效。旧服务端未提供 `activity` 时仍按普通 Agent 状态降级显示。不支持 WebHID 或安全上下文的浏览器会静默跳过自动连接，配置页保留原因说明。
+
 ## 多 Agent 协作中枢（Collab Hub）
 
 在"人 ↔ 单个 Agent"之上叠加一层协作中枢：多个 Agent 只通过结构化 HTTP API 交互，中枢负责身份、状态机推进、盲评、去重、僵局告警和人工升级。设计文档见 [`COLLAB_PLAN.md`](COLLAB_PLAN.md)。
