@@ -9,7 +9,7 @@
     toolCards: new Map(), commands: [], commandsAgentId: null, commandFiltered: [], commandIndex: 0, commandRequest: 0,
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
     voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve(),generation:0}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
-    mailNotificationsAvailable:false,mailSettings:{enabled:false,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true,collabEscalations:true},keyboardActivity:new Map(),
+    mailNotificationsAvailable:false,mailSettings:{enabled:false,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true,collabEscalations:true},
   };
   $('api').value = state.base;
   $('pairBase').value = state.base;
@@ -73,6 +73,7 @@
   function disconnect(reason = '未配对') {
     state.connected = false; state.token = ''; state.manuallyClosed = true;state.terminalConnectAttempt++;state.voiceEnabled=false;state.voiceSttEnabled=false;state.mailNotificationsAvailable=false;$('voicePlayback').hidden=true;$('voiceInput').hidden=true;
     clearTimeout(state.reconnectTimer); state.ws?.close(); state.ws = null; state.terminalWs?.close(); state.terminalWs = null; if(state.mediaRecorder?.state==='recording')state.mediaRecorder.stop();stopVoiceAudio();
+    sessionKeyboard.setAgents([]);
     $('status').className = 'bad'; $('status').textContent = reason; $('serverInfo').textContent = '';updateConfigUi();
   }
 
@@ -234,19 +235,42 @@
     $('keyboardConnect').hidden=connected;$('keyboardDisconnect').hidden=!connected;
     const unavailable=!window.isSecureContext?'需要 HTTPS 或 localhost':!navigator.hid?'当前浏览器不支持 WebHID':'';
     $('keyboardConnect').disabled=Boolean(unavailable);$('keyboardConnect').title=unavailable;
-    $('keyboardStatus').textContent=connected?`已连接 ${name} · LLM 浅呼吸，Tool 完整呼吸，Retry 快速呼吸，空闲常亮`:unavailable||'未连接 · 绑定保存在当前浏览器';
+    $('keyboardStatus').textContent=connected?`已连接 ${name} · LLM 慢速呼吸，Tool 中速呼吸，Retry 快速呼吸，等待输入浅呼吸，空闲常亮`:unavailable||'未连接 · 绑定保存在当前浏览器';
     renderKeyboardBindings();
   }
   function renderKeyboardBindings() {
-    if(!$('keyboardSlots'))return;
-    const agents=new Map(state.agents.map(agent=>[agent.agentId,agent]));
-    $('keyboardSlots').replaceChildren(...Array.from({length:6},(_,slot)=>{
-      const binding=sessionKeyboard.getSlot(slot),agent=binding&&agents.get(binding.agentId),el=document.createElement('div');el.className='keyboard-slot';
-      el.style.setProperty('--key-color',binding?.color||'#586174');
-      const title=document.createElement('b');title.textContent=`键 ${slot+1}${binding?' · '+binding.color:''}`;
-      const detail=document.createElement('small');detail.textContent=binding?(agent?agentLabel(agent):'Session 当前不可用'):'未绑定';
-      el.append(title,detail);return el;
+    const slots = $('keyboardSlots');
+    if (!slots) return;
+    const focusedId = slots.contains(document.activeElement) ? document.activeElement.id : '';
+    const agents = new Map(state.agents.map(agent => [agent.agentId, agent]));
+    const canBind = state.connected && state.agents.some(agent => !sessionKeyboard.getBinding(agent.agentId));
+    slots.replaceChildren(...Array.from({length:6}, (_, slot) => {
+      const binding = sessionKeyboard.getSlot(slot), agent = binding && agents.get(binding.agentId);
+      const el = document.createElement('div'); el.className = 'keyboard-slot';
+      el.style.setProperty('--key-color', binding?.color || '#586174');
+      const title = document.createElement('b'); title.textContent = `键 ${slot+1}${binding ? ' · '+binding.color : ''}`;
+      const detail = document.createElement('small'); detail.textContent = binding ? (agent ? agentLabel(agent) : 'Session 当前不可用') : '未绑定';
+      const actions = document.createElement('div'); actions.className = 'keyboard-slot-actions';
+      if (binding) {
+        const color = document.createElement('button'); color.type = 'button'; color.textContent = '颜色…';
+        color.id = `keyboardSlot${slot}Color`; color.setAttribute('aria-label', `更换按键 ${slot+1} 的颜色`);
+        color.onclick = () => changeKeyboardColor(binding).catch(error => toast(error.message));
+        actions.append(color);
+      }
+      const action = document.createElement('button'); action.type = 'button';
+      action.id = `keyboardSlot${slot}Binding`; action.textContent = binding ? '取消绑定' : '绑定 Session…';
+      action.setAttribute('aria-label', `${binding ? '取消' : '设置'}按键 ${slot+1} 的绑定`);
+      action.disabled = !binding && !canBind;
+      action.onclick = async () => {
+        try {
+          if (binding) { sessionKeyboard.unbind(binding.agentId); toast('已取消键盘按键绑定'); }
+          else await bindKeyboard({slot});
+        } catch (error) { toast(error.message); }
+      };
+      actions.append(action); el.append(title, detail, actions);
+      return el;
     }));
+    if (focusedId) $(focusedId)?.focus();
   }
   const sessionKeyboard = new window.SessionKeyboardController({
     onKey:binding=>{const agent=state.agents.find(item=>item.agentId===binding.agentId);if(!agent)return toast(`按键 ${binding.slot+1} 绑定的 Session 当前不可用`);selectAgent(agent).catch(error=>toast(error.message));},
@@ -254,29 +278,6 @@
     onBindingsChange:()=>{renderAgentList();renderKeyboardBindings();},
     onError:error=>{console.error('Session keyboard error',error);toast(`键盘：${error.message}`);}
   });
-  function updateKeyboardActivity(agentId,event) {
-    const fresh=()=>({turnActive:false,activeTools:new Set(),retrying:false,waiting:false});
-    let activity=state.keyboardActivity.get(agentId)||fresh();const type=event?.type;
-    if(type==='agent_start'){activity=fresh();activity.turnActive=true;}
-    else if(type==='message_start'){activity.turnActive=true;activity.waiting=false;}
-    else if(type==='message_update'){activity.turnActive=true;activity.waiting=false;}
-    else if(type==='tool_execution_start'||type==='tool_execution_update'){
-      activity.turnActive=true;activity.waiting=false;activity.activeTools.add(`tool:${event.toolCallId||event.toolName||'default'}`);
-    } else if(type==='tool_execution_end'){activity.activeTools.delete(`tool:${event.toolCallId||event.toolName||'default'}`);activity.waiting=false;}
-    else if(type==='bash_execution_start'||type==='bash_execution_update') activity.activeTools.add(`bash:${event.id||'default'}`);
-    else if(type==='bash_execution_end') activity.activeTools.delete(`bash:${event.id||'default'}`);
-    else if(type==='auto_retry_start'){activity.activeTools.clear();activity.retrying=true;activity.waiting=false;activity.turnActive=true;}
-    else if(type==='auto_retry_end'){activity.retrying=false;activity.turnActive=true;}
-    else if(type==='extension_ui_request') activity.waiting=true;
-    else if(type==='extension_ui_response'){activity.waiting=false;activity.turnActive=true;}
-    else if(type==='agent_end'){
-      if(event.willRetry){activity.activeTools.clear();activity.retrying=true;activity.waiting=false;activity.turnActive=true;}else activity=fresh();
-    } else if(type==='agent_settled') activity=fresh();
-    state.keyboardActivity.set(agentId,activity);
-    const phase=activity.waiting?'waiting':activity.activeTools.size?'tool':activity.retrying?'retry':activity.turnActive?'llm':'idle';
-    sessionKeyboard.setActivity(agentId,phase);
-    if(phase==='idle')state.keyboardActivity.delete(agentId);
-  }
   const formatTokens = value => { const n=Number(value); if(!Number.isFinite(n)||n<=0)return '0'; if(n>=1e6)return `${(n/1e6).toFixed(1)}M`;if(n>=1e3)return `${(n/1e3).toFixed(n>=1e4?0:1)}k`;return String(Math.round(n)); };
   const usageLevel = usage => Number(usage?.percent)>90?'usage-danger':Number(usage?.percent)>70?'usage-warning':'';
   const usageText = usage => { if(!usage||!Number(usage.contextWindow))return 'Context ?';const percent=usage.percent==null?'?':`${Number(usage.percent).toFixed(1)}%`;return `${percent} · ${formatTokens(usage.tokens)}/${formatTokens(usage.contextWindow)}`; };
@@ -454,12 +455,12 @@
     state.toolCards.delete(key);
     return card;
   }
-  /** Session bash has streaming deltas followed by one server-generated completion event. */
+  /** Session bash emits start, optional output deltas, and one completion event. */
   function updateBashCard(ev, timestamp) {
     const key=`bash:${ev.id||'default'}`;let card=state.toolCards.get(key);
     if(!card){card=addCard(ev.command?`$ ${ev.command}`:'$ bash','','tool',false,timestamp);card.content='';state.toolCards.set(key,card);}
     if(ev.type==='bash_execution_update')card.content+=String(ev.delta||'');
-    else {
+    else if(ev.type==='bash_execution_end') {
       card.content=String(ev.output??card.content);const failed=!!ev.isError||ev.cancelled||Number(ev.exitCode)>0;
       const status=ev.isError?ev.errorMessage:ev.cancelled?'已取消':ev.exitCode===undefined?'完成':`exit ${ev.exitCode}${ev.truncated?' · 输出已截断':''}`;
       card.details.classList.toggle('tool-error',failed);card.summaryText.textContent=`${failed?'✗':'✓'} ${ev.command?`$ ${ev.command}`:'bash'} · ${status}`;state.toolCards.delete(key);
@@ -527,8 +528,8 @@
   function discardStreams() { for(const card of state.streams.values())if(card.renderFrame!==null&&card.renderFrame!==undefined)cancelAnimationFrame(card.renderFrame);state.streams.clear();state.toolCards.clear(); }
   function extensionRequest(agentId, ev, timestamp) {
     const card = addCard(ev.title || `Extension ${ev.kind}`, ev.message || ev.placeholder || ev.prefill || '', 'dialog', true, timestamp);
-    const controls = document.createElement('div'); controls.className = 'dialog-actions';
-    const send = async value => { try { await post(`/api/v1/agents/${agentId}/extension-response`, {requestId:ev.requestId, value}); updateKeyboardActivity(agentId,{type:'extension_ui_response'});controls.replaceChildren(document.createTextNode('已响应')); } catch (e) { toast(e.message); } };
+    const controls = document.createElement('div'); controls.className = 'dialog-actions'; controls.id = `extension-request-${ev.requestId}`;
+    const send = async value => { try { await post(`/api/v1/agents/${agentId}/extension-response`, {requestId:ev.requestId, value}); controls.replaceChildren(document.createTextNode('已响应')); } catch (e) { toast(e.message); } };
     if (ev.kind === 'select') for (const option of ev.options || []) { const b = document.createElement('button'); b.textContent = option; b.onclick = () => send(option); controls.append(b); }
     else if (ev.kind === 'confirm') { for (const [label, value] of [['否',false],['是',true]]) { const b=document.createElement('button');b.textContent=label;b.onclick=()=>send(value);controls.append(b); } }
     else { const input = ev.kind === 'editor' ? document.createElement('textarea') : document.createElement('input'); input.value = ev.prefill || ''; input.placeholder = ev.placeholder || ''; const b = document.createElement('button'); b.textContent = '提交'; b.onclick = () => send(input.value); controls.append(input,b); }
@@ -586,12 +587,23 @@
       return;
     }
     if (message.type === 'agent_snapshot') {
-      localStorage[`rpSeq:${message.agentId}`] = message.lastSequence; if (state.agent?.agentId === message.agentId) { discardStreams();$('messages').replaceChildren(); renderMessages(message.messages);state.messagePageStart=message.messagePage?.start||0;state.messageTotal=message.messagePage?.total??message.messages?.length??0;updateMessageHistoryControl(); } return;
+      localStorage[`rpSeq:${message.agentId}`] = message.lastSequence;
+      if (message.state) {
+        setAgentStatus(message.agentId, message.state.status);
+        sessionKeyboard.setAgentSnapshot(message.state);
+      }
+      if (state.agent?.agentId === message.agentId) {
+        discardStreams(); $('messages').replaceChildren(); renderMessages(message.messages);
+        state.messagePageStart = message.messagePage?.start || 0;
+        state.messageTotal = message.messagePage?.total ?? message.messages?.length ?? 0;
+        updateMessageHistoryControl();
+      }
+      return;
     }
     if (message.type !== 'agent_event') return;
     const key = `rpSeq:${message.agentId}`, last = Number(localStorage[key] || 0); if (message.sequence <= last) return; localStorage[key] = message.sequence;
     const ev = message.event || {}, selected = state.selectedKind==='agent'&&state.agent?.agentId === message.agentId;
-    updateKeyboardActivity(message.agentId,ev);
+    sessionKeyboard.handleAgentEvent(message.agentId, ev);
     let eventAgent=state.agents.find(x=>x.agentId===message.agentId);
     if(eventAgent&&Number(message.timestamp)>0)eventAgent.lastActiveAt=new Date(Number(message.timestamp)*1000).toISOString();
     if (ev.type === 'agent_start' || ev.type === 'auto_retry_start') eventAgent=setAgentStatus(message.agentId,'streaming')||eventAgent;
@@ -608,10 +620,11 @@
       else if (update.type === 'thinking_delta') {const c=ensureStream('thinking','Thinking','thinking');c.content+=update.delta||'';scheduleStreamPaint(c);}
     } else if (ev.type === 'message_end') {finalizeAgentStreams();const error=assistantError(ev.message);if(error)addCard('LLM Error',error,'error',true,message.timestamp);}
     else if (ev.type === 'tool_execution_start' || ev.type === 'tool_execution_update' || ev.type === 'tool_execution_end') upsertToolCard(ev, message.timestamp);
-    else if (ev.type === 'bash_execution_update' || ev.type === 'bash_execution_end') updateBashCard(ev, message.timestamp);
+    else if (ev.type === 'bash_execution_start' || ev.type === 'bash_execution_update' || ev.type === 'bash_execution_end') updateBashCard(ev, message.timestamp);
     else if (ev.type === 'auto_retry_start' || ev.type === 'auto_retry_end') addCard('Retry', ev.errorMessage || ev.finalError || `${ev.type}${ev.attempt?` · attempt ${ev.attempt}`:''}`, 'system', false, message.timestamp);
     else if (String(ev.type).startsWith('summarization_retry')) addCard('Summarization Retry', ev.errorMessage || `${ev.type}${ev.attempt?` · ${ev.attempt}/${ev.maxAttempts}`:''}`, 'system', false, message.timestamp);
     else if (ev.type === 'extension_ui_request') extensionRequest(message.agentId, ev, message.timestamp);
+    else if (ev.type === 'extension_ui_response') $(`extension-request-${ev.requestId}`)?.replaceChildren(document.createTextNode('已结束'));
     else if (ev.type === 'extension_ui_notify') addCard(ev.notificationType || '通知', ev.message, 'system', false, message.timestamp);
     else if (ev.type === 'extension_ui_status') { ev.text ? state.extensionStatus.set(ev.key, ev.text) : state.extensionStatus.delete(ev.key); renderExtensionStatus(); }
     else if (ev.type === 'extension_ui_widget') { ev.content ? state.widgets.set(ev.key, ev.content) : state.widgets.delete(ev.key); renderWidgets(); }
@@ -677,7 +690,7 @@
   function updateConfigUi(){
     $('configConnectionStatus').textContent=state.connected?`已连接 ${state.base}`:'当前未配对';updateNotificationButton();updateVoiceButton();updateMailControls();
   }
-  function openConfig(){updateConfigUi();if(!$('configDialog').open)$('configDialog').showModal();}
+  function openConfig(){updateConfigUi();renderKeyboardBindings();if(!$('configDialog').open)$('configDialog').showModal();}
   async function saveMailSettings(){
     if(!requireConnection())return;if(!state.mailNotificationsAvailable)return toast('服务端未配置 MailDispatch');
     const delay=Number($('mailAggregationDelay').value);if(!Number.isInteger(delay)||delay<0||delay>86400)return toast('聚合时间必须是 0 到 86400 之间的整数秒');
@@ -693,11 +706,34 @@
   const field = (body, label, value='', type='text') => { const l=document.createElement('label');l.textContent=label;const input=document.createElement('input');input.type=type;input.value=value;l.append(input);body.append(l);return input; };
   let agentContextTarget=null;
   function showItemContextMenu(event,kind,item){event.preventDefault();event.stopPropagation();agentContextTarget={kind,item};const archive=$('menuArchiveAgent'),active=kind==='agent'&&['starting','streaming','waiting_for_user','stopping'].includes(item.status),binding=kind==='agent'&&sessionKeyboard.getBinding(item.agentId);archive.hidden=kind!=='agent';archive.disabled=active;archive.title=active?'Agent 执行期间不能 Archive':'';$('menuBindKeyboard').hidden=kind!=='agent'||!!binding;$('menuBindKeyboard').disabled=!binding&&sessionKeyboard.getBindings().length>=6;$('menuBindKeyboard').title=$('menuBindKeyboard').disabled?'六个按键均已绑定':'';$('menuKeyboardColor').hidden=kind!=='agent'||!binding;$('menuUnbindKeyboard').hidden=kind!=='agent'||!binding;$('menuCloseTerminal').hidden=kind!=='terminal';const menu=$('agentContextMenu');menu.hidden=false;menu.style.left=`${Math.min(event.clientX,innerWidth-210)}px`;menu.style.top=`${Math.min(event.clientY,innerHeight-190)}px`;}
-  async function bindKeyboardAgent(agent){
-    const free=sessionKeyboard.getFreeSlots();
-    if(!free.length)return toast('六个键盘按键均已绑定');
-    const result=await modal('绑定键盘按键',body=>{const slotLabel=document.createElement('label');slotLabel.textContent='按键';const select=document.createElement('select');for(const slot of free){const option=document.createElement('option');option.value=String(slot);option.textContent=`按键 ${slot+1} / AG0${slot}`;select.append(option);}slotLabel.append(select);body.append(slotLabel);const color=field(body,'灯光颜色',sessionKeyboard.nextColor(),'color');return()=>({slot:Number(select.value),color:color.value});},'绑定');
-    if(!result)return;sessionKeyboard.bind(agent.agentId,result.slot,result.color);toast(`已绑定到按键 ${result.slot+1}`);
+  async function bindKeyboard({agentId, slot} = {}) {
+    const free = sessionKeyboard.getFreeSlots();
+    const agents = state.agents.filter(agent => !sessionKeyboard.getBinding(agent.agentId));
+    if (!free.length) return toast('六个键盘按键均已绑定');
+    if (!agents.length) return toast('没有可绑定的 Session');
+    const result = await modal('绑定键盘按键', body => {
+      const sessionLabel = document.createElement('label'); sessionLabel.textContent = 'Session';
+      const sessions = document.createElement('select');
+      for (const agent of agents) {
+        const option = document.createElement('option'); option.value = agent.agentId;
+        option.textContent = agentLabel(agent); option.selected = agent.agentId === agentId;
+        sessions.append(option);
+      }
+      sessionLabel.append(sessions); body.append(sessionLabel);
+      const slotLabel = document.createElement('label'); slotLabel.textContent = '按键';
+      const keys = document.createElement('select');
+      for (const key of free) {
+        const option = document.createElement('option'); option.value = String(key);
+        option.textContent = `按键 ${key+1} / AG0${key}`; option.selected = key === slot;
+        keys.append(option);
+      }
+      slotLabel.append(keys); body.append(slotLabel);
+      const color = field(body, '灯光颜色', sessionKeyboard.nextColor(), 'color');
+      return () => ({agentId:sessions.value, slot:Number(keys.value), color:color.value});
+    }, '绑定');
+    if (!result) return;
+    sessionKeyboard.bind(result.agentId, result.slot, result.color);
+    toast(`已绑定到按键 ${result.slot+1}`);
   }
   async function changeKeyboardColor(agent){
     const binding=sessionKeyboard.getBinding(agent.agentId);if(!binding)return;
@@ -742,7 +778,7 @@
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){await post('/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
-  $('menuStartAgent').onclick=()=>startAgent(state.contextTarget.relativePath);$('menuOpenTerminal').onclick=()=>openTerminal(state.contextTarget.relativePath);$('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuBindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void bindKeyboardAgent(agent).catch(error=>toast(error.message));};$('menuKeyboardColor').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void changeKeyboardColor(agent).catch(error=>toast(error.message));};$('menuUnbindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent&&sessionKeyboard.unbind(agent.agentId))toast('已取消键盘按键绑定');};$('menuCloseTerminal').onclick=()=>{const terminal=agentContextTarget?.kind==='terminal'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal(terminal);};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await post(`/api/v1/agents/${agent.agentId}/archive`);sessionKeyboard.unbind(agent.agentId);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
+  $('menuStartAgent').onclick=()=>startAgent(state.contextTarget.relativePath);$('menuOpenTerminal').onclick=()=>openTerminal(state.contextTarget.relativePath);$('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuBindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void bindKeyboard({agentId:agent.agentId}).catch(error=>toast(error.message));};$('menuKeyboardColor').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void changeKeyboardColor(agent).catch(error=>toast(error.message));};$('menuUnbindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent&&sessionKeyboard.unbind(agent.agentId))toast('已取消键盘按键绑定');};$('menuCloseTerminal').onclick=()=>{const terminal=agentContextTarget?.kind==='terminal'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal(terminal);};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await post(`/api/v1/agents/${agent.agentId}/archive`);sessionKeyboard.unbind(agent.agentId);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
   $('newAgent').onclick=createAgent;$('newTerminal').onclick=()=>openTerminal($('agentCwd').value.trim()||'.');$('abort').onclick=()=>{if(!state.agent)return;const id=state.agent.agentId;Promise.all([post(`/api/v1/agents/${id}/abort`),post(`/api/v1/agents/${id}/bash-abort`)]).catch(e=>toast(e.message));};$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
   $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await post(`/api/v1/agents/${state.agent.agentId}/compact`,{instructions:instructions||undefined});toast('Compact 完成');}};

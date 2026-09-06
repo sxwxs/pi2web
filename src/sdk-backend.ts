@@ -47,6 +47,7 @@ export class SdkBackend implements AgentBackend {
   /** Run a command inside the Agent session so its output is recorded in the transcript (`!!` keeps it out of the model context). */
   async runBash(command:string,excludeFromContext=false){
     const id=randomUUID();
+    this.events.emit('event',{type:'bash_execution_start',id,command});
     try{
       const result=await this.session.executeBash(command,undefined,{excludeFromContext,id});
       this.events.emit('event',{type:'bash_execution_end',id,command,...result});
@@ -65,11 +66,34 @@ export class SdkBackend implements AgentBackend {
   async setSessionName(name:string){const value=name.trim();if(!value||value.length>200)throw Object.assign(new Error('Session name must be 1-200 characters'),{code:'INVALID_SESSION_NAME'});this.session.setSessionName(value)}
   navigate(entryId:string){return this.session.navigateTree(entryId)}
   async fork(entryId:string){const entry:any=this.session.sessionManager.getEntry(entryId);if(!entry||entry.type!=='message'||entry.message?.role!=='user')throw Object.assign(new Error('A user message entry is required'),{code:'SESSION_ENTRY_NOT_FOUND'});const content=entry.message.content;const selectedText=typeof content==='string'?content:Array.isArray(content)?content.filter((part:any)=>part.type==='text').map((part:any)=>part.text).join('\n'):'';let sessionFile:string|undefined;if(entry.parentId){sessionFile=this.session.sessionManager.createBranchedSession(entry.parentId)}else{const current=this.session.sessionFile;if(!current)throw Object.assign(new Error('Session persistence is disabled'),{code:'SESSION_NOT_PERSISTED'});sessionFile=SessionManager.create(this.cwd,this.session.sessionManager.getSessionDir(),{parentSession:current}).getSessionFile()}return {sessionFile,selectedText}}
-  async extensionResponse(requestId:string,value:unknown){const pending=this.pendingUi.get(requestId);if(!pending)throw Object.assign(new Error('Extension UI request not found'),{code:'EXTENSION_REQUEST_NOT_FOUND'});clearTimeout(pending.timer);this.pendingUi.delete(requestId);pending.resolve(value)}
+  async extensionResponse(requestId:string,value:unknown){
+    if(!this.resolveUiRequest(requestId,value))throw Object.assign(new Error('Extension UI request not found'),{code:'EXTENSION_REQUEST_NOT_FOUND'});
+  }
   subscribe(listener:(event:AgentEvent)=>void){const fromSession=(event:unknown)=>listener(event as AgentEvent);const unsubscribe=this.session.subscribe(fromSession);this.events.on('event',listener);return()=>{unsubscribe();this.events.off('event',listener)}}
-  async dispose(){if(this.disposed)return;for(const [id,pending] of this.pendingUi){clearTimeout(pending.timer);pending.resolve(undefined);this.pendingUi.delete(id)}await this.session.abort();this.session.dispose();this.disposed=true}
+  async dispose(){
+    if(this.disposed)return;
+    for(const requestId of this.pendingUi.keys())this.resolveUiRequest(requestId,undefined);
+    await this.session.abort();this.session.dispose();this.disposed=true;
+  }
   private modelInfo(model:any){return {provider:model.provider,id:model.id,name:model.name,reasoning:!!model.reasoning,contextWindow:model.contextWindow,maxTokens:model.maxTokens}}
-  private request(kind:string,payload:Record<string,unknown>):Promise<unknown>{const requestId=randomUUID();return new Promise(resolve=>{const timer=setTimeout(()=>{this.pendingUi.delete(requestId);resolve(undefined)},5*60_000);this.pendingUi.set(requestId,{resolve,timer});this.events.emit('event',{type:'extension_ui_request',requestId,kind,...payload})})}
+  private resolveUiRequest(requestId:string,value:unknown){
+    const pending=this.pendingUi.get(requestId);
+    if(!pending)return false;
+    clearTimeout(pending.timer);this.pendingUi.delete(requestId);
+    // Publish before resuming the extension: every client sees the same order,
+    // including requests answered elsewhere, timed out, or closed during disposal.
+    this.events.emit('event',{type:'extension_ui_response',requestId});
+    pending.resolve(value);
+    return true;
+  }
+  private request(kind:string,payload:Record<string,unknown>):Promise<unknown>{
+    const requestId=randomUUID();
+    return new Promise(resolve=>{
+      const timer=setTimeout(()=>this.resolveUiRequest(requestId,undefined),5*60_000);
+      this.pendingUi.set(requestId,{resolve,timer});
+      this.events.emit('event',{type:'extension_ui_request',requestId,kind,...payload});
+    });
+  }
   private extensionUi():ExtensionUIContext{return {
     select:async(title:string,options:string[],opts:unknown)=>await this.request('select',{title,options,opts}) as string|undefined,
     confirm:async(title:string,message:string,opts:unknown)=>Boolean(await this.request('confirm',{title,message,opts})),
