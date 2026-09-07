@@ -59,12 +59,15 @@ export class AgentManager {
     else if(type==='extension_ui_response')entry.dialogRequests.delete(event.requestId);
    }
    if(type==='session_info_changed')record.sessionName=typeof event.name==='string'&&event.name.trim()?event.name.trim():undefined;
-   record.lastActiveAt=new Date().toISOString();
-   const item={id:randomUUID(),sequence:entry.nextSequence++,timestamp:Math.floor(Date.now()/1000),event};
-   entry.events.push(item);if(entry.events.length>1000)entry.events.shift();
-   for(const listener of this.listeners.get(record.agentId)??[])listener(item);
-   for(const listener of this.globalListeners)listener(record.agentId,item);
+   this.publish(entry,event);
   });
+ }
+ private publish(entry:AgentEntry,event:AgentEvent){
+  const record=entry.record;record.lastActiveAt=new Date().toISOString();
+  const item={id:randomUUID(),sequence:entry.nextSequence++,timestamp:Math.floor(Date.now()/1000),event};
+  entry.events.push(item);if(entry.events.length>1000)entry.events.shift();
+  for(const listener of this.listeners.get(record.agentId)??[])listener(item);
+  for(const listener of this.globalListeners)listener(record.agentId,item);
  }
  private attach(id:string,record:AgentRecord,backend:AgentBackend){const entry:AgentEntry={record,backend,events:[],nextSequence:1,bashIds:new Set(),dialogRequests:new Map()};this.connect(entry,backend);this.agents.set(id,entry)}
  async restore(records:AgentRecord[]){for(const saved of records){try{const ws=this.workspaces.get(saved.workspaceId);if(!ws)continue;const cwd=await this.workspaces.resolve(ws,pathRelative(ws.rootPath,saved.cwd));const sessionModified=saved.sessionFile?await import('node:fs/promises').then(fs=>fs.stat(saved.sessionFile!).then(value=>value.mtime.toISOString()).catch(()=>undefined)):undefined;const record={...saved,profile:saved.profile??'default',cwd,status:'unloaded' as const,lastActiveAt:sessionModified&&sessionModified>saved.lastActiveAt?sessionModified:saved.lastActiveAt};this.agents.set(saved.agentId,{record,events:[],nextSequence:1,bashIds:new Set(),dialogRequests:new Map()})}catch{/* Keep server startup resilient to deleted workspaces. */}}}
@@ -95,6 +98,7 @@ export class AgentManager {
   const a=this.get(id);if(a.loading)await a.loading.catch(()=>{});
   await a.backend?.dispose();a.backend=undefined;a.record.status='unloaded';
   a.bashIds.clear();a.dialogRequests.clear();
+  this.publish(a,{type:'agent_unloaded'});
  }
  async remove(id:string){await this.dispose(id);this.agents.delete(id);this.listeners.delete(id)}
  async archive(id:string){const current=this.get(id).record;if(['starting','streaming','waiting_for_user','stopping'].includes(current.status))throw Object.assign(new Error('Active Agent cannot be archived'),{code:'AGENT_ACTIVE'});const record={...current,status:'unloaded' as const};await this.remove(id);return record}

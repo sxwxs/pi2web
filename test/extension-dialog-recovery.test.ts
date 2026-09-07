@@ -6,6 +6,7 @@ const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
 // Exercise the real event handler and dialog renderer without booting unrelated UI.
 const dialogSource = source.slice(source.indexOf('  function extensionRequest('), source.indexOf('  function stopVoiceAudio('));
 const handlerSource = source.slice(source.indexOf('  function handleAgentEvent('), source.indexOf('  function renderExtensionStatus('));
+const keyboardSource = source.slice(source.indexOf('  const sessionKeyboard ='), source.indexOf('  const formatTokens ='));
 
 class Element {
   id = ''; className = ''; textContent = ''; value = ''; placeholder = '';
@@ -27,13 +28,16 @@ function setup() {
   const post = vi.fn(async () => {});
   const addCard = vi.fn(() => { const body = new Element(); messages.append(body); return {body}; });
   const renderMessages = vi.fn(() => messages.append(new Element()));
-  const {handleAgentEvent} = runInNewContext(`${dialogSource}\n${handlerSource}\n({handleAgentEvent})`, {
+  const sessionKeyboard = {updateAgent:vi.fn(), setAgentSnapshot:vi.fn(), handleAgentEvent:vi.fn()};
+  const setAgentStatus = vi.fn(), selectAgent = vi.fn(async () => {}), navigateMobile = vi.fn();
+  const {handleAgentEvent, onKey} = runInNewContext(`${keyboardSource}\n${dialogSource}\n${handlerSource}\n({handleAgentEvent, onKey:sessionKeyboard.onKey})`, {
     state, $, localStorage:{}, post, addCard, renderMessages, toast:vi.fn(),
     document:{createElement:() => new Element(), createTextNode:(text:string) => Object.assign(new Element(), {textContent:text})},
-    sessionKeyboard:{updateAgent:vi.fn(), setAgentSnapshot:vi.fn(), handleAgentEvent:vi.fn()},
-    setAgentStatus:vi.fn(), discardStreams:vi.fn(), updateMessageHistoryControl:vi.fn(),
+    window:{SessionKeyboardController:function(options:unknown) { return Object.assign(sessionKeyboard, options); }},
+    updateKeyboardUi:vi.fn(), renderAgentList:vi.fn(), renderKeyboardBindings:vi.fn(), selectAgent, navigateMobile,
+    setAgentStatus, discardStreams:vi.fn(), updateMessageHistoryControl:vi.fn(),
   }, {filename:'web/app.js'});
-  return {handleAgentEvent, $, messages, post, addCard, renderMessages};
+  return {handleAgentEvent, $, messages, post, addCard, renderMessages, state, onKey, setAgentStatus, selectAgent, navigateMobile};
 }
 
 const request = {type:'extension_ui_request', requestId:'dialog-1', kind:'select', title:'Choose an action', options:['Keep', 'Replace']};
@@ -81,6 +85,43 @@ describe('extension dialog recovery', () => {
     expect(ui.$('extension-request-dialog-1')).toBeDefined();
     ui.handleAgentEvent({type:'agent_event', agentId:'agent-a', sequence:3, event:{type:'extension_ui_response', requestId:'dialog-1'}});
     expect(ui.$('extension-request-dialog-1')!.children[0].textContent).toBe('已结束');
+  });
+
+  it('applies an unload event to status/lights and closes dialogs without replacing the transcript', () => {
+    const ui = setup();
+    ui.handleAgentEvent(baseline('agent_state'));
+    const controls = ui.$('extension-request-dialog-1')!;
+    ui.handleAgentEvent({type:'agent_event', agentId:'agent-a', sequence:2, event:{type:'agent_unloaded'}});
+    expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'unloaded');
+    expect(ui.$('extension-request-dialog-1')).toBe(controls);
+    expect(controls.children[0].textContent).toBe('已结束');
+    expect(ui.addCard).toHaveBeenCalledOnce();
+    expect(ui.renderMessages).not.toHaveBeenCalled();
+  });
+
+  it('pressing the already selected Session key preserves a dialog draft without reloading', () => {
+    const ui = setup();
+    ui.handleAgentEvent(baseline('agent_state', [{...request, kind:'input'}]));
+    const controls = ui.$('extension-request-dialog-1')!;
+    controls.children[0].value = 'unfinished answer';
+    ui.onKey({agentId:'agent-a', slot:0});
+    expect(ui.selectAgent).not.toHaveBeenCalled();
+    expect(controls.children[0].value).toBe('unfinished answer');
+    expect(ui.navigateMobile).toHaveBeenCalledWith('agent');
+  });
+
+  it('still switches back from a Terminal even if the last selected Agent matches the key', () => {
+    const ui = setup();
+    ui.state.selectedKind = 'terminal';
+    ui.onKey({agentId:'agent-a', slot:0});
+    expect(ui.selectAgent).toHaveBeenCalledExactlyOnceWith(ui.state.agent);
+  });
+
+  it('still switches to a different bound Session', () => {
+    const ui = setup(), other = {agentId:'agent-b', status:'idle'};
+    ui.state.agents.push(other);
+    ui.onKey({agentId:'agent-b', slot:1});
+    expect(ui.selectAgent).toHaveBeenCalledExactlyOnceWith(other);
   });
 
   it('does not render another agent’s dialogs or change existing controls for older servers', () => {

@@ -273,7 +273,12 @@
     if (focusedId) $(focusedId)?.focus();
   }
   const sessionKeyboard = new window.SessionKeyboardController({
-    onKey:binding=>{const agent=state.agents.find(item=>item.agentId===binding.agentId);if(!agent)return toast(`按键 ${binding.slot+1} 绑定的 Session 当前不可用`);selectAgent(agent).catch(error=>toast(error.message));},
+    onKey:binding=>{
+      const agent=state.agents.find(item=>item.agentId===binding.agentId);
+      if(!agent)return toast(`按键 ${binding.slot+1} 绑定的 Session 当前不可用`);
+      if(state.selectedKind==='agent'&&state.agent?.agentId===agent.agentId)return navigateMobile('agent');
+      selectAgent(agent).catch(error=>toast(error.message));
+    },
     onStateChange:updateKeyboardUi,
     onBindingsChange:()=>{renderAgentList();renderKeyboardBindings();},
     onError:error=>{console.error('Session keyboard error',error);toast(`键盘：${error.message}`);}
@@ -628,6 +633,11 @@
     sessionKeyboard.handleAgentEvent(message.agentId, ev);
     let eventAgent=state.agents.find(x=>x.agentId===message.agentId);
     if(eventAgent&&Number(message.timestamp)>0)eventAgent.lastActiveAt=new Date(Number(message.timestamp)*1000).toISOString();
+    if (ev.type === 'agent_unloaded') {
+      setAgentStatus(message.agentId, 'unloaded');
+      restoreExtensionRequests(message.agentId, {dialogRequests:[]});
+      return;
+    }
     if (ev.type === 'agent_start' || ev.type === 'auto_retry_start') eventAgent=setAgentStatus(message.agentId,'streaming')||eventAgent;
     else if (ev.type === 'agent_end') {
       const final=!ev.willRetry;eventAgent=setAgentStatus(message.agentId,final?'idle':'streaming')||eventAgent;

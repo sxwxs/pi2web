@@ -59,14 +59,14 @@ function setup(authorized = true) {
   const window = {isSecureContext:true} as any;
   const navigator:{hid:typeof hid|undefined} = {hid};
   runInNewContext(source, {
-    window, navigator, TextEncoder, TextDecoder, setTimeout, clearTimeout,
+    window, navigator, Date, TextEncoder, TextDecoder, setTimeout, clearTimeout,
     localStorage:{getItem:() => null, setItem:() => {}},
   }, {filename:'web/hid-keyboard.js'});
-  const onStateChange = vi.fn(), onError = vi.fn();
-  const keyboard = new window.SessionKeyboardController({onStateChange, onError});
+  const onStateChange = vi.fn(), onError = vi.fn(), onKey = vi.fn();
+  const keyboard = new window.SessionKeyboardController({onStateChange, onError, onKey});
   keyboard.bind(agent.agentId, 0, '#FF3040');
   keyboard.setAgents([agent]);
-  return {keyboard, device, hid, window, navigator, onStateChange, onError};
+  return {keyboard, device, hid, window, navigator, onStateChange, onError, onKey};
 }
 
 async function connectKeyboard(keyboard:any) {
@@ -377,6 +377,44 @@ describe('light synchronization scheduling', () => {
     await vi.runAllTimersAsync();
     await retry;
     expect(device.requests.map(request => request.p[0].e)).toEqual([4]);
+  });
+});
+
+describe('key notifications', () => {
+  it.each([0,1,2,3,4,5])('routes a fragmented AG0%i press to its binding', async slot => {
+    const {keyboard, device, onKey} = setup();
+    keyboard.bind(agent.agentId, slot, '#FF3040');
+    await connectKeyboard(keyboard);
+    const notification = {m:'v.oai.hid', p:{k:`AG0${slot}`, act:1}};
+    device.input(JSON.stringify(notification) + '\n', 1);
+    expect(onKey).toHaveBeenCalledExactlyOnceWith(keyboard.getSlot(slot), notification);
+  });
+
+  it('ignores releases, foreign notifications, replies and unbound keys', async () => {
+    const {keyboard, device, onKey} = setup();
+    await connectKeyboard(keyboard);
+    const press = {m:'v.oai.hid', p:{k:'AG00', act:1}};
+    for (const notification of [
+      {...press, p:{k:'AG00', act:0}}, {...press, m:'other'}, {...press, id:900},
+      {...press, p:{k:'AG06', act:1}}, {...press, p:{k:'AG01', act:1}},
+    ]) device.input(JSON.stringify(notification) + '\n');
+    expect(onKey).not.toHaveBeenCalled();
+    device.input(JSON.stringify(press) + '\n');
+    expect(onKey).toHaveBeenCalledOnce();
+  });
+
+  it('debounces each key independently for 250 ms', async () => {
+    const {keyboard, device, onKey} = setup();
+    keyboard.bind('agent-b', 1, '#00D9FF');
+    await connectKeyboard(keyboard);
+    const press = (slot:number) => device.input(JSON.stringify({m:'v.oai.hid', p:{k:`AG0${slot}`, act:1}}) + '\n');
+    press(0); press(0);
+    await vi.advanceTimersByTimeAsync(249);
+    press(0); press(1);
+    expect(onKey.mock.calls.map(([binding]) => binding.slot)).toEqual([0,1]);
+    await vi.advanceTimersByTimeAsync(1);
+    press(0);
+    expect(onKey.mock.calls.map(([binding]) => binding.slot)).toEqual([0,1,0]);
   });
 });
 
