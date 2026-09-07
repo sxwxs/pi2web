@@ -201,6 +201,8 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 活动快照中的 `state.activity.dialogRequests` 还包含待回答对话框的原始请求（不含用户答案），刷新或回放缺口后可恢复回答控件。服务端复用同一份内存请求记录，前端按 request ID 避免重复创建对话框；已结束的请求不会再出现在快照中。
 
+卸载 Agent 会通过同一条可回放事件流发送 `agent_unloaded`；在线客户端据此设为 `unloaded`、清除活动灯效并关闭待回答控件，无需重连。
+
 ## 多 Agent 协作中枢（Collab Hub）
 
 在"人 ↔ 单个 Agent"之上叠加一层协作中枢：多个 Agent 只通过结构化 HTTP API 交互，中枢负责身份、状态机推进、盲评、去重、僵局告警和人工升级。设计文档见 [`COLLAB_PLAN.md`](COLLAB_PLAN.md)。

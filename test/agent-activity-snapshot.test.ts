@@ -63,7 +63,9 @@ async function setup() {
       },
     };
   }
-  return {server, agents, agent, backend, backends, publish, blockMessages, connect, workspaces};
+  return {server, agents, agent, backend, backends, publish, blockMessages, connect, workspaces,
+    unload:() => fetch(`http://127.0.0.1:${address!.port}/api/v1/agents/${agent.agentId}`, {method:'DELETE', headers:{authorization:`Bearer ${token}`}}),
+  };
 }
 
 const dialogRequest = {type:'extension_ui_request', requestId:'dialog-1', kind:'confirm', title:'Confirm', message:'Continue?'};
@@ -143,6 +145,32 @@ describe('authoritative activity snapshots', () => {
 });
 
 describe('WebSocket snapshot ordering', () => {
+  it('broadcasts and replays unloading so other clients can clear activity without reconnecting', async () => {
+    const {agents, agent, publish, connect, unload, backends} = await setup();
+    const client = await connect(), observer = await connect();
+    client.send({type:'subscribe', agentId:agent.agentId, fromNow:true});
+    observer.send({type:'subscribe_all'});
+    await client.wait(message => message.type === 'agent_state');
+    await observer.wait(message => message.type === 'subscribed_all');
+    startWork(publish);
+    await client.wait(message => message.event?.type === 'extension_ui_request');
+    await observer.wait(message => message.event?.type === 'extension_ui_request');
+    const cursor = agents.currentSequence(agent.agentId);
+    expect((await unload()).status).toBe(200);
+    const unloaded = await client.wait(message => message.event?.type === 'agent_unloaded');
+    expect(unloaded).toMatchObject({type:'agent_event', agentId:agent.agentId, sequence:cursor+1, event:{type:'agent_unloaded'}});
+    expect(await observer.wait(message => message.event?.type === 'agent_unloaded')).toEqual(unloaded);
+    expect(agents.snapshotState(agent.agentId)).toMatchObject({status:'unloaded', activity:idle});
+    publish({type:'bash_execution_update', id:'bash-1', delta:'late output'});
+    expect(agents.currentSequence(agent.agentId)).toBe(cursor+1);
+
+    const reconnected = await connect();
+    reconnected.send({type:'subscribe', agentId:agent.agentId, lastSequence:cursor});
+    expect(await reconnected.wait(message => message.type === 'agent_event')).toEqual(unloaded);
+    expect(await reconnected.wait(message => message.type === 'agent_state')).toMatchObject({state:{status:'unloaded', activity:idle}});
+    expect(backends).toHaveLength(1); // Observing unload must not reload the backend.
+  });
+
   it('includes current activity in fromNow without replaying the transcript', async () => {
     const {agent, publish, backend, connect} = await setup();
     startWork(publish);
