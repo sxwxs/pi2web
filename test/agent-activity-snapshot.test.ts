@@ -7,6 +7,8 @@ import WebSocket from 'ws';
 import {AgentManager, MockBackend, type AgentEvent} from '../src/agents.js';
 import {RemotePiServer} from '../src/server.js';
 import {WorkspaceStore} from '../src/workspaces.js';
+import {Check} from 'typebox/value';
+import schema from '../packages/protocol/websocket.schema.json' with {type:'json'};
 
 class ControlledBackend extends MockBackend {
   publish!:(event:AgentEvent) => void;
@@ -64,12 +66,27 @@ async function setup() {
   return {server, agents, agent, backend, backends, publish, blockMessages, connect, workspaces};
 }
 
+const dialogRequest = {type:'extension_ui_request', requestId:'dialog-1', kind:'confirm', title:'Confirm', message:'Continue?'};
 const startWork = (publish:(event:AgentEvent) => void) => {
   publish({type:'bash_execution_start', id:'bash-1', command:'sleep 30'});
-  publish({type:'extension_ui_request', requestId:'dialog-1', kind:'confirm', message:'Continue?'});
+  publish(dialogRequest);
 };
-const active = {bashIds:['bash-1'], dialogIds:['dialog-1']};
-const idle = {bashIds:[], dialogIds:[]};
+const active = {bashIds:['bash-1'], dialogIds:['dialog-1'], dialogRequests:[dialogRequest]};
+const idle = {bashIds:[], dialogIds:[], dialogRequests:[]};
+
+describe('WebSocket state schema', () => {
+  it.each(['agent_snapshot', 'agent_state'])('requires core state fields but accepts older servers without activity: %s', type => {
+    const state = {agentId:'agent-a', sessionId:'session-a', cwd:'/workspace', status:'idle'};
+    const message = {type, agentId:state.agentId, state, sequence:0, lastSequence:0, messages:[]};
+    expect(Check(schema, message)).toBe(true);
+    expect(Check(schema, {...message, state:{...state, activity:active}})).toBe(true);
+    for (const key of ['agentId', 'sessionId', 'cwd', 'status']) {
+      const incomplete:Record<string, unknown> = {...state}; delete incomplete[key];
+      expect(Check(schema, {...message, state:incomplete})).toBe(false);
+    }
+    expect(Check(schema, {...message, state:{...state, status:'unknown'}})).toBe(false);
+  });
+});
 
 describe('authoritative activity snapshots', () => {
   it('tracks parallel operations independently of LLM turns and clears them by ID', async () => {
@@ -172,7 +189,23 @@ describe('WebSocket snapshot ordering', () => {
     expect(snapshot).toMatchObject({lastSequence:cursor, state:{status:'idle', activity:active}});
     expect(client.messages.map(message => message.type)).toEqual(['subscribed','agent_snapshot','agent_event','agent_event','agent_event','agent_state']);
     expect(client.messages.filter(message => message.type === 'agent_event').map(message => message.sequence)).toEqual([cursor+1,cursor+2,cursor+3]);
-    expect(agents.snapshotState(agent.agentId).activity).toEqual({bashIds:['bash-2'], dialogIds:[]});
+    expect(agents.snapshotState(agent.agentId).activity).toEqual({bashIds:['bash-2'], dialogIds:[], dialogRequests:[]});
+  });
+
+  it('recovers pending dialog payloads even after their request events leave the replay cache', async () => {
+    const {agents, agent, publish, connect} = await setup();
+    const request = {...dialogRequest, kind:'select', options:['Keep', 'Replace']};
+    publish(request);
+    for (let i = 0; i < 1001; i++) publish({type:'extension_ui_notify', message:String(i)});
+    expect(agents.events(agent.agentId).some(item => item.event.type === 'extension_ui_request')).toBe(false);
+    const client = await connect();
+    client.send({type:'subscribe', agentId:agent.agentId, lastSequence:1});
+    const snapshot = await client.wait(message => message.type === 'agent_snapshot');
+    expect(snapshot.state.activity.dialogRequests).toEqual([request]);
+    expect(Check(schema, snapshot)).toBe(true);
+    publish({type:'extension_ui_response', requestId:request.requestId});
+    await client.wait(message => message.event?.type === 'extension_ui_response');
+    expect(agents.snapshotState(agent.agentId).activity.dialogRequests).toEqual([]);
   });
 
   it('sends ordinary replay before the current-state baseline, then switches to live events', async () => {

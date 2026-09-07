@@ -73,6 +73,7 @@
       this.onBindingsChange = onBindingsChange;
       this.onError = onError;
       this.device = null;
+      this.closePromise = Promise.resolve();
       this.requestId = 0;
       this.queue = Promise.resolve();
       this.pending = new Map();
@@ -259,6 +260,9 @@
       if (!devices.length && request) devices = await navigator.hid.requestDevice({filters:[{vendorId:VENDOR_ID, productId:PRODUCT_ID, usagePage:USAGE_PAGE, usage:USAGE}]});
       if (!devices.length) return false;
       const device = devices[0];
+      // Finish the previous close and sync before reusing the same HIDDevice.
+      await this.closePromise;
+      await this.syncPromise?.catch(() => undefined);
       try {
         if (!device.opened) await device.open();
         if (!this.collection(device)) throw Error('键盘缺少兼容的 Vendor HID 接口');
@@ -287,14 +291,17 @@
     }
 
     async disconnect() {
+      if (!this.device) return this.closePromise;
       const device = this.device; this.device = null;
-      device?.removeEventListener('inputreport', this.handleInputReport);
+      device.removeEventListener('inputreport', this.handleInputReport);
       // Detach and notify before awaiting the OS: close() can fail or stall.
       for (const waiter of this.pending.values()) { clearTimeout(waiter.timer); waiter.reject(Error('键盘已断开')); }
       this.pending.clear(); this.assembler.reset(); this.sentLights.clear();
       this.syncRequested = false; this.forceSync = false;
+      const closing = device.opened ? device.close() : Promise.resolve();
+      this.closePromise = closing.catch(() => undefined);
       this.onStateChange?.({connected:false, name:''});
-      if (device?.opened) await device.close();
+      return closing;
     }
 
     handleDisconnect(event) { if (event.device === this.device) this.disconnect().catch(error => this.fail(error)); }

@@ -5,7 +5,7 @@ import type { WorkspaceStore } from './workspaces.js';
 import { createSdkBackend } from './sdk-backend.js';
 export type AgentState={status:'unloaded'|'starting'|'idle'|'streaming'|'waiting_for_user'|'error'|'stopping'|'stopped',agentId:string,sessionId:string,sessionFile?:string,sessionName?:string,cwd:string};
 export type AgentEvent={type:string,[key:string]:unknown};
-export type AgentActivity={bashIds:string[],dialogIds:string[]};
+export type AgentActivity={bashIds:string[],dialogIds:string[],dialogRequests:AgentEvent[]};
 export type AgentSnapshotState=AgentState&{activity:AgentActivity};
 export type SlashCommandSummary={name:string,description?:string,argumentHint?:string,source:'prompt'|'skill'};
 export type BashRunResult={id:string,output:string,exitCode:number|undefined,cancelled:boolean,truncated:boolean};
@@ -32,7 +32,7 @@ export class MockBackend implements AgentBackend {
 export type AgentProfile='default'|'collab';
 export type AgentRecord=AgentState&{workspaceId:string,profile:AgentProfile,createdAt:string,lastActiveAt:string};
 type StoredEvent={id:string,sequence:number,timestamp:number,event:AgentEvent};
-type AgentEntry={record:AgentRecord,backend?:AgentBackend,loading?:Promise<AgentBackend>,events:StoredEvent[],nextSequence:number,bashIds:Set<string>,dialogIds:Set<string>};
+type AgentEntry={record:AgentRecord,backend?:AgentBackend,loading?:Promise<AgentBackend>,events:StoredEvent[],nextSequence:number,bashIds:Set<string>,dialogRequests:Map<string,AgentEvent>};
 export class AgentManager {
  private agents=new Map<string,AgentEntry>(); private listeners=new Map<string,Set<(e:StoredEvent)=>void>>(); private globalListeners=new Set<(agentId:string,e:StoredEvent)=>void>();
  constructor(private workspaces:WorkspaceStore,private factory:(id:string,cwd:string,sessionFile?:string,profile?:AgentProfile)=>AgentBackend|Promise<AgentBackend>=createSdkBackend){}
@@ -48,15 +48,15 @@ export class AgentManager {
    if(type==='agent_start'||type==='auto_retry_start')record.status='streaming';
    else if(type==='agent_end')record.status=event.willRetry===true?'streaming':'idle';
    else if(type==='agent_settled')record.status='idle';
-   // Standalone shell runs and dialogs outlive LLM turns. Track their IDs with
-   // the event cursor, not in the persisted AgentRecord or a second SDK cache.
+   // Standalone shell runs and dialogs outlive LLM turns. Track them with the
+   // event cursor; keep dialog payloads so reconnecting clients can rebuild controls.
    if(typeof event.id==='string'){
     if(type==='bash_execution_start'||type==='bash_execution_update')entry.bashIds.add(event.id);
     else if(type==='bash_execution_end')entry.bashIds.delete(event.id);
    }
    if(typeof event.requestId==='string'){
-    if(type==='extension_ui_request')entry.dialogIds.add(event.requestId);
-    else if(type==='extension_ui_response')entry.dialogIds.delete(event.requestId);
+    if(type==='extension_ui_request')entry.dialogRequests.set(event.requestId,event);
+    else if(type==='extension_ui_response')entry.dialogRequests.delete(event.requestId);
    }
    if(type==='session_info_changed')record.sessionName=typeof event.name==='string'&&event.name.trim()?event.name.trim():undefined;
    record.lastActiveAt=new Date().toISOString();
@@ -66,8 +66,8 @@ export class AgentManager {
    for(const listener of this.globalListeners)listener(record.agentId,item);
   });
  }
- private attach(id:string,record:AgentRecord,backend:AgentBackend){const entry:AgentEntry={record,backend,events:[],nextSequence:1,bashIds:new Set(),dialogIds:new Set()};this.connect(entry,backend);this.agents.set(id,entry)}
- async restore(records:AgentRecord[]){for(const saved of records){try{const ws=this.workspaces.get(saved.workspaceId);if(!ws)continue;const cwd=await this.workspaces.resolve(ws,pathRelative(ws.rootPath,saved.cwd));const sessionModified=saved.sessionFile?await import('node:fs/promises').then(fs=>fs.stat(saved.sessionFile!).then(value=>value.mtime.toISOString()).catch(()=>undefined)):undefined;const record={...saved,profile:saved.profile??'default',cwd,status:'unloaded' as const,lastActiveAt:sessionModified&&sessionModified>saved.lastActiveAt?sessionModified:saved.lastActiveAt};this.agents.set(saved.agentId,{record,events:[],nextSequence:1,bashIds:new Set(),dialogIds:new Set()})}catch{/* Keep server startup resilient to deleted workspaces. */}}}
+ private attach(id:string,record:AgentRecord,backend:AgentBackend){const entry:AgentEntry={record,backend,events:[],nextSequence:1,bashIds:new Set(),dialogRequests:new Map()};this.connect(entry,backend);this.agents.set(id,entry)}
+ async restore(records:AgentRecord[]){for(const saved of records){try{const ws=this.workspaces.get(saved.workspaceId);if(!ws)continue;const cwd=await this.workspaces.resolve(ws,pathRelative(ws.rootPath,saved.cwd));const sessionModified=saved.sessionFile?await import('node:fs/promises').then(fs=>fs.stat(saved.sessionFile!).then(value=>value.mtime.toISOString()).catch(()=>undefined)):undefined;const record={...saved,profile:saved.profile??'default',cwd,status:'unloaded' as const,lastActiveAt:sessionModified&&sessionModified>saved.lastActiveAt?sessionModified:saved.lastActiveAt};this.agents.set(saved.agentId,{record,events:[],nextSequence:1,bashIds:new Set(),dialogRequests:new Map()})}catch{/* Keep server startup resilient to deleted workspaces. */}}}
  get(id:string){const x=this.agents.get(id);if(!x)throw Object.assign(new Error('Agent not found'),{code:'AGENT_NOT_FOUND'});return x}
  list(){return [...this.agents.values()].map(x=>({...x.record}))}
  isLoaded(id:string){return !!this.get(id).backend}
@@ -77,7 +77,7 @@ export class AgentManager {
  currentSequence(id:string){return this.get(id).nextSequence-1}
  snapshotState(id:string):AgentSnapshotState{
   const a=this.get(id);
-  return {...a.record,activity:{bashIds:[...a.bashIds],dialogIds:[...a.dialogIds]}};
+  return {...a.record,activity:{bashIds:[...a.bashIds],dialogIds:[...a.dialogRequests.keys()],dialogRequests:[...a.dialogRequests.values()]}};
  }
  async snapshot(id:string,messageLimit?:number){
   // Capture state and its cursor before yielding. Events emitted while messages
@@ -94,7 +94,7 @@ export class AgentManager {
  async dispose(id:string){
   const a=this.get(id);if(a.loading)await a.loading.catch(()=>{});
   await a.backend?.dispose();a.backend=undefined;a.record.status='unloaded';
-  a.bashIds.clear();a.dialogIds.clear();
+  a.bashIds.clear();a.dialogRequests.clear();
  }
  async remove(id:string){await this.dispose(id);this.agents.delete(id);this.listeners.delete(id)}
  async archive(id:string){const current=this.get(id).record;if(['starting','streaming','waiting_for_user','stopping'].includes(current.status))throw Object.assign(new Error('Active Agent cannot be archived'),{code:'AGENT_ACTIVE'});const record={...current,status:'unloaded' as const};await this.remove(id);return record}

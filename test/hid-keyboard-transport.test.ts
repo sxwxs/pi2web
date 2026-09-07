@@ -211,6 +211,41 @@ describe('WebHID connection lifecycle', () => {
     await stopped;
     device.reply(request.id); // A late reply must not reach the detached controller.
     expect(vi.getTimerCount()).toBe(0);
+    device.autoReply = true;
+    await connectKeyboard(keyboard); // A rejected close must not poison later connections.
+  });
+
+  it('waits for both close and the previous light sync before reopening the same device', async () => {
+    const {keyboard, device, onStateChange} = setup();
+    await connectKeyboard(keyboard);
+    keyboard.handleAgentEvent(agent.agentId, {type:'tool_execution_start', toolCallId:'tool'});
+    await vi.advanceTimersByTimeAsync(0); // The reply arrived, but its cooldown is still running.
+    const sent = device.sendReport.mock.calls.length;
+    let finishClose!:() => void;
+    device.close.mockImplementationOnce(() => new Promise<void>(resolve => {
+      finishClose = () => { device.opened = false; resolve(); };
+    }));
+    const closing = keyboard.disconnect(), closingAgain = keyboard.disconnect();
+    const reconnected = expect(keyboard.connect()).resolves.toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onStateChange).toHaveBeenLastCalledWith({connected:false, name:''});
+    expect(device.listener).toBeUndefined();
+    expect(device.open).toHaveBeenCalledOnce();
+    expect(device.sendReport).toHaveBeenCalledTimes(sent);
+
+    finishClose();
+    await Promise.all([closing, closingAgain]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(device.open).toHaveBeenCalledOnce(); // Do not reuse the old sync worker either.
+    await vi.runAllTimersAsync();
+    await reconnected;
+    expect(device.close).toHaveBeenCalledOnce();
+    expect(device.open).toHaveBeenCalledTimes(2);
+    expect(keyboard.connected).toBe(true);
+    expect(keyboard.pending.size).toBe(0);
+    expect(keyboard.sentLights.size).toBe(6);
+    expect(device.requests.slice(-6).map(request => request.p[0].id)).toEqual([0,1,2,3,4,5]);
+    expect(onStateChange).toHaveBeenLastCalledWith({connected:true, name:'Codex Micro'});
   });
 
   it('rolls back when firmware returns an RPC error', async () => {
