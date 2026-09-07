@@ -527,6 +527,8 @@
   }
   function discardStreams() { for(const card of state.streams.values())if(card.renderFrame!==null&&card.renderFrame!==undefined)cancelAnimationFrame(card.renderFrame);state.streams.clear();state.toolCards.clear(); }
   function extensionRequest(agentId, ev, timestamp) {
+    if ($(`extension-request-${ev.requestId}`)) return;
+    $('messages').querySelector('.empty')?.remove();
     const card = addCard(ev.title || `Extension ${ev.kind}`, ev.message || ev.placeholder || ev.prefill || '', 'dialog', true, timestamp);
     const controls = document.createElement('div'); controls.className = 'dialog-actions'; controls.id = `extension-request-${ev.requestId}`;
     const send = async value => { try { await post(`/api/v1/agents/${agentId}/extension-response`, {requestId:ev.requestId, value}); controls.replaceChildren(document.createTextNode('已响应')); } catch (e) { toast(e.message); } };
@@ -534,6 +536,14 @@
     else if (ev.kind === 'confirm') { for (const [label, value] of [['否',false],['是',true]]) { const b=document.createElement('button');b.textContent=label;b.onclick=()=>send(value);controls.append(b); } }
     else { const input = ev.kind === 'editor' ? document.createElement('textarea') : document.createElement('input'); input.value = ev.prefill || ''; input.placeholder = ev.placeholder || ''; const b = document.createElement('button'); b.textContent = '提交'; b.onclick = () => send(input.value); controls.append(input,b); }
     card.body.append(controls);
+  }
+  function restoreExtensionRequests(agentId, activity) {
+    if (state.selectedKind !== 'agent' || state.agent?.agentId !== agentId || !activity?.dialogRequests) return;
+    const requests = activity.dialogRequests, ids = new Set(requests.map(request => `extension-request-${request.requestId}`));
+    for (const controls of $('messages').querySelectorAll('.dialog-actions')) {
+      if (!ids.has(controls.id)) controls.replaceChildren(document.createTextNode('已结束'));
+    }
+    for (const request of requests) extensionRequest(agentId, request);
   }
   function stopVoiceAudio() {
     state.voiceAudio.generation++;for(const source of state.voiceAudio.sources){try{source.stop();}catch{}}state.voiceAudio.sources.clear();state.voiceAudio.nextTime=0;state.voiceAudio.playbackId=null;
@@ -594,6 +604,7 @@
       // replacing standalone operation IDs, without touching the transcript.
       sessionKeyboard.updateAgent(message.state);
       setAgentStatus(message.agentId, message.state.status);
+      restoreExtensionRequests(message.agentId, message.state.activity);
       return;
     }
     if (message.type === 'agent_snapshot') {
@@ -607,6 +618,7 @@
         state.messagePageStart = message.messagePage?.start || 0;
         state.messageTotal = message.messagePage?.total ?? message.messages?.length ?? 0;
         updateMessageHistoryControl();
+        restoreExtensionRequests(message.agentId, message.state?.activity);
       }
       return;
     }
