@@ -28,6 +28,19 @@ pi2web --help
 
 配对失败有速率限制：同一来源地址在 60 秒窗口内累计 10 次失败后会被锁定，锁定时间从 60 秒起按次翻倍，最长 15 分钟，HTTP 返回 `429` 与 `Retry-After`，WebSocket 升级同样受限；一次成功配对立即清除该地址的计数。注意限流按 TCP 来源地址统计，通过 devtunnel、Cloudflare Tunnel 或反向代理访问时所有客户端共用同一个计数桶。Remote Pi 不校验 `Origin` / `Host`，因此可以直接配合内网穿透使用。
 
+## 多 Backend 聚合
+
+一个 Web UI 可以同时连接多个 Remote Pi 服务端（例如家里和实验室各一台）：在「配置 → Backend 连接」里点击「添加 Backend」，为每个服务端填一个专属短名称（如 `home` / `lab`）、服务地址和配对码。每个连接使用自己的配对码独立认证，浏览器为它们各自维持实时 WebSocket。
+
+连接多个 backend 时：
+
+- Workspace 与 Session（Agent 和 Terminal）列表默认聚合展示所有 backend 的内容；侧栏顶部的过滤器可以只看某个 backend。
+- 连接多个 backend 时，每个 Session 会显示一个短名称标签，标明它来自哪个 backend；Workspace 名称也会带上前缀。
+- 六键 Session 键盘在一个页面内统一绑定到任意 backend 的 Session；按键绑定和键盘灯光按 `backend + Session` 唯一标识，不会混淆。
+- 新建 Agent / Terminal / 打开文件等操作都会路由到所选 Workspace 所属的 backend。
+
+连接信息（含短名称）保存在浏览器本地存储；是否保存配对码仍由用户在连接成功后逐个确认。选择了保存配对码的 backend 在页面刷新或重新打开后自动重连，不再弹出配对窗；未保存或自动连接失败时才会弹窗重新输入。旧版本保存过的单个连接会自动迁移为名为「本机」的 backend，已有的键盘绑定也会同步迁移。
+
 ## Agent 完成邮件通知（MailDispatch）
 
 如果启动时同时配置 MailDispatch 消息 API endpoint、API key 环境变量和通知邮箱，Pi 发出 `agent_settled`（不会再自动重试、自动 compact 或执行排队的 follow-up）后，Remote Pi 可以提交事务邮件。MailDispatch 返回 `202` 后邮件进入其持久队列；实际投递由 MailDispatch worker 完成。
