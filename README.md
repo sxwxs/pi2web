@@ -21,12 +21,16 @@ npm 包名为 `pi2web`，全局命令同名（`pi2web`）。安装时会准备 `
 pi2web --host 127.0.0.1 --port 11318
 pi2web --data-dir ~/.pi/remote-pi
 pi2web --rotate-access-token   # 旧配对码立即失效，输出新配对码
+pi2web --set-access-token <token>          # 手动设置配对码（16–128 位，不含空白）
+pi2web --set-access-token-env MY_TOKEN_ENV # 从环境变量读取配对码，推荐方式
 pi2web --help
 ```
 
 服务器会同时提供 API、WebSocket 和 Web UI，无需另起静态文件服务器。请勿直接暴露到公网；远程访问建议使用 SSH tunnel、Tailscale、devtunnel 或配置 HTTPS 的可信反向代理。
 
 配对失败有速率限制：同一来源地址在 60 秒窗口内累计 10 次失败后会被锁定，锁定时间从 60 秒起按次翻倍，最长 15 分钟，HTTP 返回 `429` 与 `Retry-After`，WebSocket 升级同样受限；一次成功配对立即清除该地址的计数。注意限流按 TCP 来源地址统计，通过 devtunnel、Cloudflare Tunnel 或反向代理访问时所有客户端共用同一个计数桶。Remote Pi 不校验 `Origin` / `Host`，因此可以直接配合内网穿透使用。
+
+配对码默认随机生成；也可以用 `--set-access-token <token>` 或 `--set-access-token-env <环境变量名>` 手动指定（16–128 位、不含空白），便于在多台机器间使用统一或可预测的配对码。环境变量方式不会把配对码暴露在进程列表中，推荐优先使用。手动设置的配对码同样只保存 sha256 hash，后续可用 `--rotate-access-token` 换回随机码。
 
 ## 多 Backend 聚合
 
