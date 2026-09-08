@@ -4,14 +4,47 @@
   "title": "Remote Pi WebSocket v1",
   "oneOf": [
     {"$ref":"#/$defs/subscribe"}, {"$ref":"#/$defs/command"}, {"$ref":"#/$defs/subscribed"},
-    {"$ref":"#/$defs/commandResult"}, {"$ref":"#/$defs/agentEvent"}, {"$ref":"#/$defs/agentSnapshot"}
+    {"$ref":"#/$defs/commandResult"}, {"$ref":"#/$defs/agentEvent"}, {"$ref":"#/$defs/agentSnapshot"}, {"$ref":"#/$defs/agentStateUpdate"}
   ],
   "$defs": {
-    "subscribe": {"type":"object","additionalProperties":false,"required":["type","agentId"],"properties":{"type":{"const":"subscribe"},"agentId":{"type":"string"},"lastSequence":{"type":"integer","minimum":0},"fromNow":{"type":"boolean"}}},
+    "subscribe": {"type":"object","additionalProperties":false,"required":["type","agentId"],"properties":{"type":{"const":"subscribe"},"agentId":{"type":"string"},"lastSequence":{"type":"integer","minimum":0},"fromNow":{"type":"boolean"},"messageLimit":{"type":"integer","minimum":1,"maximum":200}}},
     "command": {"type":"object","additionalProperties":false,"required":["type","requestId","agentId"],"properties":{"type":{"enum":["prompt","steer","follow-up","abort"]},"requestId":{"type":"string"},"agentId":{"type":"string"},"message":{"type":"string","maxLength":2097152}}},
     "subscribed": {"type":"object","required":["type","agentId","protocolVersion"],"properties":{"type":{"const":"subscribed"},"agentId":{"type":"string"},"protocolVersion":{"const":1},"currentSequence":{"type":"integer","minimum":0}}},
     "commandResult": {"type":"object","required":["type","success"],"properties":{"type":{"const":"command_result"},"requestId":{"type":"string"},"success":{"type":"boolean"},"error":{"type":"object"}}},
     "agentEvent": {"type":"object","required":["type","agentId","eventId","sequence","event"],"properties":{"type":{"const":"agent_event"},"agentId":{"type":"string"},"eventId":{"type":"string"},"sequence":{"type":"integer","minimum":1},"timestamp":{"type":"integer","minimum":0},"event":{"type":"object","required":["type"]}}},
-    "agentSnapshot": {"type":"object","required":["type","agentId","lastSequence","state","messages"],"properties":{"type":{"const":"agent_snapshot"},"agentId":{"type":"string"},"lastSequence":{"type":"integer","minimum":0},"state":{"type":"object"},"messages":{"type":"array"}}}
+    "agentSnapshot": {"type":"object","required":["type","agentId","lastSequence","state","messages"],"properties":{"type":{"const":"agent_snapshot"},"agentId":{"type":"string"},"lastSequence":{"type":"integer","minimum":0},"state":{"$ref":"#/$defs/agentState"},"messages":{"type":"array"}}},
+    "agentStateUpdate": {"type":"object","required":["type","agentId","sequence","state"],"description":"Current state after initial replay/snapshot and before live events, also sent for fromNow or empty replay. Does not replace transcript messages.","properties":{"type":{"const":"agent_state"},"agentId":{"type":"string"},"sequence":{"type":"integer","minimum":0},"state":{"$ref":"#/$defs/agentState"}}},
+    "agentState": {
+      "type":"object","required":["status","agentId","sessionId","cwd"],
+      "properties":{
+        "status":{"enum":["unloaded","starting","idle","streaming","waiting_for_user","error","stopping","stopped"]},
+        "agentId":{"type":"string"},
+        "sessionId":{"type":"string"},
+        "sessionFile":{"type":"string"},
+        "sessionName":{"type":"string"},
+        "cwd":{"type":"string"},
+        "activity":{
+          "type":"object","required":["bashIds","dialogIds"],
+          "description":"Runtime operations independent of LLM status. Omitted by older servers; never persisted.",
+          "properties":{
+            "bashIds":{"type":"array","uniqueItems":true,"items":{"type":"string"}},
+            "dialogIds":{"type":"array","uniqueItems":true,"items":{"type":"string"}},
+            "dialogRequests":{
+              "type":"array","description":"Pending request payloads for rebuilding dialog controls, without submitted answers. Omitted by older servers.",
+              "items":{
+                "type":"object","required":["type","requestId","kind"],
+                "properties":{
+                  "type":{"const":"extension_ui_request"},"requestId":{"type":"string"},
+                  "kind":{"enum":["select","confirm","input","editor"]},
+                  "title":{"type":"string"},"message":{"type":"string"},
+                  "options":{"type":"array","items":{"type":"string"}},
+                  "placeholder":{"type":"string"},"prefill":{"type":"string"},"opts":{"type":"object"}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

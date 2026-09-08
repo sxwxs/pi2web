@@ -14,6 +14,8 @@ describe('slash commands and session bash',()=>{
   const events:AgentEvent[]=[];agents.subscribe(agent.agentId,stored=>events.push(stored.event));
   const result=(await (await post(`/api/v1/agents/${agent.agentId}/bash`,{command:'echo hi'})).json()).data;
   expect(result).toMatchObject({output:'Mock bash: echo hi',exitCode:0,cancelled:false});
+  expect(events.map(event=>event.type)).toEqual(['bash_execution_start','bash_execution_update','bash_execution_end']);
+  expect(events[0]).toMatchObject({id:result.id,command:'echo hi'});
   expect(events.some(event=>event.type==='bash_execution_update'&&event.id===result.id)).toBe(true);
   expect(events.some(event=>event.type==='bash_execution_end'&&event.id===result.id)).toBe(true);
   // Both ! and !! are recorded; !! only excludes the message from model context.
