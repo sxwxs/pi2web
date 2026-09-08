@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import path from 'node:path';
+import {homedir} from 'node:os';
 import {RemotePiServer} from './server.js';
 import {VoiceManager,type VoiceConfig} from './voice.js';
 import {SessionNamer,DEFAULT_SESSION_NAMER} from './session-namer.js';
@@ -51,7 +53,7 @@ if(mailParts===3){
   if(!['http:','https:'].includes(endpoint.protocol)){console.error('--maildispatch-endpoint must use http or https');process.exit(1)}
   mailNotifier=new MailNotifier({endpoint:endpoint.toString(),apiKey:envSecret('--maildispatch-api-key-env')!,recipient:mailRecipient,senderId:value('--maildispatch-sender-id','').trim()||undefined});
 }
-const server=new RemotePiServer({host,port,dataDir:value('--data-dir',process.env.PI_REMOTE_DIR??`${process.env.HOME??'.'}/.pi/remote-pi`),voice,sessionNamer,mailNotifier});
+const server=new RemotePiServer({host,port,dataDir:value('--data-dir',process.env.PI_REMOTE_DIR??path.join(homedir(),'.pi','remote-pi')),voice,sessionNamer,mailNotifier});
 if(args.includes('--rotate-access-token')){await server.auth.init();console.log(await server.auth.rotate());process.exit(0)}
 if(args.includes('--set-access-token')||args.includes('--set-access-token-env')){
   const fromEnv=args.includes('--set-access-token-env'),flag=fromEnv?'--set-access-token-env':'--set-access-token';
