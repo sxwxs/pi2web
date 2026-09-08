@@ -185,6 +185,24 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 配对码默认仅保存在当前页面的 JS 内存中；连接成功后会询问是否保存，只有用户确认才写入 localStorage。服务地址、当前 Workspace/Agent 和事件 sequence cursor 会保存在 localStorage。浏览器通知要求 HTTPS 安全上下文（`localhost` 可使用 HTTP）；通过局域网 IP 的 HTTP 地址访问时无法启用。自定义 Pi TUI Component 无法在浏览器通用渲染。
 
+### 六键 Session 键盘（WebHID）
+
+在 Chrome/Edge 中通过 HTTPS 或 localhost 打开 Web UI，在“配置 → 六键 Session 键盘”连接设备。每个槽位可以绑定已有 Session、换色或解绑；即使 Session 已不可用，也能在这里清理绑定。绑定保存在当前浏览器，按键切换 Session，灯光显示活动状态。
+
+目标固件是 **Nozzala CH552G 六键板 `v1-codex-full 1.0.0`**，Build ID `51AE6B3BF94B49FF`。协议参考为 **Nozzala CodexFull WebHID Console v0.1.0（2026-08-31）** 的 `DEVELOPMENT.md` 和 `protocol.js`：
+
+- Vendor HID：VID/PID `303A:8360`、Usage Page `0xFF00`、Usage `1`、Report ID `6`、Channel `2`。
+- 主机发送 `{id, m, p}`，不追加换行；WebHID report body 为 63 bytes，其中最多 61 bytes 是 JSON 分片。
+- `v.oai.thstatus` 带请求 ID（0～998），串行等待同 ID 的 **LF 终止回复**，回复后间隔约 50ms 再发送下一条；按键通知也以 LF 终止。
+
+这些约定针对上述 Nozzala 固件，不是所有相同 VID/PID 设备的通用规范。连接前请退出其他控制该键盘的 ChatGPT/Codex App，避免设备占用或灯光互相覆盖。
+
+灯效恢复使用服务器活动快照：`state.activity.bashIds` 表示在途的独立 Shell，`state.activity.dialogIds` 表示待回答的扩展对话框。这些 ID 只保存在服务进程内存中，不写入数据库或 Pi Session；LLM 的 `idle` 不代表它们已结束。回放缺口通过 `agent_snapshot.state` 恢复，随后按序补发快照构建期间的事件。每次订阅在回放完成后、实时事件开始前发送 `agent_state` 当前状态；首次 `fromNow` 订阅或已有游标但无新事件时也会发送，因此刷新页面无需等下一段 Shell 输出才能恢复灯效。旧服务端未提供 `activity` 时仍按普通 Agent 状态降级显示。不支持 WebHID 或安全上下文的浏览器会静默跳过自动连接，配置页保留原因说明。
+
+活动快照中的 `state.activity.dialogRequests` 还包含待回答对话框的原始请求（不含用户答案），刷新或回放缺口后可恢复回答控件。服务端复用同一份内存请求记录，前端按 request ID 避免重复创建对话框；已结束的请求不会再出现在快照中。
+
+卸载 Agent 会通过同一条可回放事件流发送 `agent_unloaded`；在线客户端据此设为 `unloaded`、清除活动灯效并关闭待回答控件，无需重连。
+
 ## 多 Agent 协作中枢（Collab Hub）
 
 在"人 ↔ 单个 Agent"之上叠加一层协作中枢：多个 Agent 只通过结构化 HTTP API 交互，中枢负责身份、状态机推进、盲评、去重、僵局告警和人工升级。设计文档见 [`COLLAB_PLAN.md`](COLLAB_PLAN.md)。

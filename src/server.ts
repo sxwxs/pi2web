@@ -6,7 +6,7 @@ type LoginFailure={count:number,expiresAt:number,lockedUntil:number,lockLevel:nu
 const json=(res:http.ServerResponse,status:number,data:unknown)=>{res.statusCode=status;res.setHeader('content-type','application/json');res.end(JSON.stringify(data))};
 const webRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../web'),require=createRequire(import.meta.url);
 const markedBrowser=path.join(path.dirname(require.resolve('marked/package.json')),'lib','marked.umd.js');
-const webFiles:Record<string,{file:string,type:string}>= {'/':{file:'index.html',type:'text/html; charset=utf-8'},'/index.html':{file:'index.html',type:'text/html; charset=utf-8'},'/app.js':{file:'app.js',type:'text/javascript; charset=utf-8'},'/collab':{file:'collab.html',type:'text/html; charset=utf-8'},'/collab.html':{file:'collab.html',type:'text/html; charset=utf-8'},'/collab.js':{file:'collab.js',type:'text/javascript; charset=utf-8'},'/styles.css':{file:'styles.css',type:'text/css; charset=utf-8'},'/icon.svg':{file:'icon.svg',type:'image/svg+xml'},'/favicon.ico':{file:'icon.svg',type:'image/svg+xml'},'/vendor/xterm.js':{file:require.resolve('@xterm/xterm'),type:'text/javascript; charset=utf-8'},'/vendor/xterm.css':{file:require.resolve('@xterm/xterm/css/xterm.css'),type:'text/css; charset=utf-8'},'/vendor/addon-fit.js':{file:require.resolve('@xterm/addon-fit'),type:'text/javascript; charset=utf-8'},'/vendor/marked.js':{file:markedBrowser,type:'text/javascript; charset=utf-8'},'/vendor/dompurify.js':{file:require.resolve('dompurify/purify.min.js'),type:'text/javascript; charset=utf-8'}};
+const webFiles:Record<string,{file:string,type:string}>= {'/':{file:'index.html',type:'text/html; charset=utf-8'},'/index.html':{file:'index.html',type:'text/html; charset=utf-8'},'/app.js':{file:'app.js',type:'text/javascript; charset=utf-8'},'/hid-keyboard.js':{file:'hid-keyboard.js',type:'text/javascript; charset=utf-8'},'/collab':{file:'collab.html',type:'text/html; charset=utf-8'},'/collab.html':{file:'collab.html',type:'text/html; charset=utf-8'},'/collab.js':{file:'collab.js',type:'text/javascript; charset=utf-8'},'/styles.css':{file:'styles.css',type:'text/css; charset=utf-8'},'/icon.svg':{file:'icon.svg',type:'image/svg+xml'},'/favicon.ico':{file:'icon.svg',type:'image/svg+xml'},'/vendor/xterm.js':{file:require.resolve('@xterm/xterm'),type:'text/javascript; charset=utf-8'},'/vendor/xterm.css':{file:require.resolve('@xterm/xterm/css/xterm.css'),type:'text/css; charset=utf-8'},'/vendor/addon-fit.js':{file:require.resolve('@xterm/addon-fit'),type:'text/javascript; charset=utf-8'},'/vendor/marked.js':{file:markedBrowser,type:'text/javascript; charset=utf-8'},'/vendor/dompurify.js':{file:require.resolve('dompurify/purify.min.js'),type:'text/javascript; charset=utf-8'}};
 export class RemotePiServer {
  server:http.Server;wss:WebSocketServer;auth:AuthStore;workspaces:WorkspaceStore;agents:AgentManager;terminals:TerminalManager;metadata:MetadataStore;collab!:CollabHub;private collabRouter!:CollabRouter;private collabDispatcher!:CollabDispatcher;private unsubscribeCollab?:()=>void;private collabStallTimer?:ReturnType<typeof setInterval>;private collabMailAt=new Map<string,number>();private readonly collabMailCooldownMs=5*60_000;private opts:Required<Pick<ServerOptions,'host'|'port'>>;private dataDir:string;private clients=new Set<WebSocket>();private unsubscribeMetadata?:()=>void;private sessionIndexTimes=new Map<string,number>();private sessionIndexJobs=new Map<string,Promise<void>>();private agentIndexJobs=new Map<string,Promise<void>>();private voice?:VoiceManager;private sessionNamer?:SessionNamer;private mailNotifier?:MailNotifier;private loginFailures=new Map<string,LoginFailure>();private readonly loginWindowMs=60_000;private readonly loginMaxFailures=10;private readonly loginLockMs=60_000;private readonly loginMaxLockMs=15*60_000;
  constructor(options:ServerOptions={}){this.opts={host:options.host??'127.0.0.1',port:options.port??11318};this.dataDir=options.dataDir??path.join(process.env.HOME??'.','.pi','remote-pi');this.auth=new AuthStore(this.dataDir);this.metadata=new MetadataStore(this.dataDir);this.workspaces=options.workspaces??new WorkspaceStore();this.voice=options.voice;this.sessionNamer=options.sessionNamer;this.mailNotifier=options.mailNotifier;this.collab=new CollabHub(new CollabStore(()=>this.metadata.connection),{agentStatus:agentId=>this.agentStatus(agentId)});this.agents=options.agents??new AgentManager(this.workspaces,(agentId,cwd,sessionFile,profile)=>createSdkBackend(agentId,cwd,sessionFile,profile,profile==='collab'?this.collabToolBridge():undefined));this.terminals=options.terminals??new TerminalManager(this.workspaces);this.collabRouter=new CollabRouter(this.collab,{resolveCwd:(workspaceId,relativeCwd)=>this.resolveWorkspaceCwd(workspaceId,relativeCwd),verifyHuman:token=>this.auth.verify(token),isCollabAgent:agentId=>this.isCollabAgent(agentId)});this.collabDispatcher=new CollabDispatcher(this.collab,{command:(agentId,kind,message)=>this.agents.command(agentId,kind,message),agentStatus:agentId=>this.agentStatus(agentId),isCollabAgent:agentId=>this.isCollabAgent(agentId),log:message=>console.error(message)});this.server=http.createServer((req,res)=>void this.handle(req,res));this.wss=new WebSocketServer({noServer:true,maxPayload:2*1024*1024});this.server.on('upgrade',(req,socket,head)=>void this.upgrade(req,socket,head));this.wss.on('connection',(ws,req)=>{const match=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`).pathname.match(/^\/api\/v1\/terminals\/([^/]+)\/ws$/);match?this.terminalConnection(ws,decodeURIComponent(match[1])):this.connection(ws,req)})}
@@ -113,9 +113,42 @@ export class RemotePiServer {
      subscriptions.set('*',this.agents.subscribeAll(forward));send({type:'subscribed_all',protocolVersion:1});return;
     }
     if(m.type==='subscribe'){
-     subscriptions.get(m.agentId)?.();const forward=(e:any)=>send({type:'agent_event',agentId:m.agentId,eventId:e.id,sequence:e.sequence,timestamp:e.timestamp,event:e.event});
-     subscriptions.set(m.agentId,this.agents.subscribe(m.agentId,forward));send({type:'subscribed',agentId:m.agentId,protocolVersion:1,currentSequence:this.agents.currentSequence(m.agentId)});if(m.fromNow===true)return;
-     const last=Number(m.lastSequence??0),replay=this.agents.events(m.agentId,last);if(this.agents.hasReplayGap(m.agentId,last)||replay.length>250){const messageLimit=m.messageLimit===undefined?undefined:Number(m.messageLimit);send({type:'agent_snapshot',agentId:m.agentId,...await this.agents.snapshot(m.agentId,Number.isFinite(messageLimit)?messageLimit:undefined)})}else for(const e of replay)forward(e);return;
+     const agentId=m.agentId,fromNow=m.fromNow===true;
+     subscriptions.get(agentId)?.();
+     const forward=(e:any)=>send({type:'agent_event',agentId,eventId:e.id,sequence:e.sequence,timestamp:e.timestamp,event:e.event});
+     let ready=false,active=true;
+     const unsubscribe=this.agents.subscribe(agentId,e=>{if(ready)forward(e)});
+     const stop=()=>{active=false;ready=false;unsubscribe()};
+     subscriptions.set(agentId,stop);
+     try{
+      send({type:'subscribed',agentId,protocolVersion:1,currentSequence:this.agents.currentSequence(agentId)});
+      if(!fromNow){
+       const last=Number(m.lastSequence??0),replay=this.agents.events(agentId,last);
+       if(this.agents.hasReplayGap(agentId,last)||replay.length>250){
+        const messageLimit=m.messageLimit===undefined?undefined:Number(m.messageLimit);
+        const snapshot=await this.agents.snapshot(agentId,Number.isFinite(messageLimit)?messageLimit:undefined);
+        if(!active)return; // Closed or replaced by a newer subscription while awaiting messages.
+        // Do not forward live events ahead of the snapshot. Catch up from the
+        // existing bounded replay cache instead of maintaining another buffer.
+        const updates=this.agents.events(agentId,snapshot.lastSequence);
+        if(this.agents.hasReplayGap(agentId,snapshot.lastSequence)||(updates.length&&updates[0].sequence!==snapshot.lastSequence+1)){
+         stop();ws.close(1013,'Replay gap during snapshot');return;
+        }
+        send({type:'agent_snapshot',agentId,...snapshot});
+        for(const event of updates)forward(event);
+       }else for(const event of replay)forward(event);
+      }
+      // Refresh/reconnect may already have a saved cursor but no in-memory
+      // activity. Send the current IDs after replay, even if replay was empty.
+      send({type:'agent_state',agentId,sequence:this.agents.currentSequence(agentId),state:this.agents.snapshotState(agentId)});
+      ready=true;
+     }catch(error){
+      if(!active)return;
+      stop();
+      if(subscriptions.get(agentId)===stop)subscriptions.delete(agentId);
+      throw error;
+     }
+     return;
     }
     if(['prompt','steer','follow-up','abort'].includes(m.type)){if(m.type!=='abort'){this.voice?.recordUserPrompt(m.agentId,String(m.message??''));this.sessionNamer?.recordUserPrompt(m.agentId,String(m.message??''))}await this.agents.command(m.agentId,m.type,m.message);send({type:'command_result',requestId:m.requestId,success:true});return}
     throw new Error('Unknown command');
