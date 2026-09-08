@@ -3,9 +3,12 @@
   const $ = id => document.getElementById(id);
   const CONNECTIONS_KEY = 'rpConnections';
   const loadStoredConnections = () => {
+    const stored = localStorage.getItem(CONNECTIONS_KEY);
     try {
-      const parsed = JSON.parse(localStorage[CONNECTIONS_KEY] || '[]');
-      if (Array.isArray(parsed)) return parsed.filter(item => item && typeof item.base === 'string' && typeof item.id === 'string').map(item => ({id:item.id, name:String(item.name||''), base:item.base, token:String(item.token||''), saved:Boolean(item.token)}));
+      if (stored !== null) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) return parsed.filter(item => item && typeof item.base === 'string' && typeof item.id === 'string').map(item => ({id:item.id, name:String(item.name||''), base:item.base, token:String(item.token||''), saved:Boolean(item.token)}));
+      }
     } catch {}
     // Single-backend clients stored one base/token pair; upgrade them in place,
     // including keyboard bindings that were keyed by the bare agentId.
@@ -19,7 +22,7 @@
     return [];
   };
   const state = {
-    backends: loadStoredConnections().map(entry => ({...entry, status:'off', error:'', ws:null, reconnectTimer:null, reconnectAttempt:0, manuallyClosed:false, reconnecting:false, agents:[], terminals:[], workspaces:[], serverInfo:'', voiceEnabled:false, voiceSttEnabled:false})),
+    backends: loadStoredConnections().map(entry => ({...entry, status:'off', error:'', ws:null, reconnectTimer:null, reconnectAttempt:0, manuallyClosed:false, reconnecting:false, authRequired:true, agents:[], terminals:[], workspaces:[], serverInfo:'', voiceEnabled:false, voiceSttEnabled:false})),
     backendFilter: localStorage.rpBackendFilter || '', workspace: null, workspaces: [], treePath: '.',
     filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], terminals: [], terminal: null, selectedKind: 'agent', ws: null, terminalWs: null,
     terminalEmulator: null, terminalAssetsPromise: null, terminalConnectAttempt: 0, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
@@ -65,8 +68,7 @@
   const mobileBack = fallback => { if (isMobile() && history.state?.rpView === state.mobileView && state.mobileView !== 'home') history.back(); else setMobileView(fallback, {replace:true}); };
 
   async function request(base, token, url, options = {}, disconnectOnUnauthorized = false) {
-    if (!token) throw Error('请先输入配对码');
-    const headers = {Authorization: `Bearer ${token}`, ...(options.body ? {'Content-Type':'application/json'} : {}), ...options.headers};
+    const headers = {...(token ? {Authorization: `Bearer ${token}`} : {}), ...(options.body ? {'Content-Type':'application/json'} : {}), ...options.headers};
     const response = await fetch(base + url, {...options, headers});
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -131,17 +133,19 @@
   }
   async function connectBackend(entry, {confirmSave = true} = {}) {
     const candidateBase = String(entry.base || '').trim().replace(/\/$/, '') || location.origin, candidateToken = String(entry.token || '').trim();
-    if (!candidateToken) { openPair(entry); throw Error('请先输入配对码'); }
+    let authRequired = true;
+    try { authRequired = (await request(candidateBase, '', '/health')).authRequired !== false; } catch { /* Server may be down; the status call below reports that normally. */ }
+    if (!candidateToken && authRequired) { openPair(entry); throw Error('请先输入配对码'); }
     const status = await request(candidateBase, candidateToken, '/api/v1/system/status');
     if (status.protocolVersion !== 1) throw Error(`不支持的协议版本 ${status.protocolVersion}（需要 1）`);
     let backend = backendOf(entry.id);
     if (!backend) {
-      backend = {id: entry.id || `bk-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name:'', base:'', token:'', saved:false, status:'off', error:'', ws:null, reconnectTimer:null, reconnectAttempt:0, manuallyClosed:false, reconnecting:false, agents:[], terminals:[], workspaces:[], serverInfo:'', voiceEnabled:false, voiceSttEnabled:false};
+      backend = {id: entry.id || `bk-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name:'', base:'', token:'', saved:false, status:'off', error:'', ws:null, reconnectTimer:null, reconnectAttempt:0, manuallyClosed:false, reconnecting:false, authRequired:true, agents:[], terminals:[], workspaces:[], serverInfo:'', voiceEnabled:false, voiceSttEnabled:false};
       state.backends.push(backend);
     }
     closeBackendSocket(backend);
-    Object.assign(backend, {name: String(entry.name || '').trim() || candidateBase, base: candidateBase, token: candidateToken, status: 'connected', error: '', serverInfo: `v${status.version} · Pi ${status.piVersion}`, reconnectAttempt: 0, voiceEnabled: !!(status.voiceCapabilities?.tts ?? status.voiceEnabled), voiceSttEnabled: !!(status.voiceCapabilities?.stt ?? status.voiceEnabled)});
-    if (confirmSave && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) backend.saved = true;
+    Object.assign(backend, {name: String(entry.name || '').trim() || candidateBase, base: candidateBase, token: candidateToken, status: 'connected', error: '', serverInfo: `v${status.version} · Pi ${status.piVersion}`, reconnectAttempt: 0, authRequired, voiceEnabled: !!(status.voiceCapabilities?.tts ?? status.voiceEnabled), voiceSttEnabled: !!(status.voiceCapabilities?.stt ?? status.voiceEnabled)});
+    if (confirmSave && authRequired && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) backend.saved = true;
     persistConnections();
     updateVoiceAvailability(); updateHeaderStatus(); renderBackendList(); renderBackendFilter();
     // Mail settings live on each backend server; the first connected one owns the form.
@@ -205,7 +209,7 @@
       const info = document.createElement('div'); info.className = 'backend-row-info';
       const name = document.createElement('b'); name.textContent = backend.name || backend.base;
       const detail = document.createElement('small');
-      const statusText = backend.status === 'connected' ? (backend.reconnecting ? '已连接 · 重连中' : `已连接 · ${backend.serverInfo}`) : backend.status === 'error' ? `连接失败 · ${backend.error || ''}` : '未连接';
+      const statusText = backend.status === 'connected' ? (backend.reconnecting ? '已连接 · 重连中' : `已连接 · ${backend.authRequired === false ? '无需认证 · ' : ''}${backend.serverInfo}`) : backend.status === 'error' ? `连接失败 · ${backend.error || ''}` : '未连接';
       detail.textContent = `${backend.base} · ${statusText}`;
       info.append(name, detail);
       const actions = document.createElement('div'); actions.className = 'backend-row-actions';
@@ -1015,9 +1019,9 @@
   // Backends whose pairing code was explicitly saved reconnect on their own;
   // the pairing dialog is only for first-time or failed connections.
   void (async () => {
-    const saved = state.backends.filter(backend => backend.saved && backend.token);
-    if (!saved.length) { openPair(); return; }
-    const results = await Promise.allSettled(saved.map(backend => connectBackend(backend, {confirmSave:false})));
+    const candidates = state.backends.filter(backend => (backend.saved && backend.token) || !backend.token);
+    if (!candidates.length) { openPair(); return; }
+    const results = await Promise.allSettled(candidates.map(backend => connectBackend(backend, {confirmSave:false})));
     if (!hasConnection()) {
       const error = results.find(result => result.status === 'rejected')?.reason;
       if (error) toast(`自动连接失败：${error.message}`);
