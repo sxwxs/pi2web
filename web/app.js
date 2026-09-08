@@ -3,9 +3,12 @@
   const $ = id => document.getElementById(id);
   const CONNECTIONS_KEY = 'rpConnections';
   const loadStoredConnections = () => {
+    const stored = localStorage.getItem(CONNECTIONS_KEY);
     try {
-      const parsed = JSON.parse(localStorage[CONNECTIONS_KEY] || '[]');
-      if (Array.isArray(parsed)) return parsed.filter(item => item && typeof item.base === 'string' && typeof item.id === 'string').map(item => ({id:item.id, name:String(item.name||''), base:item.base, token:String(item.token||''), saved:Boolean(item.token)}));
+      if (stored !== null) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) return parsed.filter(item => item && typeof item.base === 'string' && typeof item.id === 'string').map(item => ({id:item.id, name:String(item.name||''), base:item.base, token:String(item.token||''), saved:Boolean(item.token)}));
+      }
     } catch {}
     // Single-backend clients stored one base/token pair; upgrade them in place,
     // including keyboard bindings that were keyed by the bare agentId.
