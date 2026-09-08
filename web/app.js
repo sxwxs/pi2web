@@ -1,8 +1,29 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
+  const CONNECTIONS_KEY = 'rpConnections';
+  const loadStoredConnections = () => {
+    const stored = localStorage.getItem(CONNECTIONS_KEY);
+    try {
+      if (stored !== null) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) return parsed.filter(item => item && typeof item.base === 'string' && typeof item.id === 'string').map(item => ({id:item.id, name:String(item.name||''), base:item.base, token:String(item.token||''), saved:Boolean(item.token)}));
+      }
+    } catch {}
+    // Single-backend clients stored one base/token pair; upgrade them in place,
+    // including keyboard bindings that were keyed by the bare agentId.
+    if (localStorage.rpToken) {
+      try {
+        const saved = JSON.parse(localStorage.rpSessionKeyboardBindings || '[]');
+        if (Array.isArray(saved)) localStorage.rpSessionKeyboardBindings = JSON.stringify(saved.map(item => ({...item, agentId:String(item?.agentId||'').includes(':') ? item.agentId : `bk-main:${item.agentId}`})));
+      } catch {}
+      return [{id:'bk-main', name:'本机', base:localStorage.rpBase || location.origin, token:localStorage.rpToken, saved:true}];
+    }
+    return [];
+  };
   const state = {
-    base: localStorage.rpBase || location.origin, token: '', workspace: null, workspaces: [], treePath: '.',
+    backends: loadStoredConnections().map(entry => ({...entry, status:'off', error:'', ws:null, reconnectTimer:null, reconnectAttempt:0, manuallyClosed:false, reconnecting:false, agents:[], terminals:[], workspaces:[], serverInfo:'', voiceEnabled:false, voiceSttEnabled:false})),
+    backendFilter: localStorage.rpBackendFilter || '', workspace: null, workspaces: [], treePath: '.',
     filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], terminals: [], terminal: null, selectedKind: 'agent', ws: null, terminalWs: null,
     terminalEmulator: null, terminalAssetsPromise: null, terminalConnectAttempt: 0, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
@@ -11,8 +32,8 @@
     voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,sources:new Set(),decodeChain:Promise.resolve(),generation:0}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
     mailNotificationsAvailable:false,mailSettings:{enabled:false,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true,collabEscalations:true},
   };
-  $('api').value = state.base;
-  $('pairBase').value = state.base;
+  $('pairBase').value = state.backends[0]?.base || location.origin;
+  $('pairName').value = state.backends[0]?.name || '';
 
   const clean = value => String(value || '').split('\\').join('/').replace(/\/+/g, '/').replace(/\/$/, '') || '/';
   const joinPath = (base, name) => base === '.' ? name : `${base}/${name}`;
@@ -22,7 +43,14 @@
   const relativeTo = (file, dir) => file === dir ? '.' : file.slice(dir.length + 1);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const toast = text => { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => $('toast').hidden = true, 3000); };
-  const requireConnection = () => { if (!state.connected) { openPair(); return false; } return true; };
+  const cid = (backendId, id) => `${backendId}:${id}`;
+  const scid = id => { const value = String(id), i = value.indexOf(':'); return i >= 0 ? value.slice(i + 1) : value; };
+  const backendOf = id => state.backends.find(item => item.id === id);
+  const agentBackendId = id => { const value = String(id), i = value.indexOf(':'); return i >= 0 ? value.slice(0, i) : ''; };
+  const connectedBackends = () => state.backends.filter(item => item.status === 'connected');
+  const hasConnection = () => connectedBackends().length > 0;
+  const primaryBackend = () => connectedBackends()[0] || state.backends[0];
+  const requireConnection = () => { if (!hasConnection()) { openPair(); return false; } return true; };
   const mobileMedia = matchMedia('(max-width: 700px)');
   const isMobile = () => mobileMedia.matches;
   function setMobileView(view, {push = false, replace = false} = {}) {
@@ -45,73 +73,197 @@
     const response = await fetch(base + url, {...options, headers});
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (disconnectOnUnauthorized && response.status === 401) disconnect('配对码无效或已失效');
+      if (disconnectOnUnauthorized && response.status === 401) markBackendUnauthorized(base, '配对码无效或已失效');
       throw Error(body.error?.message || `HTTP ${response.status}`);
     }
     return body.data;
   }
-  async function api(url, options = {}) { return request(state.base, state.token, url, options, true); }
-  const post = (url, body = {}) => api(url, {method:'POST', body:JSON.stringify(body)});
+  async function apiB(backendId, url, options = {}) {
+    const backend = backendOf(backendId);
+    if (!backend) throw Error('Backend 不存在');
+    if (backend.status !== 'connected') throw Error(`Backend「${backend.name || backendId}」未连接`);
+    return request(backend.base, backend.token, url, options, true);
+  }
+  const postB = (backendId, url, body = {}) => apiB(backendId, url, {method:'POST', body:JSON.stringify(body)});
+  // Agents and terminals carry composite ids (backendId:serverId); strip the prefix on the wire.
+  const apiAgent = (agentId, suffix = '', options = {}) => apiB(agentBackendId(agentId), `/api/v1/agents/${encodeURIComponent(scid(agentId))}${suffix}`, options);
+  const postAgent = (agentId, suffix = '', body = {}) => apiAgent(agentId, suffix, {method:'POST', body:JSON.stringify(body)});
 
-  function openPair() {
+  function openPair(entry) {
     if($('configDialog').open)$('configDialog').close();
-    $('pairBase').value = state.base;
-    $('pairToken').value = localStorage.rpToken || '';
+    const target = entry || state.backends[0];
+    $('pairName').value = target?.name || '';
+    $('pairBase').value = target?.base || location.origin;
+    $('pairToken').value = target?.saved ? target.token : target?.token || '';
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
-  async function connect(base, token) {
-    const candidateBase=base.trim().replace(/\/$/, '')||location.origin,candidateToken=token.trim();
-    const status=await request(candidateBase,candidateToken,'/api/v1/system/status');
-    if(status.protocolVersion!==1)throw Error(`不支持的协议版本 ${status.protocolVersion}（需要 1）`);
-    disconnect();state.base=candidateBase;state.token=candidateToken;state.connected=true;localStorage.rpBase=state.base;$('api').value=state.base;
-    $('status').className='ok';$('status').textContent='已配对';$('serverInfo').textContent=`v${status.version} · Pi ${status.piVersion}`;
-    state.voiceEnabled=!!(status.voiceCapabilities?.tts??status.voiceEnabled);state.voiceSttEnabled=!!(status.voiceCapabilities?.stt??status.voiceEnabled);$('voicePlayback').hidden=!state.voiceEnabled;$('voiceInput').hidden=!state.voiceSttEnabled;updateVoiceButton();
-    await loadMailNotificationSettings(status);updateConfigUi();await refreshWs();await refreshAgents(true);setMobileView('home',{replace:true});
-    if(localStorage.rpToken!==state.token){if(confirm('是否将配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。'))localStorage.rpToken=state.token;else localStorage.removeItem('rpToken');}
-    $('pairDialog').close();
+  function persistConnections() {
+    localStorage[CONNECTIONS_KEY] = JSON.stringify(state.backends.map(item => ({id:item.id, name:item.name, base:item.base, token:item.saved ? item.token : ''})));
   }
-  function disconnect(reason = '未配对') {
-    state.connected = false; state.token = ''; state.manuallyClosed = true;state.terminalConnectAttempt++;state.voiceEnabled=false;state.voiceSttEnabled=false;state.mailNotificationsAvailable=false;$('voicePlayback').hidden=true;$('voiceInput').hidden=true;
-    clearTimeout(state.reconnectTimer); state.ws?.close(); state.ws = null; state.terminalWs?.close(); state.terminalWs = null; if(state.mediaRecorder?.state==='recording')state.mediaRecorder.stop();stopVoiceAudio();
+  function updateHeaderStatus() {
+    const total = state.backends.length, connected = connectedBackends(), reconnecting = state.backends.some(item => item.reconnecting);
+    if (!connected.length) { $('status').className = 'bad'; $('status').textContent = '未配对'; $('serverInfo').textContent = ''; return; }
+    $('status').className = 'ok';
+    $('status').textContent = (total > 1 ? `已连接 ${connected.length}/${total}` : '已配对') + (reconnecting ? ' · 重连中' : '');
+    $('serverInfo').textContent = connected.map(item => item.name).join(' · ');
+  }
+  function closeBackendSocket(backend) {
+    clearTimeout(backend.reconnectTimer); backend.manuallyClosed = true; backend.reconnecting = false;
+    backend.ws?.close(); backend.ws = null;
+  }
+  function markBackendUnauthorized(base, reason) {
+    const backend = state.backends.find(item => item.base === base);
+    if (!backend) return;
+    closeBackendSocket(backend); backend.status = 'error'; backend.error = reason;
+    updateVoiceAvailability(); updateHeaderStatus(); renderBackendList();
+  }
+  function disconnectAll(reason = '已断开全部连接') {
+    for (const backend of state.backends) closeBackendSocket(backend);
+    for (const backend of state.backends) backend.status = 'off';
+    state.agents = []; state.terminals = []; state.voiceEnabled = false; state.voiceSttEnabled = false; state.mailNotificationsAvailable = false;
+    $('voicePlayback').hidden = true; $('voiceInput').hidden = true; stopVoiceAudio();
     sessionKeyboard.setAgents([]);
-    $('status').className = 'bad'; $('status').textContent = reason; $('serverInfo').textContent = '';updateConfigUi();
+    renderAgentList(); updateHeaderStatus(); renderBackendList(); renderBackendFilter(); updateConfigUi();
+    if (reason) { $('status').className = 'bad'; $('status').textContent = reason; }
   }
-
-  async function refreshWs() {
-    if (!requireConnection()) return;
-    state.workspaces = await api('/api/v1/workspaces');
-    $('workspaces').replaceChildren(...state.workspaces.map(workspace => {
-      const option = document.createElement('option'); option.value = workspace.id;
-      option.textContent = `${workspace.label} (${workspace.rootPath})`; return option;
+  function updateVoiceAvailability() {
+    const backends = connectedBackends();
+    state.voiceEnabled = backends.some(item => item.voiceEnabled);
+    state.voiceSttEnabled = backends.some(item => item.voiceSttEnabled);
+    $('voicePlayback').hidden = !state.voiceEnabled; $('voiceInput').hidden = !state.voiceSttEnabled; updateVoiceButton();
+  }
+  async function connectBackend(entry, {confirmSave = true} = {}) {
+    const candidateBase = String(entry.base || '').trim().replace(/\/$/, '') || location.origin, candidateToken = String(entry.token || '').trim();
+    if (!candidateToken) { openPair(entry); throw Error('请先输入配对码'); }
+    const status = await request(candidateBase, candidateToken, '/api/v1/system/status');
+    if (status.protocolVersion !== 1) throw Error(`不支持的协议版本 ${status.protocolVersion}（需要 1）`);
+    let backend = backendOf(entry.id);
+    if (!backend) {
+      backend = {id: entry.id || `bk-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name:'', base:'', token:'', saved:false, status:'off', error:'', ws:null, reconnectTimer:null, reconnectAttempt:0, manuallyClosed:false, reconnecting:false, agents:[], terminals:[], workspaces:[], serverInfo:'', voiceEnabled:false, voiceSttEnabled:false};
+      state.backends.push(backend);
+    }
+    closeBackendSocket(backend);
+    Object.assign(backend, {name: String(entry.name || '').trim() || candidateBase, base: candidateBase, token: candidateToken, status: 'connected', error: '', serverInfo: `v${status.version} · Pi ${status.piVersion}`, reconnectAttempt: 0, voiceEnabled: !!(status.voiceCapabilities?.tts ?? status.voiceEnabled), voiceSttEnabled: !!(status.voiceCapabilities?.stt ?? status.voiceEnabled)});
+    if (confirmSave && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) backend.saved = true;
+    persistConnections();
+    updateVoiceAvailability(); updateHeaderStatus(); renderBackendList(); renderBackendFilter();
+    // Mail settings live on each backend server; the first connected one owns the form.
+    if (primaryBackend() === backend) await loadMailNotificationSettings(status);
+    await refreshBackendData(backend);
+    await renderWorkspaces();
+    if (!state.agent && !state.terminal) {
+      const previous = localStorage.rpAgentId, previousTerminal = localStorage.rpTerminalId;
+      const foundTerminal = state.terminals.find(x => x.terminalId === previousTerminal), found = state.agents.find(x => x.agentId === previous);
+      if (localStorage.rpSelectedKind === 'terminal' && foundTerminal) await selectTerminal(foundTerminal, false);
+      else if (found) await selectAgent(found, false);
+    }
+    updateConfigUi();
+    connectSocket(backend);
+    return backend;
+  }
+  async function refreshBackendData(backend) {
+    await Promise.allSettled([refreshBackendWorkspaces(backend), refreshBackendAgents(backend)]);
+  }
+  async function refreshBackendWorkspaces(backend) {
+    try {
+      const items = await apiB(backend.id, '/api/v1/workspaces');
+      backend.workspaces = items.map(item => ({...item, backendId: backend.id, backendName: backend.name}));
+    } catch (error) { backend.workspaces = []; }
+  }
+  const visibleWorkspaces = () => state.backends.flatMap(backend => backend.workspaces || []).filter(item => !state.backendFilter || item.backendId === state.backendFilter);
+  const workspaceLabel = item => connectedBackends().length > 1 ? `${item.backendName} · ${item.label}` : item.label;
+  async function renderWorkspaces() {
+    const workspaces = visibleWorkspaces();
+    $('workspaces').replaceChildren(...workspaces.map(workspace => {
+      const option = document.createElement('option'); option.value = `${workspace.backendId}:${workspace.id}`;
+      option.textContent = `${workspaceLabel(workspace)} (${workspace.rootPath})`; return option;
     }));
     renderMobileWorkspaces();
-    const wanted = state.workspace?.id || localStorage.rpWorkspaceId;
-    if (state.workspaces.length) {
-      $('workspaces').value = state.workspaces.some(x => x.id === wanted) ? wanted : state.workspaces[0].id;
-      await selectWorkspace();
+    if (workspaces.length) {
+      const wanted = state.workspace ? `${state.workspace.backendId}:${state.workspace.id}` : localStorage.rpWorkspaceId;
+      const values = workspaces.map(item => `${item.backendId}:${item.id}`);
+      if (values.includes(wanted)) { $('workspaces').value = wanted; if (!state.workspace) await selectWorkspace(); }
+      else { $('workspaces').value = values[0]; await selectWorkspace(); }
     } else {
       state.workspace = null; $('tree').innerHTML = '<div class="muted">请添加 Workspace</div>';
     }
   }
+  function renderBackendFilter() {
+    const select = $('backendFilter');
+    if (!select) return;
+    select.replaceChildren(...state.backends.map(backend => {
+      const option = document.createElement('option'); option.value = backend.id; option.textContent = backend.name || backend.base; return option;
+    }));
+    const all = document.createElement('option'); all.value = ''; all.textContent = '全部 Backend';
+    select.prepend(all);
+    if (![...select.options].some(option => option.value === state.backendFilter)) state.backendFilter = '';
+    select.value = state.backendFilter;
+    select.hidden = state.backends.length < 2;
+  }
+  function renderBackendList() {
+    const list = $('backendList');
+    if (!list) return;
+    list.replaceChildren(...state.backends.map(backend => {
+      const row = document.createElement('div'); row.className = 'backend-row';
+      const info = document.createElement('div'); info.className = 'backend-row-info';
+      const name = document.createElement('b'); name.textContent = backend.name || backend.base;
+      const detail = document.createElement('small');
+      const statusText = backend.status === 'connected' ? (backend.reconnecting ? '已连接 · 重连中' : `已连接 · ${backend.serverInfo}`) : backend.status === 'error' ? `连接失败 · ${backend.error || ''}` : '未连接';
+      detail.textContent = `${backend.base} · ${statusText}`;
+      info.append(name, detail);
+      const actions = document.createElement('div'); actions.className = 'backend-row-actions';
+      const toggle = document.createElement('button'); toggle.type = 'button'; toggle.textContent = backend.status === 'connected' ? '断开' : '连接';
+      toggle.onclick = async () => {
+        toggle.disabled = true;
+        try {
+          if (backend.status === 'connected') { closeBackendSocket(backend); backend.status = 'off'; updateVoiceAvailability(); updateHeaderStatus(); renderBackendList(); updateConfigUi(); }
+          else { await connectBackend(backend, {confirmSave: false}); toast(`已连接 ${backend.name}`); }
+        } catch (error) { backend.status = 'error'; backend.error = error.message; renderBackendList(); toast(error.message); }
+        finally { toggle.disabled = false; }
+      };
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger-action'; remove.textContent = '删除';
+      remove.onclick = () => {
+        if (!confirm(`删除 backend「${backend.name}」？只影响这个页面，不会停止该机器上的服务。`)) return;
+        closeBackendSocket(backend);
+        state.backends = state.backends.filter(item => item !== backend);
+        persistConnections();
+        for (const agent of backend.agents || []) sessionKeyboard.unbind(agent.agentId);
+        if (state.agent && agentBackendId(state.agent.agentId) === backend.id) { state.agent = null; localStorage.removeItem('rpAgentId'); }
+        if (state.workspace?.backendId === backend.id) { state.workspace = null; localStorage.removeItem('rpWorkspaceId'); }
+        aggregateAgentLists(); updateVoiceAvailability(); updateHeaderStatus(); renderBackendFilter(); void renderWorkspaces(); updateConfigUi();
+        toast('已删除 backend');
+      };
+      actions.append(toggle, remove); row.append(info, actions);
+      return row;
+    }));
+  }
+
+  async function refreshWs() {
+    if (!requireConnection()) return;
+    await Promise.allSettled(connectedBackends().map(refreshBackendWorkspaces));
+    await renderWorkspaces();
+  }
   function renderMobileWorkspaces() {
-    $('mobileWorkspaces').replaceChildren(...state.workspaces.map(workspace => {
+    $('mobileWorkspaces').replaceChildren(...visibleWorkspaces().map(workspace => {
       const button=document.createElement('button');button.type='button';button.className='workspace-card';
-      const name=document.createElement('b'),path=document.createElement('small');name.textContent=workspace.label;path.textContent=workspace.rootPath;button.append(name,path);
+      const name=document.createElement('b'),path=document.createElement('small');name.textContent=workspaceLabel(workspace);path.textContent=workspace.rootPath;button.append(name,path);
       button.onclick=async()=>{try{$('workspaces').value=workspace.id;await selectWorkspace();navigateMobile('workspace');}catch(error){toast(error.message);}};return button;
     }));
   }
   async function selectWorkspace() {
-    state.workspace = state.workspaces.find(x => x.id === $('workspaces').value);
-    if (!state.workspace) return;
-    localStorage.rpWorkspaceId = state.workspace.id; state.treePath = '.'; $('agentCwd').value = '.'; $('filePanel').hidden = true;
-    $('workspaceHeading').textContent = isMobile() && state.mobileView !== 'home' ? state.workspace.label : 'Workspace';
+    const value = $('workspaces').value, separator = value.indexOf(':');
+    const backendId = separator >= 0 ? value.slice(0, separator) : '', workspaceId = separator >= 0 ? value.slice(separator + 1) : value;
+    state.workspace = {...((backendOf(backendId)?.workspaces || []).find(item => item.id === workspaceId) || {})};
+    if (!state.workspace.id) { state.workspace = null; return; }
+    localStorage.rpWorkspaceId = value; state.treePath = '.'; $('agentCwd').value = '.'; $('filePanel').hidden = true;
+    $('workspaceHeading').textContent = isMobile() && state.mobileView !== 'home' ? workspaceLabel(state.workspace) : 'Workspace';
     await loadTree();
   }
   async function loadTree() {
     if (!state.workspace) return;
     $('treePath').textContent = absolutePath(state.treePath);
     try {
-      const items = await api(`/api/v1/workspaces/${state.workspace.id}/tree?path=${encodeURIComponent(state.treePath)}`);
+      const items = await apiB(state.workspace.backendId, `/api/v1/workspaces/${encodeURIComponent(scid(state.workspace.id))}/tree?path=${encodeURIComponent(state.treePath)}`);
       $('tree').replaceChildren(...items.map(item => {
         const el = document.createElement('div'); el.className = `entry ${item.type === 'directory' ? 'dir' : 'file-entry'}`;
         el.textContent = `${item.type === 'directory' ? '📁' : '📄'} ${item.name}`;
@@ -124,7 +276,7 @@
   async function openDirectory(relativePath) { state.treePath = relativePath; $('filePanel').hidden = true; await loadTree(); }
   async function openFile(relativePath, offset, showView = true) {
     try {
-      const file = await api(`/api/v1/workspaces/${state.workspace.id}/file?path=${encodeURIComponent(relativePath)}&offset=${offset}&limit=${state.fileLimit}`);
+      const file = await apiB(state.workspace.backendId, `/api/v1/workspaces/${encodeURIComponent(scid(state.workspace.id))}/file?path=${encodeURIComponent(relativePath)}&offset=${offset}&limit=${state.fileLimit}`);
       state.filePath = relativePath; state.fileOffset = file.offset; state.fileSize = file.size;
       $('filePanel').hidden = false; $('fileName').textContent = relativePath;
       $('file').textContent = file.binary ? `[二进制文件，${file.size} bytes，无法预览]` : file.content;
@@ -183,7 +335,7 @@
   async function openMention(path=state.treePath,filter='') {
     if(!state.workspace)return;const request=++state.mentionRequest;state.mentionPath=path;$('mentionPicker').hidden=false;$('mentionPath').textContent=absolutePath(path);
     try {
-      const items=await api(`/api/v1/workspaces/${state.workspace.id}/tree?path=${encodeURIComponent(path)}`);if(request!==state.mentionRequest)return;
+      const items=await apiB(state.workspace.backendId, `/api/v1/workspaces/${encodeURIComponent(scid(state.workspace.id))}/tree?path=${encodeURIComponent(path)}`);if(request!==state.mentionRequest)return;
       state.mentionOptions=[{name:'引用当前目录',path,type:'directory',current:true,label:'📁 引用当前目录'},...items.map(item=>({name:item.name,path:joinPath(path,item.name),type:item.type,current:false,label:`${item.type==='directory'?'📁':'📄'} ${item.name}`}))];renderMentionItems(filter);
     } catch(error){if(request===state.mentionRequest)$('mentionItems').textContent=error.message;}
   }
@@ -197,7 +349,7 @@
   }
   async function loadCommands(agentId) {
     if(state.commandsAgentId===agentId)return state.commands;
-    const commands=await api(`/api/v1/agents/${agentId}/commands`);return Array.isArray(commands)?commands:[];
+    const commands=await apiAgent(agentId,'/commands');return Array.isArray(commands)?commands:[];
   }
   function setCommandSelection(index) {
     const count=state.commandFiltered.length;if(!count){state.commandIndex=0;return;}state.commandIndex=(index+count)%count;
@@ -243,7 +395,7 @@
     if (!slots) return;
     const focusedId = slots.contains(document.activeElement) ? document.activeElement.id : '';
     const agents = new Map(state.agents.map(agent => [agent.agentId, agent]));
-    const canBind = state.connected && state.agents.some(agent => !sessionKeyboard.getBinding(agent.agentId));
+    const canBind = hasConnection() && state.agents.some(agent => !sessionKeyboard.getBinding(agent.agentId));
     slots.replaceChildren(...Array.from({length:6}, (_, slot) => {
       const binding = sessionKeyboard.getSlot(slot), agent = binding && agents.get(binding.agentId);
       const el = document.createElement('div'); el.className = 'keyboard-slot';
@@ -290,28 +442,52 @@
   const sessionUsage = session => ({...(session.contextUsage||{}),cost:session.stats?.cost});
   function renderAgentList() {
     const recent=(value,fallback)=>{const time=Date.parse(value||fallback||'');return Number.isFinite(time)?time:0;};
-    const allItems=[...state.agents.map(item=>({kind:'agent',item})),...state.terminals.map(item=>({kind:'terminal',item}))].sort((a,b)=>recent(b.item.lastActiveAt,b.item.createdAt)-recent(a.item.lastActiveAt,a.item.createdAt));
+    let allItems=[...state.agents.map(item=>({kind:'agent',item})),...state.terminals.map(item=>({kind:'terminal',item}))].sort((a,b)=>recent(b.item.lastActiveAt,b.item.createdAt)-recent(a.item.lastActiveAt,a.item.createdAt));
+    if(state.backendFilter)allItems=allItems.filter(entry=>entry.item.backendId===state.backendFilter);
     const items=allItems.slice(0,state.agentVisibleCount);
     $('agents').replaceChildren(...items.map(({kind,item}) => {
       const isAgent=kind==='agent',id=isAgent?item.agentId:item.terminalId,selected=state.selectedKind===kind&&(isAgent?state.agent?.agentId:state.terminal?.terminalId)===id;
       const el=document.createElement('div');el.dataset.itemId=id;el.className=`agent ${item.status}${selected?' selected':''}`;
       if(isAgent){const usage=state.contexts.get(item.agentId),binding=sessionKeyboard.getBinding(item.agentId);el.innerHTML=`<div class="agent-top"><b>${esc(agentLabel(item))}</b><span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span></div><small>${esc(agentSubtitle(item))}</small><div class="agent-context ${usageLevel(usage)}"><span>Context</span><div class="mini-track"><i style="width:${Math.min(100,Math.max(0,Number(usage?.percent)||0))}%"></i></div><span>${esc(usageText(usage))} · ${esc(costText(usage))}</span></div>`;if(binding){const badge=document.createElement('span');badge.className='key-binding';badge.style.setProperty('--key-color',binding.color);badge.textContent=`K${binding.slot+1}`;badge.title=`键盘按键 ${binding.slot+1} · ${binding.color}`;el.querySelector('.agent-top').append(badge);}}
       else el.innerHTML=`<div class="agent-top"><span class="terminal-kind">&gt;_</span><b>${esc(item.title||'Terminal')}</b><span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span></div><small>${esc(item.cwd)}</small>`;
+      if(connectedBackends().length>1){const tag=document.createElement('span');tag.className='backend-tag';tag.textContent=item.backendName;tag.title=`来自 backend ${item.backendName}`;el.querySelector('.agent-top').append(tag);}
       el.onclick=()=>isAgent?selectAgent(item):selectTerminal(item);el.oncontextmenu=event=>showItemContextMenu(event,kind,item);return el;
     }));
     $('agentListCount').textContent=`已显示 ${items.length} / ${allItems.length}`;$('loadMoreAgents').hidden=items.length>=allItems.length;$('loadMoreAgents').disabled=items.length>=allItems.length;
   }
   async function loadAgentContexts(agents=state.agents) {
-    await Promise.allSettled(agents.map(async agent=>{const session=await api(`/api/v1/agents/${agent.agentId}/session?summary=true`);agent.sessionName=session.sessionName||undefined;let lastMessageAt=0;for(const entry of session.entries||[]){if(entry.type!=='message')continue;const time=Date.parse(entry.timestamp||'');if(Number.isFinite(time))lastMessageAt=Math.max(lastMessageAt,time);}if(lastMessageAt)agent.lastActiveAt=new Date(lastMessageAt).toISOString();state.contexts.set(agent.agentId,sessionUsage(session));}));
+    await Promise.allSettled(agents.map(async agent=>{const session=await apiAgent(agent.agentId,'/session?summary=true');agent.sessionName=session.sessionName||undefined;let lastMessageAt=0;for(const entry of session.entries||[]){if(entry.type!=='message')continue;const time=Date.parse(entry.timestamp||'');if(Number.isFinite(time))lastMessageAt=Math.max(lastMessageAt,time);}if(lastMessageAt)agent.lastActiveAt=new Date(lastMessageAt).toISOString();state.contexts.set(agent.agentId,sessionUsage(session));}));
     renderAgentList();if(state.agent)updateAgentHeader();
   }
+  function stampBackendItems(backend, agents, terminals) {
+    return [agents.map(item => ({...item, backendId:backend.id, backendName:backend.name, agentId:cid(backend.id, item.agentId)})),
+            terminals.map(item => ({...item, backendId:backend.id, backendName:backend.name, terminalId:cid(backend.id, item.terminalId)}))];
+  }
+  /** Freshly created/forked items arrive with raw server ids; stamp them before they enter the aggregated lists. */
+  function stampNewItem(backendId, item) {
+    const backend = backendOf(backendId), key = item.terminalId ? 'terminalId' : 'agentId';
+    return {...item, backendId, backendName: backend?.name, [key]: cid(backendId, item[key])};
+  }
+  async function refreshBackendAgents(backend) {
+    try {
+      const [agents,terminals] = await Promise.all([apiB(backend.id,'/api/v1/agents'),apiB(backend.id,'/api/v1/terminals')]);
+      [backend.agents,backend.terminals] = stampBackendItems(backend, agents, terminals);
+    } catch (error) { backend.agents = []; backend.terminals = []; }
+    aggregateAgentLists();
+  }
+  function aggregateAgentLists() {
+    state.agents = state.backends.flatMap(backend => backend.agents || []);
+    state.terminals = state.backends.flatMap(backend => backend.terminals || []);
+    sessionKeyboard.setAgents(state.agents);
+    renderAgentList(); renderKeyboardBindings();
+ }
   async function refreshAgents(selectPrevious = false) {
-    if (!state.connected) return;
-    [state.agents,state.terminals] = await Promise.all([api('/api/v1/agents'),api('/api/v1/terminals')]);sessionKeyboard.setAgents(state.agents);renderKeyboardBindings(); const previous = state.agent?.agentId || localStorage.rpAgentId,previousTerminal=state.terminal?.terminalId||localStorage.rpTerminalId;
+    if (!hasConnection()) return;
+    await Promise.allSettled(connectedBackends().map(refreshBackendAgents));
+    const previous = state.agent?.agentId || localStorage.rpAgentId,previousTerminal=state.terminal?.terminalId||localStorage.rpTerminalId;
     if(state.agent){const fresh=state.agents.find(x=>x.agentId===state.agent.agentId);if(fresh)state.agent=Object.assign(state.agent,fresh);}
     renderAgentList();
-    if (selectPrevious) { const foundTerminal=state.terminals.find(x=>x.terminalId===previousTerminal),found = state.agents.find(x => x.agentId === previous); if(localStorage.rpSelectedKind==='terminal'&&foundTerminal)await selectTerminal(foundTerminal,false);else if (found) await selectAgent(found, false); else connectSocket(); }
-    else if (!state.ws) connectSocket();
+    if (selectPrevious) { const foundTerminal=state.terminals.find(x=>x.terminalId===previousTerminal),found = state.agents.find(x => x.agentId === previous); if(localStorage.rpSelectedKind==='terminal'&&foundTerminal)await selectTerminal(foundTerminal,false);else if (found) await selectAgent(found, false); }
   }
   function setAgentStatus(agentId,status) {
     const agent=state.agents.find(x=>x.agentId===agentId);if(!agent){void refreshAgents();return null;}agent.status=status;if(state.agent?.agentId===agentId)state.agent.status=status;sessionKeyboard.updateAgent(agent);renderAgentList();updateAgentHeader();return agent;
@@ -354,7 +530,8 @@
     state.terminalWs?.close();state.terminalWs=null;const terminalId=terminal.terminalId,attempt=++state.terminalConnectAttempt;$('terminalStatus').textContent=`${terminal.cwd} · 正在加载 Terminal…`;
     try{
       const term=await ensureTerminalEmulator();if(attempt!==state.terminalConnectAttempt||state.selectedKind!=='terminal'||state.terminal?.terminalId!==terminalId)return;term.reset();term.clear();$('terminalStatus').textContent=`${terminal.cwd} · 正在连接…`;
-      const ws=new WebSocket(state.base.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(terminalId)}/ws`,['access-token.'+state.token]);state.terminalWs=ws;
+      const terminalBackend=backendOf(terminal.backendId);if(!terminalBackend||terminalBackend.status!=='connected')throw Error(`Backend「${terminal.backendName||terminal.backendId}」未连接`);
+      const ws=new WebSocket(terminalBackend.base.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(scid(terminalId))}/ws`,['access-token.'+terminalBackend.token]);state.terminalWs=ws;
       ws.onopen=()=>{if(ws!==state.terminalWs)return;requestAnimationFrame(()=>{try{state.fitAddon.fit();ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));term.focus();}catch{}});};
       ws.onmessage=event=>{if(ws!==state.terminalWs)return;try{const message=JSON.parse(event.data);if(message.type==='snapshot'){term.reset();if(message.data)term.write(message.data);terminal.status=message.record.status;updateTerminalHeader();renderAgentList();}else if(message.type==='output')term.write(message.data);else if(message.type==='exit'){terminal.status='exited';terminal.exitCode=message.exitCode;updateTerminalHeader();renderAgentList();void refreshAgents();}else if(message.type==='error')toast(message.message);}catch(error){console.error(error);}};
       ws.onerror=()=>{};ws.onclose=()=>{if(ws===state.terminalWs&&terminal.status==='running')$('terminalStatus').textContent=`${terminal.cwd} · 连接已断开`;};
@@ -365,9 +542,9 @@
     state.selectedKind='terminal';state.terminal=terminal;localStorage.rpTerminalId=terminal.terminalId;localStorage.rpSelectedKind='terminal';$('agentToolbar').hidden=true;$('terminalToolbar').hidden=false;$('terminalView').hidden=false;$('widgets').hidden=true;$('messages').hidden=true;$('prompt').hidden=true;updateTerminalHeader();renderAgentList();if(openView)navigateMobile('agent');void connectTerminalSocket(terminal);
   }
   const autoBindNewSession=agent=>sessionKeyboard.autoBind(agent.agentId);
-  async function startAgent(relativePath){if(!state.workspace)return toast('请先选择 Workspace');$('contextMenu').hidden=true;try{const agent=await post('/api/v1/agents',{workspaceId:state.workspace.id,relativeCwd:relativePath}),binding=autoBindNewSession(agent);$('agentCwd').value=relativePath;await refreshAgents();await selectAgent(agent);if(binding)toast(`新 Session 已自动绑定到按键 ${binding.slot+1}`);}catch(error){toast(error.message);}}
-  async function openTerminal(relativePath){if(!state.workspace)return toast('请先选择 Workspace');try{const terminal=await post('/api/v1/terminals',{workspaceId:state.workspace.id,relativeCwd:relativePath});state.terminals.unshift(terminal);$('contextMenu').hidden=true;renderAgentList();await selectTerminal(terminal);}catch(error){toast(error.message);}}
-  async function closeTerminal(terminal=state.terminal){if(!terminal)return;try{await api(`/api/v1/terminals/${terminal.terminalId}`,{method:'DELETE'});state.terminalWs?.close();state.terminalWs=null;state.terminals=state.terminals.filter(x=>x.terminalId!==terminal.terminalId);if(state.terminal?.terminalId===terminal.terminalId){state.terminal=null;localStorage.removeItem('rpTerminalId');localStorage.rpSelectedKind='agent';showAgentView();}renderAgentList();toast('Terminal 已关闭');}catch(error){toast(error.message);}}
+  async function startAgent(relativePath){if(!state.workspace)return toast('请先选择 Workspace');$('contextMenu').hidden=true;try{const created=await postB(state.workspace.backendId,'/api/v1/agents',{workspaceId:scid(state.workspace.id),relativeCwd:relativePath}),agent=stampNewItem(state.workspace.backendId,created),binding=autoBindNewSession(agent);$('agentCwd').value=relativePath;await refreshAgents();await selectAgent(agent);if(binding)toast(`新 Session 已自动绑定到按键 ${binding.slot+1}`);}catch(error){toast(error.message);}}
+  async function openTerminal(relativePath){if(!state.workspace)return toast('请先选择 Workspace');try{const created=await postB(state.workspace.backendId,'/api/v1/terminals',{workspaceId:scid(state.workspace.id),relativeCwd:relativePath}),terminal=stampNewItem(state.workspace.backendId,created);state.terminals.unshift(terminal);$('contextMenu').hidden=true;renderAgentList();await selectTerminal(terminal);}catch(error){toast(error.message);}}
+  async function closeTerminal(terminal=state.terminal){if(!terminal)return;try{await apiB(terminal.backendId, `/api/v1/terminals/${encodeURIComponent(scid(terminal.terminalId))}`,{method:'DELETE'});state.terminalWs?.close();state.terminalWs=null;state.terminals=state.terminals.filter(x=>x.terminalId!==terminal.terminalId);if(state.terminal?.terminalId===terminal.terminalId){state.terminal=null;localStorage.removeItem('rpTerminalId');localStorage.rpSelectedKind='agent';showAgentView();}renderAgentList();toast('Terminal 已关闭');}catch(error){toast(error.message);}}
   async function selectAgent(agent, openView = true) {
     state.selectedKind='agent';state.terminalWs?.close();state.terminalWs=null;state.agent = agent; localStorage.rpAgentId = agent.agentId;localStorage.rpSelectedKind='agent';showAgentView();updateAgentHeader();
     if (openView) navigateMobile('agent');
@@ -375,11 +552,12 @@
     $('messages').replaceChildren(); discardStreams();state.messagePageStart=0;state.messageTotal=0;closeCommandPicker();state.commands=[];state.commandsAgentId=null;
     try { await loadMessagePage(agent.agentId,undefined,true); await loadSessionIdentity(); } catch (error) { addCard('加载消息失败', error.message, 'error', true); }
     renderAgentList();
-    connectSocket();
+    const backend=backendOf(agentBackendId(agent.agentId));
+    if(backend)subscribeAgent(backend,agent);
   }
   async function loadSessionIdentity() {
     if (!state.agent) return;
-    const session = await api(`/api/v1/agents/${state.agent.agentId}/session?summary=true`);
+    const session = await apiAgent(state.agent.agentId,'/session?summary=true');
     state.agent.sessionName=session.sessionName||undefined;state.contexts.set(state.agent.agentId,sessionUsage(session));renderAgentList();updateAgentHeader();
   }
 
@@ -502,12 +680,12 @@
   }
   async function loadAllMessages(agentId,button) {
     button.disabled=true;button.textContent='正在加载全部对话…';
-    try { const messages=await api(`/api/v1/agents/${agentId}/messages`);if(state.agent?.agentId!==agentId)return;const box=$('messages');box.replaceChildren();renderMessages(messages);state.messagePageStart=0;state.messageTotal=messages.length;updateMessageHistoryControl(); }
+    try { const messages=await apiAgent(agentId,'/messages');if(state.agent?.agentId!==agentId)return;const box=$('messages');box.replaceChildren();renderMessages(messages);state.messagePageStart=0;state.messageTotal=messages.length;updateMessageHistoryControl(); }
     finally { button.disabled=false;button.textContent='加载全部对话'; }
   }
   async function loadMessagePage(agentId,before,reset) {
     const query=new URLSearchParams({limit:String(state.messagePageSize)});if(before!==undefined)query.set('before',String(before));
-    const page=await api(`/api/v1/agents/${agentId}/messages?${query}`);if(state.agent?.agentId!==agentId)return;
+    const page=await apiAgent(agentId,`/messages?${query}`);if(state.agent?.agentId!==agentId)return;
     const box=$('messages'),oldHeight=box.scrollHeight,oldTop=box.scrollTop,fragment=document.createDocumentFragment();renderMessages(page.items,fragment,false);
     if(reset){box.replaceChildren(fragment);state.messageTotal=page.total;}else{box.querySelector('#messageHistoryControls')?.remove();box.prepend(fragment);}
     state.messagePageStart=page.start;state.messageTotal=page.total;updateMessageHistoryControl();
@@ -536,7 +714,7 @@
     $('messages').querySelector('.empty')?.remove();
     const card = addCard(ev.title || `Extension ${ev.kind}`, ev.message || ev.placeholder || ev.prefill || '', 'dialog', true, timestamp);
     const controls = document.createElement('div'); controls.className = 'dialog-actions'; controls.id = `extension-request-${ev.requestId}`;
-    const send = async value => { try { await post(`/api/v1/agents/${agentId}/extension-response`, {requestId:ev.requestId, value}); controls.replaceChildren(document.createTextNode('已响应')); } catch (e) { toast(e.message); } };
+    const send = async value => { try { await postAgent(agentId,'/extension-response',{requestId:ev.requestId, value}); controls.replaceChildren(document.createTextNode('已响应')); } catch (e) { toast(e.message); } };
     if (ev.kind === 'select') for (const option of ev.options || []) { const b = document.createElement('button'); b.textContent = option; b.onclick = () => send(option); controls.append(b); }
     else if (ev.kind === 'confirm') { for (const [label, value] of [['否',false],['是',true]]) { const b=document.createElement('button');b.textContent=label;b.onclick=()=>send(value);controls.append(b); } }
     else { const input = ev.kind === 'editor' ? document.createElement('textarea') : document.createElement('input'); input.value = ev.prefill || ''; input.placeholder = ev.placeholder || ''; const b = document.createElement('button'); b.textContent = '提交'; b.onclick = () => send(input.value); controls.append(input,b); }
@@ -590,7 +768,7 @@
   }
   async function transcribeVoice(){
     clearTimeout(state.mediaTimer);const recorder=state.mediaRecorder,mime=recorder?.mimeType||'audio/webm',blob=new Blob(state.mediaChunks,{type:mime}),agentId=state.mediaAgentId;state.mediaStream?.getTracks().forEach(track=>track.stop());state.mediaRecorder=null;state.mediaStream=null;state.mediaChunks=[];state.mediaAgentId=null;$('voiceInput').textContent='…';$('voiceInput').classList.remove('recording');
-    if(!agentId){$('voiceInput').textContent='🎙';return;}try{const response=await fetch(state.base+`/api/v1/agents/${agentId}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
+    if(!agentId){$('voiceInput').textContent='🎙';return;}const transcribeBackend=backendOf(agentBackendId(agentId));if(!transcribeBackend){$('voiceInput').textContent='🎙';return toast('该 Session 的 backend 已断开');}try{const response=await fetch(transcribeBackend.base+`/api/v1/agents/${encodeURIComponent(scid(agentId))}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${transcribeBackend.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
   }
   function handleAgentEvent(message) {
     if(message.type==='voice_event'){handleVoiceEvent(message);return;}
@@ -607,7 +785,7 @@
       localStorage[key] = message.sequence;
       // This baseline follows replay. Keep recovered tool/LLM details while
       // replacing standalone operation IDs, without touching the transcript.
-      sessionKeyboard.updateAgent(message.state);
+      sessionKeyboard.updateAgent({...message.state, agentId:message.agentId});
       setAgentStatus(message.agentId, message.state.status);
       restoreExtensionRequests(message.agentId, message.state.activity);
       return;
@@ -615,7 +793,7 @@
     if (message.type === 'agent_snapshot') {
       localStorage[`rpSeq:${message.agentId}`] = message.lastSequence;
       if (message.state) {
-        sessionKeyboard.setAgentSnapshot(message.state);
+        sessionKeyboard.setAgentSnapshot({...message.state, agentId:message.agentId});
         setAgentStatus(message.agentId, message.state.status);
       }
       if (state.agent?.agentId === message.agentId) {
@@ -668,13 +846,18 @@
   function renderExtensionStatus() { let row=$('extensionStatus'); if (!state.extensionStatus.size) { row?.remove(); return; } if(!row){row=document.createElement('div');row.id='extensionStatus';row.className='status-row';$('widgets').after(row);} row.textContent=[...state.extensionStatus.values()].join(' · '); }
   function renderWidgets() { $('widgets').replaceChildren(...[...state.widgets.entries()].map(([key,value])=>{const el=document.createElement('div');el.className='widget';el.dataset.key=key;el.textContent=Array.isArray(value)?value.map(x=>typeof x==='string'?x:x.text||'').join('\n'):String(value);return el;})); }
 
-  function connectSocket() {
-    if (!state.connected) return;
-    clearTimeout(state.reconnectTimer); state.manuallyClosed = true; const previous=state.ws; state.ws=null; previous?.close(); state.manuallyClosed = false;
-    const ws = new WebSocket(state.base.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + state.token]); state.ws = ws;
-    ws.onopen = () => { if(ws!==state.ws)return;state.reconnectAttempt = 0; $('status').textContent = '已配对 · 实时'; for (const agent of state.agents) { const key=`rpSeq:${agent.agentId}`, cursor=localStorage[key]; ws.send(JSON.stringify(cursor===undefined?{type:'subscribe',agentId:agent.agentId,fromNow:true,messageLimit:state.messagePageSize}:{type:'subscribe',agentId:agent.agentId,lastSequence:Number(cursor),messageLimit:state.messagePageSize})); } ws.send(JSON.stringify({type:'subscribe_all',fromNow:true})); };
-    ws.onmessage = event => { if(ws!==state.ws)return;try { handleAgentEvent(JSON.parse(event.data)); } catch (error) { console.error(error); } };
-    ws.onclose = () => { if (!state.connected || state.manuallyClosed || ws !== state.ws) return; $('status').textContent = '正在重连…'; const delays=[1000,2000,4000,8000,15000,30000], delay=delays[Math.min(state.reconnectAttempt++,delays.length-1)]; state.reconnectTimer=setTimeout(connectSocket,delay); };
+  function subscribeAgent(backend, agent) {
+    if (backend.ws?.readyState !== WebSocket.OPEN) return;
+    const key = `rpSeq:${agent.agentId}`, cursor = localStorage[key];
+    backend.ws.send(JSON.stringify(cursor === undefined ? {type:'subscribe', agentId:scid(agent.agentId), fromNow:true, messageLimit:state.messagePageSize} : {type:'subscribe', agentId:scid(agent.agentId), lastSequence:Number(cursor), messageLimit:state.messagePageSize}));
+  }
+  function connectSocket(backend) {
+    if (!backend || backend.status !== 'connected') return;
+    clearTimeout(backend.reconnectTimer); backend.manuallyClosed = true; const previous = backend.ws; backend.ws = null; previous?.close(); backend.manuallyClosed = false;
+    const ws = new WebSocket(backend.base.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + backend.token]); backend.ws = ws;
+    ws.onopen = () => { if (ws !== backend.ws) return; backend.reconnectAttempt = 0; backend.reconnecting = false; updateHeaderStatus(); for (const agent of backend.agents) subscribeAgent(backend, agent); ws.send(JSON.stringify({type:'subscribe_all', fromNow:true})); };
+    ws.onmessage = event => { if (ws !== backend.ws) return; try { const message = JSON.parse(event.data); if (typeof message.agentId === 'string') message.agentId = cid(backend.id, message.agentId); message.backendId = backend.id; handleAgentEvent(message); } catch (error) { console.error(error); } };
+    ws.onclose = () => { if (backend.ws !== ws || backend.manuallyClosed) return; backend.reconnecting = true; updateHeaderStatus(); const delays=[1000,2000,4000,8000,15000,30000], delay=delays[Math.min(backend.reconnectAttempt++, delays.length-1)]; backend.reconnectTimer = setTimeout(() => connectSocket(backend), delay); };
     ws.onerror = () => {};
   }
   function notificationUnavailableReason() {
@@ -709,25 +892,27 @@
     try { new Notification('Agent 完成', {body:`${agentLabel(agent)} 已转为空闲\n本地时间：${new Date(occurredAt*1000).toLocaleString()}\nUnix 时间戳：${occurredAt}`, timestamp:occurredAt*1000, tag:`remote-pi-${agent.agentId}-${occurredAt}`}); } catch (error) { console.error('Unable to show notification',error); }
   }
   async function loadMailNotificationSettings(status) {
-    if(status?.mailNotificationsConfigured===false){state.mailNotificationsAvailable=false;return}
-    try{const result=await api('/api/v1/mail-notifications');state.mailNotificationsAvailable=!!result.available;if(result.settings)state.mailSettings={...state.mailSettings,...result.settings};}
+    if(status?.mailNotificationsConfigured===false){state.mailNotificationsAvailable=false;updateMailControls();return}
+    try{const result=await apiB(primaryBackend()?.id,'/api/v1/mail-notifications');state.mailNotificationsAvailable=!!result.available;if(result.settings)state.mailSettings={...state.mailSettings,...result.settings};}
     catch(error){state.mailNotificationsAvailable=false;console.error('Unable to load mail notification settings',error);}
+    updateMailControls();
   }
   function updateMailControls(){
-    const available=state.connected&&state.mailNotificationsAvailable,settings=state.mailSettings;
+    const available=hasConnection()&&state.mailNotificationsAvailable,settings=state.mailSettings;
     $('mailNotificationEnabled').checked=!!settings.enabled;$('mailAggregationDelay').value=String(settings.aggregationDelaySeconds??0);$('mailIncludeResponse').checked=!!settings.includeResponse;$('mailIncludeSessionDetails').checked=!!settings.includeSessionDetails;$('mailCollabEscalations').checked=!!settings.collabEscalations;
     for(const id of ['mailNotificationEnabled','mailAggregationDelay','mailIncludeResponse','mailIncludeSessionDetails','mailCollabEscalations','configSave'])$(id).disabled=!available;
-    $('mailNotificationAvailability').textContent=!state.connected?'连接服务后可以配置邮件通知。':available?'MailDispatch 已在服务端配置。设置对所有 Agent 和客户端生效。':'服务端启动时未配置 MailDispatch endpoint、API key 和通知邮箱。';
+    $('mailNotificationAvailability').textContent=!hasConnection()?'连接服务后可以配置邮件通知。':available?'MailDispatch 已在服务端配置。设置对所有 Agent 和客户端生效。':'服务端启动时未配置 MailDispatch endpoint、API key 和通知邮箱。';
   }
   function updateConfigUi(){
-    $('configConnectionStatus').textContent=state.connected?`已连接 ${state.base}`:'当前未配对';updateNotificationButton();updateVoiceButton();updateMailControls();
+    const connected=connectedBackends().length;
+    $('configConnectionStatus').textContent=connected?`已连接 ${connected} 个 backend`:'当前未配对';$('disconnectAll').hidden=!connected;updateNotificationButton();updateVoiceButton();updateMailControls();renderBackendList();
   }
   function openConfig(){updateConfigUi();renderKeyboardBindings();if(!$('configDialog').open)$('configDialog').showModal();}
   async function saveMailSettings(){
     if(!requireConnection())return;if(!state.mailNotificationsAvailable)return toast('服务端未配置 MailDispatch');
     const delay=Number($('mailAggregationDelay').value);if(!Number.isInteger(delay)||delay<0||delay>86400)return toast('聚合时间必须是 0 到 86400 之间的整数秒');
     $('configSave').disabled=true;
-    try{const result=await post('/api/v1/mail-notifications',{enabled:$('mailNotificationEnabled').checked,aggregationDelaySeconds:delay,includeResponse:$('mailIncludeResponse').checked,includeSessionDetails:$('mailIncludeSessionDetails').checked,collabEscalations:$('mailCollabEscalations').checked});state.mailSettings=result.settings;updateMailControls();toast('邮件通知设置已保存');}
+    try{const result=await postB(primaryBackend()?.id,'/api/v1/mail-notifications',{enabled:$('mailNotificationEnabled').checked,aggregationDelaySeconds:delay,includeResponse:$('mailIncludeResponse').checked,includeSessionDetails:$('mailIncludeSessionDetails').checked,collabEscalations:$('mailCollabEscalations').checked});state.mailSettings=result.settings;updateMailControls();toast('邮件通知设置已保存');}
     catch(error){toast(error.message)}finally{$('configSave').disabled=!state.mailNotificationsAvailable;}
   }
 
@@ -748,7 +933,7 @@
       const sessions = document.createElement('select');
       for (const agent of agents) {
         const option = document.createElement('option'); option.value = agent.agentId;
-        option.textContent = agentLabel(agent); option.selected = agent.agentId === agentId;
+        option.textContent = connectedBackends().length > 1 ? `${agent.backendName} · ${agentLabel(agent)}` : agentLabel(agent); option.selected = agent.agentId === agentId;
         sessions.append(option);
       }
       sessionLabel.append(sessions); body.append(sessionLabel);
@@ -774,51 +959,51 @@
   }
   async function createAgent() {
     if (!state.workspace) return toast('请先选择 Workspace');
-    const cwd=$('agentCwd').value.trim()||'.'; let sessions=[]; try { sessions=await api(`/api/v1/sessions?workspaceId=${state.workspace.id}&path=${encodeURIComponent(cwd)}`); } catch(e){return toast(e.message);}
+    const cwd=$('agentCwd').value.trim()||'.'; let sessions=[]; try { sessions=await apiB(state.workspace.backendId, `/api/v1/sessions?workspaceId=${encodeURIComponent(scid(state.workspace.id))}&path=${encodeURIComponent(cwd)}`); } catch(e){return toast(e.message);}
     const result=await modal('新建 Agent',body=>{const c=field(body,'工作路径',cwd);const l=document.createElement('label');l.textContent='Session';const s=document.createElement('select');s.innerHTML='<option value="">新 Session</option>'+sessions.map(x=>`<option value="${esc(x.path)}">${esc(x.name||x.sessionName||x.id||x.path)} · ${esc(x.modified||'')}</option>`).join('');l.append(s);body.append(l);return()=>({cwd:c.value.trim()||'.',sessionFile:s.value||undefined});},'创建');
-    if (!result) return; try { const agent=await post('/api/v1/agents',{workspaceId:state.workspace.id,relativeCwd:result.cwd,sessionFile:result.sessionFile}),binding=result.sessionFile?null:autoBindNewSession(agent);await refreshAgents();await selectAgent(agent);if(binding)toast(`新 Session 已自动绑定到按键 ${binding.slot+1}`);}catch(e){toast(e.message);}
+    if (!result) return; try { const created=await postB(state.workspace.backendId,'/api/v1/agents',{workspaceId:scid(state.workspace.id),relativeCwd:result.cwd,sessionFile:result.sessionFile}),agent=stampNewItem(state.workspace.backendId,created),binding=result.sessionFile?null:autoBindNewSession(agent);await refreshAgents();await selectAgent(agent);if(binding)toast(`新 Session 已自动绑定到按键 ${binding.slot+1}`);}catch(e){toast(e.message);}
   }
   async function navigateAgent(entryId) {
     const agent=state.agent;if(!agent)return;
-    const result=await post(`/api/v1/agents/${agent.agentId}/navigate`,{entryId});
+    const result=await postAgent(agent.agentId,'/navigate',{entryId});
     await selectAgent(agent);
     if(result.editorText!==undefined)$('input').value=result.editorText;
     toast(result.editorText!==undefined?'已回退到该用户输入，可编辑后重新发送':'已回退到所选输出');
   }
   async function showSessionTree() {
-    if (!state.agent) return toast('请选择 Agent'); const session=await api(`/api/v1/agents/${state.agent.agentId}/session`); const entries=session.entries||[];
+    if (!state.agent) return toast('请选择 Agent'); const session=await apiAgent(state.agent.agentId,'/session'); const entries=session.entries||[];
     const choice=await modal('Session Tree',body=>{const actionLabel=document.createElement('label');actionLabel.textContent='操作';const action=document.createElement('select');action.innerHTML='<option value="navigate">Navigate 到条目</option><option value="fork">从用户消息 Fork 新 Agent</option>';actionLabel.append(action);body.append(actionLabel);const list=document.createElement('div');list.className='modal-list';let selected='';for(const e of entries){const b=document.createElement('button');b.type='button';b.className='choice';const text=textContent(e.message?.content||e.content)||e.type;b.innerHTML=`${e.id===session.leafId?'● ':'○ '}${esc(text.slice(0,100))}<small>${esc(e.id)}</small>`;b.onclick=()=>{selected=e.id;list.querySelectorAll('button').forEach(x=>x.classList.remove('selected'));b.classList.add('selected');};list.append(b);}body.append(list);return()=>selected?{entryId:selected,action:action.value}:null;},'执行');
-    if(choice){if(choice.action==='fork'){const result=await post(`/api/v1/agents/${state.agent.agentId}/fork`,{entryId:choice.entryId}),binding=autoBindNewSession(result.agent);await refreshAgents();await selectAgent(result.agent);if(binding)toast(`Fork Session 已自动绑定到按键 ${binding.slot+1}`);}else await navigateAgent(choice.entryId);}
+    if(choice){if(choice.action==='fork'){const result=await postAgent(state.agent.agentId,'/fork',{entryId:choice.entryId}),binding=autoBindNewSession(result.agent);result.agent=stampNewItem(agentBackendId(state.agent.agentId),result.agent);await refreshAgents();await selectAgent(result.agent);if(binding)toast(`Fork Session 已自动绑定到按键 ${binding.slot+1}`);}else await navigateAgent(choice.entryId);}
   }
   async function revert() {
-    if(!state.agent)return toast('请选择 Agent');const session=await api(`/api/v1/agents/${state.agent.agentId}/session`);
+    if(!state.agent)return toast('请选择 Agent');const session=await apiAgent(state.agent.agentId,'/session');
     const messages=(session.entries||[]).filter(e=>e.type==='message'&&['user','assistant'].includes(e.message?.role));
     if(!messages.length)return toast('当前 Session 没有可回退的消息');
     const selected=await modal('Undo（Session Tree）',body=>{const note=document.createElement('p');note.className='muted';note.textContent='选择用户输入会回到输入前并恢复文字；选择 Agent 输出会保留该输出、移除后续上下文。文件改动不会撤销。';body.append(note);const list=document.createElement('div');list.className='modal-list';let value=null;for(const e of [...messages].reverse()){const role=e.message.role==='user'?'You':'Agent',text=textContent(e.message.content)||'(空消息)';const b=document.createElement('button');b.type='button';b.className='choice';b.innerHTML=`<b>${role}</b> ${esc(text.slice(0,160))}<small>${esc(e.id)}${e.id===session.leafId?' · 当前':''}</small>`;b.onclick=()=>{value=e.id;list.querySelectorAll('button').forEach(x=>x.classList.remove('selected'));b.classList.add('selected');};list.append(b);}body.append(list);return()=>value;},'回退');
     if(selected)await navigateAgent(selected);
   }
   async function modelControls() {
-    if(!state.agent)return toast('请选择 Agent');const cap=await api(`/api/v1/agents/${state.agent.agentId}/capabilities`);
+    if(!state.agent)return toast('请选择 Agent');const cap=await apiAgent(state.agent.agentId,'/capabilities');
     const result=await modal('模型与 Thinking',body=>{const ml=document.createElement('label');ml.textContent='模型';const m=document.createElement('select');for(const x of cap.models||[]){const o=document.createElement('option');o.value=JSON.stringify([x.provider,x.id]);o.textContent=`${x.provider} / ${x.name||x.id}`;o.selected=x.provider===cap.model?.provider&&x.id===cap.model?.id;m.append(o);}ml.append(m);body.append(ml);const tl=document.createElement('label');tl.textContent='Thinking level';const t=document.createElement('select');for(const x of cap.thinkingLevels||[]){const o=document.createElement('option');o.value=x;o.textContent=x;o.selected=x===cap.thinkingLevel;t.append(o);}tl.append(t);body.append(tl);return()=>({model:m.value?JSON.parse(m.value):null,thinking:t.value});});
-    if(result){if(result.model)await post(`/api/v1/agents/${state.agent.agentId}/model`,{provider:result.model[0],modelId:result.model[1]});if(result.thinking)await post(`/api/v1/agents/${state.agent.agentId}/thinking`,{level:result.thinking});toast('设置已更新');}
+    if(result){if(result.model)await postAgent(state.agent.agentId,'/model',{provider:result.model[0],modelId:result.model[1]});if(result.thinking)await postAgent(state.agent.agentId,'/thinking',{level:result.thinking});toast('设置已更新');}
   }
 
   $('pairCancel').onclick=()=>$('pairDialog').close();
   $('modalCancel').onclick=()=>$('modal').close('cancel');
-  $('pairForm').onsubmit=async event=>{event.preventDefault();$('pairSubmit').disabled=true;try{await connect($('pairBase').value,$('pairToken').value);}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
-  $('openConfig').onclick=openConfig;$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('api').onchange=()=>{state.base=$('api').value.replace(/\/$/,'');localStorage.rpBase=state.base;openPair();};
-  $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){await post('/api/v1/workspaces',result);await refreshWs();}};
+  $('pairForm').onsubmit=async event=>{event.preventDefault();$('pairSubmit').disabled=true;try{const base=$('pairBase').value,token=$('pairToken').value;let name=$('pairName').value.trim();if(!name){try{name=new URL(base.trim()).hostname}catch{}}const existing=state.backends.find(item=>item.base===base.trim().replace(/\/$/,''));const entry=existing||{id:`bk-${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`,name:'',base:'',token:'',saved:false};entry.name=name;entry.base=base;entry.token=token;await connectBackend(entry,{confirmSave:true});$('pairDialog').close();}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
+  $('openConfig').onclick=openConfig;$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('disconnectAll').onclick=()=>disconnectAll();$('backendFilter').onchange=()=>{state.backendFilter=$('backendFilter').value;localStorage.rpBackendFilter=state.backendFilter;renderWorkspaces().catch(()=>{});renderAgentList();};
+  $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){const target=state.workspace?.backendId||primaryBackend()?.id;if(!target)return toast('没有可用的 Backend');await postB(target,'/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
-  $('menuStartAgent').onclick=()=>startAgent(state.contextTarget.relativePath);$('menuOpenTerminal').onclick=()=>openTerminal(state.contextTarget.relativePath);$('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuBindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void bindKeyboard({agentId:agent.agentId}).catch(error=>toast(error.message));};$('menuKeyboardColor').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void changeKeyboardColor(agent).catch(error=>toast(error.message));};$('menuUnbindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent&&sessionKeyboard.unbind(agent.agentId))toast('已取消键盘按键绑定');};$('menuCloseTerminal').onclick=()=>{const terminal=agentContextTarget?.kind==='terminal'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal(terminal);};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await post(`/api/v1/agents/${agent.agentId}/archive`);sessionKeyboard.unbind(agent.agentId);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
-  $('newAgent').onclick=createAgent;$('newTerminal').onclick=()=>openTerminal($('agentCwd').value.trim()||'.');$('abort').onclick=()=>{if(!state.agent)return;const id=state.agent.agentId;Promise.all([post(`/api/v1/agents/${id}/abort`),post(`/api/v1/agents/${id}/bash-abort`)]).catch(e=>toast(e.message));};$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await api(`/api/v1/agents/${state.agent.agentId}`,{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
-  $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await post(`/api/v1/agents/${state.agent.agentId}/session-name`,{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
-  $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await post(`/api/v1/agents/${state.agent.agentId}/compact`,{instructions:instructions||undefined});toast('Compact 完成');}};
+  $('menuStartAgent').onclick=()=>startAgent(state.contextTarget.relativePath);$('menuOpenTerminal').onclick=()=>openTerminal(state.contextTarget.relativePath);$('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuBindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void bindKeyboard({agentId:agent.agentId}).catch(error=>toast(error.message));};$('menuKeyboardColor').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void changeKeyboardColor(agent).catch(error=>toast(error.message));};$('menuUnbindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent&&sessionKeyboard.unbind(agent.agentId))toast('已取消键盘按键绑定');};$('menuCloseTerminal').onclick=()=>{const terminal=agentContextTarget?.kind==='terminal'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal(terminal);};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await postAgent(agent.agentId,'/archive');sessionKeyboard.unbind(agent.agentId);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
+  $('newAgent').onclick=createAgent;$('newTerminal').onclick=()=>openTerminal($('agentCwd').value.trim()||'.');$('abort').onclick=()=>{if(!state.agent)return;const id=state.agent.agentId;Promise.all([postAgent(id,'/abort'),postAgent(id,'/bash-abort')]).catch(e=>toast(e.message));};$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await apiAgent(state.agent.agentId,'',{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
+  $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await postAgent(state.agent.agentId,'/session-name',{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
+  $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await postAgent(state.agent.agentId,'/compact',{instructions:instructions||undefined});toast('Compact 完成');}};
   $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;closeCommandPicker();const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();
     // `!cmd` runs inside the Agent session (output is recorded in the Session); `!!cmd` keeps the output out of the model context.
     if(text.startsWith('!')){const excludeFromContext=text.startsWith('!!'),command=text.slice(excludeFromContext?2:1).trim();if(!command)return toast('请输入要执行的命令');addCard(null,text,'user');$('input').value='';
-      try{await post(`/api/v1/agents/${agentId}/bash`,{command,excludeFromContext});if(state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.toolCards.clear();}}catch(e){toast(`命令失败：${e.message}`);}return;}
-    addCard(null,text,'user');$('input').value='';try{await post(`/api/v1/agents/${agentId}/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
+      try{await postAgent(agentId,'/bash',{command,excludeFromContext});if(state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.toolCards.clear();}}catch(e){toast(`命令失败：${e.message}`);}return;}
+    addCard(null,text,'user');$('input').value='';try{await postAgent(agentId,`/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
   $('input').onkeydown=event=>{if(!$('commandPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setCommandSelection(state.commandIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||(event.key==='Enter'&&!event.ctrlKey&&!event.metaKey)){event.preventDefault();chooseCommand(state.commandFiltered[state.commandIndex]);return;}if(event.key==='Escape'){event.preventDefault();closeCommandPicker();return;}}if(!$('mentionPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setMentionSelection(state.mentionIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||event.key==='Enter'){event.preventDefault();chooseMention(state.mentionFiltered[state.mentionIndex],event.key==='Enter');return;}if(event.key==='Escape'){event.preventDefault();closeMention();return;}}if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();}};$('input').oninput=()=>{const command=commandContext();if(command){if(!$('mentionPicker').hidden)closeMention();void openCommandPicker(command.query);return;}if(!$('commandPicker').hidden)closeCommandPicker();const context=mentionContext();if(!context){if(!$('mentionPicker').hidden)closeMention();return;}const fresh=$('mentionPicker').hidden||state.mentionStart!==context.start;state.mentionStart=context.start;state.mentionEnd=context.replacementEnd;if(fresh){state.mentionPrefix='';void openMention(state.treePath,context.query);return;}const filter=state.mentionPrefix&&context.query.startsWith(state.mentionPrefix)?context.query.slice(state.mentionPrefix.length):context.query;renderMentionItems(filter);};
   $('commandClose').onclick=closeCommandPicker;
   $('mentionUp').onclick=()=>browseMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
@@ -827,7 +1012,19 @@
   document.querySelectorAll('.agent-action').forEach(button=>button.addEventListener('click',()=>button.closest('.toolbar').classList.remove('actions-open')));
   window.addEventListener('popstate',event=>setMobileView(event.state?.rpView||'home'));
   mobileMedia.addEventListener?.('change',event=>{if(event.matches)setMobileView('home',{replace:true});});
-  window.addEventListener('beforeunload',()=>{state.manuallyClosed=true;state.ws?.close();state.terminalWs?.close();state.mediaRecorder?.state==='recording'&&state.mediaRecorder.stop();stopVoiceAudio();});
+  window.addEventListener('beforeunload',()=>{for(const backend of state.backends)closeBackendSocket(backend);state.terminalWs?.close();state.mediaRecorder?.state==='recording'&&state.mediaRecorder.stop();stopVoiceAudio();});
   window.addEventListener('focus',updateNotificationButton);
-  setMobileView('home', {replace:true}); updateConfigUi(); updateKeyboardUi();void sessionKeyboard.restoreAuthorized();openPair();
+  setMobileView('home', {replace:true}); updateConfigUi(); updateKeyboardUi(); renderBackendFilter(); updateHeaderStatus(); void sessionKeyboard.restoreAuthorized();
+  // Backends whose pairing code was explicitly saved reconnect on their own;
+  // the pairing dialog is only for first-time or failed connections.
+  void (async () => {
+    const saved = state.backends.filter(backend => backend.saved && backend.token);
+    if (!saved.length) { openPair(); return; }
+    const results = await Promise.allSettled(saved.map(backend => connectBackend(backend, {confirmSave:false})));
+    if (!hasConnection()) {
+      const error = results.find(result => result.status === 'rejected')?.reason;
+      if (error) toast(`自动连接失败：${error.message}`);
+      openPair();
+    }
+  })();
 })();
