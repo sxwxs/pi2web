@@ -1,4 +1,4 @@
-import {describe,it,expect,afterEach} from 'vitest';import WebSocket from 'ws';import {mkdtemp} from 'node:fs/promises';import {tmpdir} from 'node:os';import path from 'node:path';import {RemotePiServer} from '../src/server.js';import {WorkspaceStore} from '../src/workspaces.js';import {AgentManager,MockBackend} from '../src/agents.js';
+import {describe,it,expect,afterEach} from 'vitest';import http from 'node:http';import WebSocket from 'ws';import {mkdtemp} from 'node:fs/promises';import {tmpdir} from 'node:os';import path from 'node:path';import {RemotePiServer} from '../src/server.js';import {WorkspaceStore} from '../src/workspaces.js';import {AgentManager,MockBackend} from '../src/agents.js';
 let server:RemotePiServer|undefined;afterEach(async()=>{await server?.stop();server=undefined});
 describe('HTTP server',()=>{it('protects API and supports login/health',async()=>{const dir=await mkdtemp(path.join(tmpdir(),'remote-pi-'));server=new RemotePiServer({port:0,dataDir:dir});const first=await server.auth.init();const address=await server.start();const base=`http://127.0.0.1:${address!.port}`;expect((await fetch(base+'/health')).status).toBe(200);const web=await fetch(base+'/'),html=await web.text();expect(web.status).toBe(200);expect(html).toContain('添加 Backend');expect(html).not.toContain('<script src="/vendor/xterm.js"></script>');expect(html).not.toContain('<script src="/vendor/addon-fit.js"></script>');expect(html).not.toContain('<link rel="stylesheet" href="/vendor/xterm.css">');expect((await fetch(base+'/app.js')).headers.get('content-type')).toContain('text/javascript');
  const keyboard=await fetch(base+'/hid-keyboard.js');
@@ -21,10 +21,10 @@ describe('relay hosts',()=>{it('lists, relays HTTP and pipes WebSocket to a save
   server=new RemotePiServer({port:0,dataDir:await mkdtemp(path.join(tmpdir(),'remote-pi-relay-main-'))});const primaryAuth=await server.auth.init();const address=await server.start();
   const base=`http://127.0.0.1:${address!.port}`,auth={authorization:`Bearer ${primaryAuth.token}`,'content-type':'application/json'};
   const created=await (await fetch(`${base}/api/v1/hosts`,{method:'POST',headers:auth,body:JSON.stringify({name:'target',base:`http://127.0.0.1:${targetAddress!.port}`,token:targetAuth.token})})).json();
-  expect(created.data.id).toBeTruthy();expect(created.data.token).toBeUndefined();
+  expect(created.data.id).toBeTruthy();expect(created.data.token).toBeUndefined();expect(created.data.hasToken).toBe(true);
   const hostId=created.data.id;
   const list=await (await fetch(`${base}/api/v1/hosts`,{headers:{authorization:auth.authorization}})).json();
-  expect(list.data).toHaveLength(1);expect(list.data[0].name).toBe('target');expect(list.data[0].token).toBeUndefined();
+  expect(list.data).toHaveLength(1);expect(list.data[0].name).toBe('target');expect(list.data[0].token).toBeUndefined();expect(list.data[0].hasToken).toBe(true);
   expect((await fetch(`${base}/api/v1/hosts/${hostId}/health`)).status).toBe(401);
   const relayedHealth=await fetch(`${base}/api/v1/hosts/${hostId}/health`,{headers:{authorization:auth.authorization}});expect(relayedHealth.status).toBe(200);
   const healthBody=await relayedHealth.json();expect(healthBody.data.status).toBe('ok');
@@ -43,4 +43,16 @@ describe('tunnel authorization header',()=>{it('authenticates HTTP and WebSocket
  expect((await fetch(`${base}/api/v1/system/status`,{headers:{'x-tunnel-authorization':'Bearer wrong-token-wrong-token'}})).status).toBe(401);
  const ws=await new Promise<any>((resolve,reject)=>{const socket=new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`,{headers:{'x-tunnel-authorization':`Bearer ${first.token}`}});socket.on('open',()=>socket.send(JSON.stringify({type:'subscribe_all',fromNow:true})));socket.on('message',raw=>{const value=JSON.parse(String(raw));if(value.type==='subscribed_all'){socket.close();resolve(value)}});socket.on('error',reject)});
  expect(ws.protocolVersion).toBe(1);
+})});
+describe('relay tunnel forwarding',()=>{it('uses raw X-Tunnel-Authorization and diagnoses empty upstream errors',async()=>{
+ let seenTunnel:string|undefined,seenAuthorization:string|undefined;
+ const upstream=http.createServer((req,res)=>{seenTunnel=String(req.headers['x-tunnel-authorization']??'');seenAuthorization=String(req.headers.authorization??'');if(req.url==='/reject'){res.statusCode=401;return res.end()}res.setHeader('content-type','application/json');res.end(JSON.stringify({data:{status:'ok'}}))});
+ await new Promise<void>(resolve=>upstream.listen(0,'127.0.0.1',resolve));const upstreamAddress=upstream.address();if(!upstreamAddress||typeof upstreamAddress==='string')throw new Error('Missing upstream address');
+ try{
+  server=new RemotePiServer({port:0,dataDir:await mkdtemp(path.join(tmpdir(),'remote-pi-relay-header-'))});const first=await server.auth.init();const address=await server.start();const base=`http://127.0.0.1:${address!.port}`,authorization=`Bearer ${first.token}`;
+  const created=await (await fetch(`${base}/api/v1/hosts`,{method:'POST',headers:{authorization,'content-type':'application/json'},body:JSON.stringify({name:'tunnel',base:`http://127.0.0.1:${upstreamAddress.port}`,token:'target-token-raw-123456'})})).json();const prefix=`${base}/api/v1/hosts/${created.data.id}`;
+  const ok=await fetch(`${prefix}/health`,{headers:{authorization}});expect(ok.status).toBe(200);expect(seenTunnel).toBe('target-token-raw-123456');expect(seenAuthorization).toBe('Bearer target-token-raw-123456');
+  const rejected=await fetch(`${prefix}/reject`,{headers:{authorization}});expect(rejected.status).toBe(401);expect(rejected.headers.get('x-relay-upstream-status')).toBe('401');expect(rejected.headers.get('x-relay-host-id')).toBe(created.data.id);
+  const error=await rejected.json();expect(error.error.code).toBe('RELAY_UPSTREAM_ERROR');expect(error.error.message).toContain('HTTP 401');
+ }finally{await new Promise<void>(resolve=>upstream.close(()=>resolve()))}
 })});
