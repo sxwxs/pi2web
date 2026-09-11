@@ -73,7 +73,8 @@
     const response = await fetch(base + url, {...options, headers});
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (disconnectOnUnauthorized && response.status === 401) markBackendUnauthorized(base, '配对码无效或已失效');
+      // A relayed target may return 401 even though authentication to the relay succeeded.
+      if (disconnectOnUnauthorized && response.status === 401 && !response.headers.get('x-relay-upstream-status')) markBackendUnauthorized(base, '配对码无效或已失效');
       throw Error(body.error?.message || `HTTP ${response.status}`);
     }
     return body.data;
@@ -262,14 +263,15 @@
     if(!state.relayHosts.length){const empty=document.createElement('div');empty.className='relay-host-empty';empty.textContent=`「${via.name}」尚未保存中继主机。`;list.replaceChildren(empty);return;}
     list.replaceChildren(...state.relayHosts.map(host=>{
       const row=document.createElement('div');row.className='backend-row';
-      const info=document.createElement('div');info.className='backend-row-info';const name=document.createElement('b');name.textContent=host.name;const detail=document.createElement('small');detail.textContent=`${host.base} · 保存在「${via.name}」`;info.append(name,detail);
+      const info=document.createElement('div');info.className='backend-row-info';const name=document.createElement('b');name.textContent=host.name;const detail=document.createElement('small');detail.textContent=`${host.base} · 保存在「${via.name}」 · ${host.hasToken?'目标 token 已保存':'未保存目标 token'}`;info.append(name,detail);
       const actions=document.createElement('div');actions.className='backend-row-actions';
       const existing=state.backends.find(item=>item.relayHostId===host.id&&item.relayVia===via.id);
       const connect=document.createElement('button');connect.type='button';connect.textContent=existing?.status==='connected'?'已连接':'连接';connect.disabled=existing?.status==='connected';
       connect.onclick=async()=>{connect.disabled=true;try{const entry=existing||{id:`bk-relay-${via.id}-${host.id}`,name:host.name,base:host.base,token:'',saved:false,relayHostId:host.id,relayVia:via.id};await connectBackend(entry,{confirmSave:false});renderRelayHostList();toast(`已通过「${via.name}」连接 ${host.name}`)}catch(error){toast(error.message)}finally{connect.disabled=false}};
+      const probe=document.createElement('button');probe.type='button';probe.textContent='测试';probe.onclick=async()=>{probe.disabled=true;try{const health=await apiB(via.id,`/api/v1/hosts/${encodeURIComponent(host.id)}/health`);toast(`${host.name} 中继测试成功${health?.status?` · ${health.status}`:''}`)}catch(error){toast(`${host.name} 中继测试失败：${error.message}`)}finally{probe.disabled=false}};
       const remove=document.createElement('button');remove.type='button';remove.className='danger-action';remove.textContent='删除主机';
       remove.onclick=async()=>{if(!confirm(`从中继「${via.name}」删除主机「${host.name}」及其保存的 token？`))return;remove.disabled=true;try{await apiB(via.id,`/api/v1/hosts/${encodeURIComponent(host.id)}`,{method:'DELETE'});state.relayHosts=state.relayHosts.filter(item=>item.id!==host.id);if(existing)removeBackendConnection(existing);renderRelayHostList();toast('已从中继删除主机')}catch(error){toast(error.message)}finally{remove.disabled=false}};
-      actions.append(connect,remove);row.append(info,actions);return row;
+      actions.append(connect,probe,remove);row.append(info,actions);return row;
     }));
   }
   async function loadRelayHosts(){

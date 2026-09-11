@@ -174,12 +174,17 @@ export class RemotePiServer {
    let body:Buffer|undefined;
    if(!['GET','HEAD'].includes(method))body=await this.binaryBody(req,25*1024*1024);
    const headers:Record<string,string>={};
-   if(host.token){headers.authorization=`Bearer ${host.token}`;headers['x-tunnel-authorization']=`Bearer ${host.token}`}
+   if(host.token){headers.authorization=`Bearer ${host.token}`;headers['x-tunnel-authorization']=host.token}
    const contentType=req.headers['content-type'];if(typeof contentType==='string')headers['content-type']=contentType;
    const response=await (globalThis as any).fetch(target,{method,headers,body:body&&body.length?body:undefined});
    res.statusCode=response.status;
    for(const name of ['content-type','retry-after','cache-control']){const value=response.headers.get(name);if(value)res.setHeader(name,value)}
    const payload=Buffer.from(await response.arrayBuffer());
+   res.setHeader('x-relay-upstream-status',String(response.status));res.setHeader('x-relay-host-id',host.id);
+   if(response.status>=400){
+    console.error(`[relay] ${method} ${host.name} (${host.id}) ${restPath} -> HTTP ${response.status}`);
+    if(!payload.length)return json(res,response.status,{error:{code:'RELAY_UPSTREAM_ERROR',message:`Target ${host.name} returned HTTP ${response.status}`,requestId:String(res.getHeader('x-request-id')??''),hostId:host.id}});
+   }
    res.setHeader('content-length',String(payload.length));
    res.end(payload);
   }catch(error){json(res,502,{error:{code:'RELAY_FAILED',message:(error as Error).message}})}
@@ -190,23 +195,24 @@ export class RemotePiServer {
   if(!host){socket.write('HTTP/1.1 404 Not Found\r\n\r\n');socket.destroy();return}
   const protocols:string[]=[];if(host.token)protocols.push(`access-token.${host.token}`);
   const target=`${host.base.replace(/^http/,'ws').replace(/\/+$/,'')}${restPath}`;
-  const upstream=new WebSocket(target,protocols,{maxPayload:2*1024*1024,headers:host.token?{authorization:`Bearer ${host.token}`,'x-tunnel-authorization':`Bearer ${host.token}`}:undefined});
-  let opened=false;
+  const upstream=new WebSocket(target,protocols,{maxPayload:2*1024*1024,headers:host.token?{authorization:`Bearer ${host.token}`,'x-tunnel-authorization':host.token}:undefined});
+  let opened=false,failed=false;
   upstream.on('open',()=>{opened=true;this.wss.handleUpgrade(req,socket,head,client=>{
    const forward=(from:WebSocket,to:WebSocket)=>{from.on('message',(data,isBinary)=>{if(to.readyState===WebSocket.OPEN)to.send(data,{binary:isBinary})})};
    forward(client,upstream);forward(upstream,client);
    client.on('close',()=>upstream.close());upstream.on('close',()=>client.close());
    client.on('error',()=>upstream.terminate());upstream.on('error',()=>client.terminate());
   })});
-  upstream.on('error',()=>{if(!opened){socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');socket.destroy()}});
+  upstream.on('unexpected-response',(_request,response)=>{if(opened||failed)return;failed=true;const status=response.statusCode??502;console.error(`[relay] WS ${host.name} (${host.id}) ${restPath} -> HTTP ${status}`);response.resume();socket.write(`HTTP/1.1 ${status} ${response.statusMessage||'Upstream Error'}\r\nX-Relay-Upstream-Status: ${status}\r\nX-Relay-Host-Id: ${host.id}\r\nContent-Length: 0\r\n\r\n`);socket.destroy()});
+  upstream.on('error',()=>{if(!opened&&!failed){failed=true;console.error(`[relay] WS ${host.name} (${host.id}) ${restPath} -> connection failed`);socket.write('HTTP/1.1 502 Bad Gateway\r\nX-Relay-Upstream-Status: 502\r\nContent-Length: 0\r\n\r\n');socket.destroy()}});
  }
  private async serveWeb(pathname:string,req:http.IncomingMessage,res:http.ServerResponse){const asset=webFiles[pathname];if(!asset)return false;try{const content=await readFile(path.isAbsolute(asset.file)?asset.file:path.join(webRoot,asset.file)),etag=`"${createHash('sha256').update(content).digest('base64url')}"`,ifNoneMatch=String(req.headers['if-none-match']??'').split(',').map(value=>value.trim().replace(/^W\//,''));res.setHeader('content-type',asset.type);res.setHeader('cache-control',pathname.startsWith('/vendor/')?'public, max-age=86400':'no-cache');res.setHeader('etag',etag);res.setHeader('x-content-type-options','nosniff');if(ifNoneMatch.includes(etag)||ifNoneMatch.includes('*')){res.statusCode=304;res.end();return true}res.statusCode=200;res.end(content)}catch{json(res,500,{error:{code:'WEB_UI_UNAVAILABLE',message:'Web UI files are missing. Reinstall the pi2web package.'}})}return true}
  /** Reads a JSON body as bytes so the size limit applies while streaming and multi-byte characters are never split across chunks. */
  private async body(req:http.IncomingMessage,maxBytes=2*1024*1024){const raw=await this.binaryBody(req,maxBytes);return raw.length?JSON.parse(raw.toString('utf8')):{}}
  private async binaryBody(req:http.IncomingMessage,maxBytes=25*1024*1024){const chunks:Buffer[]=[];let size=0;for await(const value of req){const chunk=Buffer.isBuffer(value)?value:Buffer.from(value);size+=chunk.length;if(size>maxBytes)throw Object.assign(new Error('Request too large'),{code:'REQUEST_TOO_LARGE'});chunks.push(chunk)}return Buffer.concat(chunks)}
- private async handle(req:http.IncomingMessage,res:http.ServerResponse){const requestId=randomUUID();res.setHeader('x-request-id',requestId);res.setHeader('access-control-allow-origin','*');res.setHeader('access-control-allow-headers','Authorization,X-Tunnel-Authorization,Content-Type,X-Audio-Filename');res.setHeader('access-control-allow-methods','GET,POST,DELETE,OPTIONS');try{if(req.method==='OPTIONS'){res.statusCode=204;return res.end()}const u=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`);if(req.method==='GET'&&await this.serveWeb(u.pathname,req,res))return;if(req.method==='GET'&&u.pathname==='/health')return json(res,200,{data:{status:'ok',authRequired:!this.noAuth}});const parts=u.pathname.split('/').filter(Boolean);if(req.method==='POST'&&u.pathname==='/api/v1/auth/login'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed pairing attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const b=await this.body(req);if(await this.auth.verify(String(b.token??''))){this.loginFailures.delete(key);return json(res,200,{data:{authenticated:true}})}const lockedFor=this.recordLoginFailure(key);if(lockedFor>0)res.setHeader('retry-after',String(Math.ceil(lockedFor/1000)));return json(res,401,{error:{code:'UNAUTHORIZED',message:'Invalid token',requestId}})}if(parts[0]==='api'&&parts[1]==='v1'&&parts[2]==='collab'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const header=String(req.headers['x-tunnel-authorization']??req.headers.authorization??''),token=header.startsWith('Bearer ')?header.slice(7):'';const result=await this.collabRouter.handle({method:req.method??'GET',url:u,parts,token,body:()=>this.body(req)});if(!result)return json(res,404,{error:{code:'NOT_FOUND',message:'Not found',requestId}});if(result.authFailed)this.recordLoginFailure(key);else this.loginFailures.delete(key);return json(res,result.status,result.payload)}if(!(await this.authorized(req)))return json(res,401,{error:{code:'UNAUTHORIZED',message:'Authentication required',requestId}});
+ private async handle(req:http.IncomingMessage,res:http.ServerResponse){const requestId=randomUUID();res.setHeader('x-request-id',requestId);res.setHeader('access-control-allow-origin','*');res.setHeader('access-control-allow-headers','Authorization,X-Tunnel-Authorization,Content-Type,X-Audio-Filename');res.setHeader('access-control-expose-headers','X-Request-Id,X-Relay-Upstream-Status,X-Relay-Host-Id');res.setHeader('access-control-allow-methods','GET,POST,DELETE,OPTIONS');try{if(req.method==='OPTIONS'){res.statusCode=204;return res.end()}const u=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`);if(req.method==='GET'&&await this.serveWeb(u.pathname,req,res))return;if(req.method==='GET'&&u.pathname==='/health')return json(res,200,{data:{status:'ok',authRequired:!this.noAuth}});const parts=u.pathname.split('/').filter(Boolean);if(req.method==='POST'&&u.pathname==='/api/v1/auth/login'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed pairing attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const b=await this.body(req);if(await this.auth.verify(String(b.token??''))){this.loginFailures.delete(key);return json(res,200,{data:{authenticated:true}})}const lockedFor=this.recordLoginFailure(key);if(lockedFor>0)res.setHeader('retry-after',String(Math.ceil(lockedFor/1000)));return json(res,401,{error:{code:'UNAUTHORIZED',message:'Invalid token',requestId}})}if(parts[0]==='api'&&parts[1]==='v1'&&parts[2]==='collab'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const header=String(req.headers['x-tunnel-authorization']??req.headers.authorization??''),token=header.startsWith('Bearer ')?header.slice(7):header.trim();const result=await this.collabRouter.handle({method:req.method??'GET',url:u,parts,token,body:()=>this.body(req)});if(!result)return json(res,404,{error:{code:'NOT_FOUND',message:'Not found',requestId}});if(result.authFailed)this.recordLoginFailure(key);else this.loginFailures.delete(key);return json(res,result.status,result.payload)}if(!(await this.authorized(req)))return json(res,401,{error:{code:'UNAUTHORIZED',message:'Authentication required',requestId}});
 if(parts[2]==='hosts'){
- if(parts.length===3&&req.method==='GET')return json(res,200,{data:this.relayHosts().map(({token,...host})=>host)});
+ if(parts.length===3&&req.method==='GET')return json(res,200,{data:this.relayHosts().map(({token,...host})=>({...host,hasToken:!!token}))});
  if(parts.length===3&&req.method==='POST'){
   const b=await this.body(req);
   if(typeof b.name!=='string'||!b.name.trim()||typeof b.base!=='string'||!b.base.trim())return json(res,400,{error:{code:'INVALID_REQUEST',message:'name and base required',requestId}});
@@ -216,7 +222,7 @@ if(parts[2]==='hosts'){
   if(hosts.some(host=>host.base.replace(/\/+$/,'')===base))return json(res,400,{error:{code:'HOST_ALREADY_EXISTS',message:'Host already exists',requestId}});
   const host:RelayHost={id:`host-${randomUUID()}`,name:b.name.trim().slice(0,80),base,token:typeof b.token==='string'&&b.token.trim()?b.token.trim():undefined,createdAt:new Date().toISOString()};
   hosts.push(host);this.metadata.setSetting('relayHosts',hosts);
-  const {token,...safe}=host;return json(res,201,{data:safe});
+  const {token,...safe}=host;return json(res,201,{data:{...safe,hasToken:!!token}});
  }
  if(req.method==='DELETE'&&parts.length===4){
   const hosts=this.relayHosts(),next=hosts.filter(host=>host.id!==parts[3]);
