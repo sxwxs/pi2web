@@ -32,3 +32,12 @@ describe('relay hosts',()=>{it('lists, relays HTTP and pipes WebSocket to a save
   expect(ws.protocolVersion).toBe(1);
  } finally{await target.stop()}
 })});
+describe('tunnel authorization header',()=>{it('authenticates HTTP and WebSocket without the Authorization header',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'remote-pi-tunnel-'));server=new RemotePiServer({port:0,dataDir:dir});const first=await server.auth.init();const address=await server.start();
+ const base=`http://127.0.0.1:${address!.port}`;
+ expect((await fetch(`${base}/api/v1/system/status`,{headers:{'x-tunnel-authorization':`Bearer ${first.token}`}})).status).toBe(200);
+ expect((await fetch(`${base}/api/v1/system/status`,{headers:{'x-tunnel-authorization':String(first.token)}})).status).toBe(200);
+ expect((await fetch(`${base}/api/v1/system/status`,{headers:{'x-tunnel-authorization':'Bearer wrong-token-wrong-token'}})).status).toBe(401);
+ const ws=await new Promise<any>((resolve,reject)=>{const socket=new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`,{headers:{'x-tunnel-authorization':`Bearer ${first.token}`}});socket.on('open',()=>socket.send(JSON.stringify({type:'subscribe_all',fromNow:true})));socket.on('message',raw=>{const value=JSON.parse(String(raw));if(value.type==='subscribed_all'){socket.close();resolve(value)}});socket.on('error',reject)});
+ expect(ws.protocolVersion).toBe(1);
+})});
