@@ -25,6 +25,9 @@ describe('relay hosts',()=>{it('lists, relays HTTP and pipes WebSocket to a save
   const hostId=created.data.id;
   const list=await (await fetch(`${base}/api/v1/hosts`,{headers:{authorization:auth.authorization}})).json();
   expect(list.data).toHaveLength(1);expect(list.data[0].name).toBe('target');expect(list.data[0].token).toBeUndefined();
+  expect((await fetch(`${base}/api/v1/hosts/${hostId}/health`)).status).toBe(401);
+  const relayedHealth=await fetch(`${base}/api/v1/hosts/${hostId}/health`,{headers:{authorization:auth.authorization}});expect(relayedHealth.status).toBe(200);
+  const healthBody=await relayedHealth.json();expect(healthBody.data.status).toBe('ok');
   const relayed=await (await fetch(`${base}/api/v1/hosts/${hostId}/api/v1/system/status`,{headers:{authorization:auth.authorization}})).json();
   expect(relayed.data.piVersion).toBeTruthy();expect(relayed.data.protocolVersion).toBe(1);
   expect((await fetch(`${base}/api/v1/hosts/host-x/api/v1/system/status`,{headers:{authorization:auth.authorization}})).status).toBe(404);

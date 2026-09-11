@@ -23,7 +23,7 @@
   };
   const state = {
     backends: loadStoredConnections().map(entry => ({...entry, status:'off', error:'', ws:null, reconnectTimer:null, reconnectAttempt:0, manuallyClosed:false, reconnecting:false, authRequired:true, agents:[], terminals:[], workspaces:[], serverInfo:'', voiceEnabled:false, voiceSttEnabled:false})),
-    backendFilter: localStorage.rpBackendFilter || '', workspace: null, workspaces: [], treePath: '.',
+    backendFilter: localStorage.rpBackendFilter || '', relayHosts: [], relayHostsVia: null, relayHostsError: '', workspace: null, workspaces: [], treePath: '.',
     filePath: null, fileOffset: 0, fileSize: 0, fileLimit: 64 * 1024, agent: null, agents: [], terminals: [], terminal: null, selectedKind: 'agent', ws: null, terminalWs: null,
     terminalEmulator: null, terminalAssetsPromise: null, terminalConnectAttempt: 0, fitAddon: null, resizeObserver: null, reconnectTimer: null, reconnectAttempt: 0, manuallyClosed: false, streams: new Map(), contextTarget: null,
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0, extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), connected: false, mobileView: 'home',
@@ -50,6 +50,7 @@
   const connectedBackends = () => state.backends.filter(item => item.status === 'connected');
   const hasConnection = () => connectedBackends().length > 0;
   const primaryBackend = () => connectedBackends()[0] || state.backends[0];
+  const relayController = () => connectedBackends().find(item => !item.relayHostId);
   const requireConnection = () => { if (!hasConnection()) { openPair(); return false; } return true; };
   const mobileMedia = matchMedia('(max-width: 700px)');
   const isMobile = () => mobileMedia.matches;
@@ -101,7 +102,7 @@
     $('pairName').value = target?.name || '';
     $('pairBase').value = target?.base || location.origin;
     $('pairToken').value = target?.saved ? target.token : target?.token || '';
-    $('pairRelay').checked = false; $('pairHostRow').hidden = true; $('pairHost').value = '';
+    $('pairRelay').checked = false;
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
   function persistConnections() {
@@ -146,8 +147,9 @@
       ? {prefix: `${via.base}/api/v1/hosts/${entry.relayHostId}`, token: via.token}
       : {prefix: String(entry.base || '').trim().replace(/\/$/, '') || location.origin, token: String(entry.token || '').trim()};
     let authRequired = true;
-    try { authRequired = (await request(wire.prefix, '', '/health')).authRequired !== false; } catch { /* Server may be down; the status call below reports that normally. */ }
-    if (!wire.token && authRequired) { openPair(entry); throw Error('请先输入配对码'); }
+    // The target /health is public, but the relay prefix itself is protected by the relay's token.
+    try { authRequired = (await request(wire.prefix, wire.token, '/health')).authRequired !== false; } catch { /* Server may be down; the status call below reports that normally. */ }
+    if (!isRelay && !wire.token && authRequired) { openPair(entry); throw Error('请先输入配对码'); }
     const status = await request(wire.prefix, wire.token, '/api/v1/system/status');
     if (status.protocolVersion !== 1) throw Error(`不支持的协议版本 ${status.protocolVersion}（需要 1）`);
     let backend = backendOf(entry.id);
@@ -157,7 +159,7 @@
     }
     closeBackendSocket(backend);
     Object.assign(backend, {name: String(entry.name || '').trim() || (isRelay ? entry.base : wire.prefix), base: String(entry.base || '').trim().replace(/\/$/, '') || wire.prefix, token: isRelay ? '' : wire.token, relayHostId: entry.relayHostId, relayVia: entry.relayVia, status: 'connected', error: '', serverInfo: `v${status.version} · Pi ${status.piVersion}`, reconnectAttempt: 0, authRequired, voiceEnabled: !!(status.voiceCapabilities?.tts ?? status.voiceEnabled), voiceSttEnabled: !!(status.voiceCapabilities?.stt ?? status.voiceEnabled)});
-    if (confirmSave && authRequired && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) backend.saved = true;
+    if (confirmSave && !isRelay && authRequired && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) backend.saved = true;
     persistConnections();
     updateVoiceAvailability(); updateHeaderStatus(); renderBackendList(); renderBackendFilter();
     // Mail settings live on each backend server; the first connected one owns the form.
@@ -172,6 +174,7 @@
     }
     updateConfigUi();
     connectSocket(backend);
+    if (!backend.relayHostId) void loadRelayHosts();
     return backend;
   }
   async function refreshBackendData(backend) {
@@ -213,6 +216,14 @@
     select.value = state.backendFilter;
     select.hidden = state.backends.length < 2;
   }
+  function removeBackendConnection(backend) {
+    const removed=new Set([backend,...(!backend.relayHostId?state.backends.filter(item=>item.relayVia===backend.id):[])]),removedIds=new Set([...removed].map(item=>item.id));
+    for(const item of removed){closeBackendSocket(item);for(const agent of item.agents||[])sessionKeyboard.unbind(agent.agentId)}
+    state.backends=state.backends.filter(item=>!removed.has(item));persistConnections();
+    if(state.agent&&removedIds.has(agentBackendId(state.agent.agentId))){state.agent=null;localStorage.removeItem('rpAgentId')}
+    if(state.workspace&&removedIds.has(state.workspace.backendId)){state.workspace=null;localStorage.removeItem('rpWorkspaceId')}
+    aggregateAgentLists();updateVoiceAvailability();updateHeaderStatus();renderBackendFilter();void renderWorkspaces();updateConfigUi();
+  }
   function renderBackendList() {
     const list = $('backendList');
     if (!list) return;
@@ -220,9 +231,9 @@
       const row = document.createElement('div'); row.className = 'backend-row';
       const info = document.createElement('div'); info.className = 'backend-row-info';
       const name = document.createElement('b'); name.textContent = backend.name || backend.base;
-      const detail = document.createElement('small');
+      const detail = document.createElement('small'),viaName=backend.relayVia?backendOf(backend.relayVia)?.name:'';
       const statusText = backend.status === 'connected' ? (backend.reconnecting ? '已连接 · 重连中' : `已连接 · ${backend.authRequired === false ? '无需认证 · ' : ''}${backend.serverInfo}`) : backend.status === 'error' ? `连接失败 · ${backend.error || ''}` : '未连接';
-      detail.textContent = `${backend.base} · ${statusText}`;
+      detail.textContent = `${backend.base}${viaName?` · 经「${viaName}」代理`:''} · ${statusText}`;
       info.append(name, detail);
       const actions = document.createElement('div'); actions.className = 'backend-row-actions';
       const toggle = document.createElement('button'); toggle.type = 'button'; toggle.textContent = backend.status === 'connected' ? '断开' : '连接';
@@ -234,21 +245,38 @@
         } catch (error) { backend.status = 'error'; backend.error = error.message; renderBackendList(); toast(error.message); }
         finally { toggle.disabled = false; }
       };
-      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger-action'; remove.textContent = '删除';
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger-action'; remove.textContent = '删除连接';
       remove.onclick = () => {
-        if (!confirm(`删除 backend「${backend.name}」？只影响这个页面，不会停止该机器上的服务。`)) return;
-        closeBackendSocket(backend);
-        state.backends = state.backends.filter(item => item !== backend);
-        persistConnections();
-        for (const agent of backend.agents || []) sessionKeyboard.unbind(agent.agentId);
-        if (state.agent && agentBackendId(state.agent.agentId) === backend.id) { state.agent = null; localStorage.removeItem('rpAgentId'); }
-        if (state.workspace?.backendId === backend.id) { state.workspace = null; localStorage.removeItem('rpWorkspaceId'); }
-        aggregateAgentLists(); updateVoiceAvailability(); updateHeaderStatus(); renderBackendFilter(); void renderWorkspaces(); updateConfigUi();
-        toast('已删除 backend');
+        if (!confirm(`删除连接「${backend.name}」？中继节点上保存的主机不会被删除。`)) return;
+        removeBackendConnection(backend);toast('已删除连接');
       };
       actions.append(toggle, remove); row.append(info, actions);
       return row;
     }));
+  }
+  function renderRelayHostList(){
+    const list=$('relayHostList');if(!list)return;
+    const via=backendOf(state.relayHostsVia);
+    if(!via||via.status!=='connected'){const empty=document.createElement('div');empty.className='relay-host-empty';empty.textContent='连接一个直连 Backend 后可查看它保存的中继主机。';list.replaceChildren(empty);return;}
+    if(state.relayHostsError){const error=document.createElement('div');error.className='relay-host-empty';error.textContent=`加载失败：${state.relayHostsError}`;list.replaceChildren(error);return;}
+    if(!state.relayHosts.length){const empty=document.createElement('div');empty.className='relay-host-empty';empty.textContent=`「${via.name}」尚未保存中继主机。`;list.replaceChildren(empty);return;}
+    list.replaceChildren(...state.relayHosts.map(host=>{
+      const row=document.createElement('div');row.className='backend-row';
+      const info=document.createElement('div');info.className='backend-row-info';const name=document.createElement('b');name.textContent=host.name;const detail=document.createElement('small');detail.textContent=`${host.base} · 保存在「${via.name}」`;info.append(name,detail);
+      const actions=document.createElement('div');actions.className='backend-row-actions';
+      const existing=state.backends.find(item=>item.relayHostId===host.id&&item.relayVia===via.id);
+      const connect=document.createElement('button');connect.type='button';connect.textContent=existing?.status==='connected'?'已连接':'连接';connect.disabled=existing?.status==='connected';
+      connect.onclick=async()=>{connect.disabled=true;try{const entry=existing||{id:`bk-relay-${via.id}-${host.id}`,name:host.name,base:host.base,token:'',saved:false,relayHostId:host.id,relayVia:via.id};await connectBackend(entry,{confirmSave:false});renderRelayHostList();toast(`已通过「${via.name}」连接 ${host.name}`)}catch(error){toast(error.message)}finally{connect.disabled=false}};
+      const remove=document.createElement('button');remove.type='button';remove.className='danger-action';remove.textContent='删除主机';
+      remove.onclick=async()=>{if(!confirm(`从中继「${via.name}」删除主机「${host.name}」及其保存的 token？`))return;remove.disabled=true;try{await apiB(via.id,`/api/v1/hosts/${encodeURIComponent(host.id)}`,{method:'DELETE'});state.relayHosts=state.relayHosts.filter(item=>item.id!==host.id);if(existing)removeBackendConnection(existing);renderRelayHostList();toast('已从中继删除主机')}catch(error){toast(error.message)}finally{remove.disabled=false}};
+      actions.append(connect,remove);row.append(info,actions);return row;
+    }));
+  }
+  async function loadRelayHosts(){
+    const via=relayController();state.relayHostsVia=via?.id||null;state.relayHostsError='';
+    if(!via){state.relayHosts=[];renderRelayHostList();return}
+    try{state.relayHosts=await apiB(via.id,'/api/v1/hosts')}catch(error){state.relayHosts=[];state.relayHostsError=error.message}
+    renderRelayHostList();
   }
 
   async function refreshWs() {
@@ -920,9 +948,9 @@
   }
   function updateConfigUi(){
     const connected=connectedBackends().length;
-    $('configConnectionStatus').textContent=connected?`已连接 ${connected} 个 backend`:'当前未配对';$('disconnectAll').hidden=!connected;updateNotificationButton();updateVoiceButton();updateMailControls();renderBackendList();
+    $('configConnectionStatus').textContent=connected?`已连接 ${connected} 个 backend`:'当前未配对';$('disconnectAll').hidden=!connected;updateNotificationButton();updateVoiceButton();updateMailControls();renderBackendList();renderRelayHostList();
   }
-  function openConfig(){updateConfigUi();renderKeyboardBindings();if(!$('configDialog').open)$('configDialog').showModal();}
+  function openConfig(){updateConfigUi();renderKeyboardBindings();if(!$('configDialog').open)$('configDialog').showModal();void loadRelayHosts();}
   async function saveMailSettings(){
     if(!requireConnection())return;if(!state.mailNotificationsAvailable)return toast('服务端未配置 MailDispatch');
     const delay=Number($('mailAggregationDelay').value);if(!Number.isInteger(delay)||delay<0||delay>86400)return toast('聚合时间必须是 0 到 86400 之间的整数秒');
@@ -1007,39 +1035,18 @@
   $('modalCancel').onclick=()=>$('modal').close('cancel');
   $('pairForm').onsubmit=async event=>{event.preventDefault();$('pairSubmit').disabled=true;try{const base=$('pairBase').value,token=$('pairToken').value;let name=$('pairName').value.trim();if(!name){try{name=new URL(base.trim()).hostname}catch{}}let entry;
     if($('pairRelay').checked){
-      const primary=primaryBackend();
-      if(!primary||primary.status!=='connected')throw Error('请先连接主 Backend，再添加代理连接');
-      const savedHostId=$('pairHost').value;
-      if(savedHostId){
-        // Host already registered on the relay (token stored server-side); the web never touches it.
-        const listed=(await apiB(primary.id,'/api/v1/hosts')).find(item=>item.id===savedHostId);
-        if(!listed)throw Error('该主机已不在中继节点上，请刷新后重选');
-        entry=state.backends.find(item=>item.relayHostId===savedHostId)||{id:`bk-relay-${savedHostId}`,name:'',base:'',token:'',saved:false};
-        Object.assign(entry,{name:listed.name,base:listed.base,token:'',relayHostId:savedHostId,relayVia:primary.id});
-      } else {
-        const host=await postB(primary.id,'/api/v1/hosts',{name:name||base,base:base.trim(),token:token.trim()});
-        entry=state.backends.find(item=>item.relayHostId===host.id)||{id:`bk-relay-${host.id}`,name:'',base:'',token:'',saved:false};
-        Object.assign(entry,{name:name||base,base:base.trim(),token:'',relayHostId:host.id,relayVia:primary.id});
-      }
+      const relay=relayController();
+      if(!relay)throw Error('请先连接一个直连 Backend，再添加代理主机');
+      const host=await postB(relay.id,'/api/v1/hosts',{name:name||base,base:base.trim(),token:token.trim()});
+      state.relayHostsVia=relay.id;state.relayHosts=[...state.relayHosts.filter(item=>item.id!==host.id),host];renderRelayHostList();
+      entry={id:`bk-relay-${relay.id}-${host.id}`,name:name||base,base:base.trim(),token:'',saved:false,relayHostId:host.id,relayVia:relay.id};
     } else {
       const existing=state.backends.find(item=>!item.relayHostId&&item.base===base.trim().replace(/\/$/,''));
       entry=existing||{id:`bk-${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`,name:'',base:'',token:'',saved:false};
       entry.name=name;entry.base=base;entry.token=token;
     }
     await connectBackend(entry,{confirmSave:true});$('pairDialog').close();}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
-  $('openConfig').onclick=openConfig;$('pairRelay').onchange=async()=>{
-    const row=$('pairHostRow'),select=$('pairHost');
-    if(!$('pairRelay').checked){row.hidden=true;select.value='';return;}
-    const primary=primaryBackend();
-    if(!primary||primary.status!=='connected'){row.hidden=true;return;}
-    try{
-      const hosts=await apiB(primary.id,'/api/v1/hosts');
-      select.replaceChildren(...hosts.map(host=>{const option=document.createElement('option');option.value=host.id;option.textContent=`${host.name} (${host.base})`;return option;}));
-      if(hosts.length){
-        const fresh=document.createElement('option');fresh.value='';fresh.textContent='新主机（下方填写地址和配对码）';select.prepend(fresh);select.value='';row.hidden=false;
-      } else row.hidden=true;
-    }catch{row.hidden=true;}
-  };$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('disconnectAll').onclick=()=>disconnectAll();$('backendFilter').onchange=()=>{state.backendFilter=$('backendFilter').value;localStorage.rpBackendFilter=state.backendFilter;renderWorkspaces().catch(()=>{});renderAgentList();};
+  $('openConfig').onclick=openConfig;$('refreshRelayHosts').onclick=()=>void loadRelayHosts();$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('disconnectAll').onclick=()=>disconnectAll();$('backendFilter').onchange=()=>{state.backendFilter=$('backendFilter').value;localStorage.rpBackendFilter=state.backendFilter;renderWorkspaces().catch(()=>{});renderAgentList();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){const target=state.workspace?.backendId||primaryBackend()?.id;if(!target)return toast('没有可用的 Backend');await postB(target,'/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
@@ -1068,7 +1075,9 @@
   void (async () => {
     const candidates = state.backends.filter(backend => (backend.saved && backend.token) || !backend.token);
     if (!candidates.length) { openPair(); return; }
-    const results = await Promise.allSettled(candidates.map(backend => connectBackend(backend, {confirmSave:false})));
+    // A relayed connection authenticates to its relay first, so direct controllers must finish connecting before dependants start.
+    const direct=candidates.filter(backend=>!backend.relayHostId),relayed=candidates.filter(backend=>backend.relayHostId);
+    const results=[...await Promise.allSettled(direct.map(backend=>connectBackend(backend,{confirmSave:false}))),...await Promise.allSettled(relayed.map(backend=>connectBackend(backend,{confirmSave:false})))];
     if (!hasConnection()) {
       const error = results.find(result => result.status === 'rejected')?.reason;
       if (error) toast(`自动连接失败：${error.message}`);
