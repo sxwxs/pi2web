@@ -21,12 +21,43 @@ npm 包名为 `pi2web`，全局命令同名（`pi2web`）。安装时会准备 `
 pi2web --host 127.0.0.1 --port 11318
 pi2web --data-dir ~/.pi/remote-pi
 pi2web --rotate-access-token   # 旧配对码立即失效，输出新配对码
+pi2web --set-access-token <token>          # 手动设置配对码（16–128 位，不含空白）
+pi2web --set-access-token-env MY_TOKEN_ENV # 从环境变量读取配对码，推荐方式
 pi2web --help
 ```
 
 服务器会同时提供 API、WebSocket 和 Web UI，无需另起静态文件服务器。请勿直接暴露到公网；远程访问建议使用 SSH tunnel、Tailscale、devtunnel 或配置 HTTPS 的可信反向代理。
 
 配对失败有速率限制：同一来源地址在 60 秒窗口内累计 10 次失败后会被锁定，锁定时间从 60 秒起按次翻倍，最长 15 分钟，HTTP 返回 `429` 与 `Retry-After`，WebSocket 升级同样受限；一次成功配对立即清除该地址的计数。注意限流按 TCP 来源地址统计，通过 devtunnel、Cloudflare Tunnel 或反向代理访问时所有客户端共用同一个计数桶。Remote Pi 不校验 `Origin` / `Host`，因此可以直接配合内网穿透使用。
+
+配对码默认随机生成；也可以用 `--set-access-token <token>` 或 `--set-access-token-env <环境变量名>` 手动指定（16–128 位、不含空白），便于在多台机器间使用统一或可预测的配对码。环境变量方式不会把配对码暴露在进程列表中，推荐优先使用。手动设置的配对码同样只保存 sha256 hash，后续可用 `--rotate-access-token` 换回随机码。
+
+完全受信任的本地环境（例如只在本机使用，或通过 SSH 隧道 / Tailscale 访问）可以用 `--no-auth` 关闭配对码认证：Web UI 连接时配对码留空即可，不会再出现保存配对码的确认。该选项只允许绑定 `127.0.0.1`、`::1` 或 `localhost`，拒绝 `0.0.0.0` 等对外地址，避免把无认证的 Agent 控制接口暴露到网络；请勿在不受信任的网络环境中使用。
+
+## 多 Backend 聚合
+
+一个 Web UI 可以同时连接多个 Remote Pi 服务端（例如家里和实验室各一台）：在「配置 → Backend 连接」里点击「添加 Backend」，为每个服务端填一个专属短名称（如 `home` / `lab`）、服务地址和配对码。每个连接使用自己的配对码独立认证，浏览器为它们各自维持实时 WebSocket。
+
+连接多个 backend 时：
+
+- Workspace 与 Session（Agent 和 Terminal）列表默认聚合展示所有 backend 的内容；侧栏顶部的过滤器可以只看某个 backend。
+- 连接多个 backend 时，每个 Session 会显示一个短名称标签，标明它来自哪个 backend；Workspace 名称也会带上前缀。
+- 六键 Session 键盘在一个页面内统一绑定到任意 backend 的 Session；按键绑定和键盘灯光按 `backend + Session` 唯一标识，不会混淆。
+- 新建 Agent / Terminal / 打开文件等操作都会路由到所选 Workspace 所属的 backend。
+
+如果浏览器直连某个 backend 受限（跨域、HTTPS 页面连 HTTP 服务等混合内容限制），可以在配对对话框勾选「通过主 Backend 代理连接」：浏览器只与主 backend 同源通信，HTTP 与 WebSocket 均由主 backend 原样转发。目标主机的配对码保存在主 backend 的元数据里，由它在转发时自动携带，浏览器不保存、也不随请求发送目标配对码；Web 只需告诉中继要访问哪个目标。主机可以先用 curl 在服务端侧注册：
+
+```bash
+curl -X POST http://127.0.0.1:11318/api/v1/hosts \
+  -H "Authorization: Bearer <主 backend 配对码>" -H "content-type: application/json" \
+  -d '{"name":"lab","base":"https://lab.example","token":"<目标 pi2web 配对码>","tunnelAuthorization":"tunnel <tunnel access token>"}'
+```
+
+之后该主机会出现在「配置 → 中继节点保存的主机」列表里，点击「连接」时浏览器只向主 backend 发送主机 ID，并使用主 backend 自己的 token 认证；目标凭据不会返回浏览器，而是由中继节点从 SQLite 读取并自动附加。也可以在「添加 Backend」对话框勾选代理选项来现场注册一个新主机。中继仅限已保存的主机（allowlist），不会成为任意地址的开放代理。
+
+目标 pi2web 配对码和 tunnel access token 是两个独立凭据：`token` 以 `Authorization: Bearer <token>` 发送给目标 pi2web；可选的 `tunnelAuthorization` 会作为 `X-Tunnel-Authorization` 的**完整 header 值原样发送**，例如 Microsoft Dev Tunnels 常见的 `tunnel eyJ...`。两者都只保存在中继节点；配置页的「编辑凭据」可以更新它们，留空表示保持现值。为兼容旧记录，未设置 `tunnelAuthorization` 时暂时使用目标 pi2web token 作为该头的值。配置页还提供「测试」按钮；上游失败时响应带 `X-Relay-Upstream-Status` / `X-Relay-Host-Id`，空错误响应会转换成 JSON，服务端 stderr 会记录 header 形式、secret 长度和 sha256 短指纹（不记录明文）。
+
+连接信息（含短名称）保存在浏览器本地存储；是否保存配对码仍由用户在连接成功后逐个确认。选择了保存配对码的 backend 在页面刷新或重新打开后自动重连，不再弹出配对窗；未保存或自动连接失败时才会弹窗重新输入。旧版本保存过的单个连接会自动迁移为名为「本机」的 backend，已有的键盘绑定也会同步迁移。
 
 ## Agent 完成邮件通知（MailDispatch）
 
