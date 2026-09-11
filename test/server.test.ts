@@ -44,14 +44,17 @@ describe('tunnel authorization header',()=>{it('authenticates HTTP and WebSocket
  const ws=await new Promise<any>((resolve,reject)=>{const socket=new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`,{headers:{'x-tunnel-authorization':`Bearer ${first.token}`}});socket.on('open',()=>socket.send(JSON.stringify({type:'subscribe_all',fromNow:true})));socket.on('message',raw=>{const value=JSON.parse(String(raw));if(value.type==='subscribed_all'){socket.close();resolve(value)}});socket.on('error',reject)});
  expect(ws.protocolVersion).toBe(1);
 })});
-describe('relay tunnel forwarding',()=>{it('uses raw X-Tunnel-Authorization and diagnoses empty upstream errors',async()=>{
+describe('relay tunnel forwarding',()=>{it('keeps target and tunnel credentials separate and diagnoses empty upstream errors',async()=>{
  let seenTunnel:string|undefined,seenAuthorization:string|undefined;
  const upstream=http.createServer((req,res)=>{seenTunnel=String(req.headers['x-tunnel-authorization']??'');seenAuthorization=String(req.headers.authorization??'');if(req.url==='/reject'){res.statusCode=401;return res.end()}res.setHeader('content-type','application/json');res.end(JSON.stringify({data:{status:'ok'}}))});
  await new Promise<void>(resolve=>upstream.listen(0,'127.0.0.1',resolve));const upstreamAddress=upstream.address();if(!upstreamAddress||typeof upstreamAddress==='string')throw new Error('Missing upstream address');
  try{
   server=new RemotePiServer({port:0,dataDir:await mkdtemp(path.join(tmpdir(),'remote-pi-relay-header-'))});const first=await server.auth.init();const address=await server.start();const base=`http://127.0.0.1:${address!.port}`,authorization=`Bearer ${first.token}`;
-  const created=await (await fetch(`${base}/api/v1/hosts`,{method:'POST',headers:{authorization,'content-type':'application/json'},body:JSON.stringify({name:'tunnel',base:`http://127.0.0.1:${upstreamAddress.port}`,token:'target-token-raw-123456'})})).json();const prefix=`${base}/api/v1/hosts/${created.data.id}`;
-  const ok=await fetch(`${prefix}/health`,{headers:{authorization}});expect(ok.status).toBe(200);expect(seenTunnel).toBe('target-token-raw-123456');expect(seenAuthorization).toBe('Bearer target-token-raw-123456');
+  const created=await (await fetch(`${base}/api/v1/hosts`,{method:'POST',headers:{authorization,'content-type':'application/json'},body:JSON.stringify({name:'tunnel',base:`http://127.0.0.1:${upstreamAddress.port}`,token:'target-pi-token-123456',tunnelAuthorization:'tunnel tunnel-access-654321'})})).json();const prefix=`${base}/api/v1/hosts/${created.data.id}`;
+  expect(created.data.hasToken).toBe(true);expect(created.data.hasTunnelAuthorization).toBe(true);expect(created.data.token).toBeUndefined();expect(created.data.tunnelAuthorization).toBeUndefined();
+  const ok=await fetch(`${prefix}/health`,{headers:{authorization}});expect(ok.status).toBe(200);expect(seenTunnel).toBe('tunnel tunnel-access-654321');expect(seenAuthorization).toBe('Bearer target-pi-token-123456');
+  const updated=await (await fetch(`${base}/api/v1/hosts/${created.data.id}`,{method:'PATCH',headers:{authorization,'content-type':'application/json'},body:JSON.stringify({token:'target-pi-token-updated',tunnelAuthorization:'tunnel tunnel-access-updated'})})).json();expect(updated.data.hasToken).toBe(true);expect(updated.data.hasTunnelAuthorization).toBe(true);
+  await fetch(`${prefix}/health`,{headers:{authorization}});expect(seenTunnel).toBe('tunnel tunnel-access-updated');expect(seenAuthorization).toBe('Bearer target-pi-token-updated');
   const rejected=await fetch(`${prefix}/reject`,{headers:{authorization}});expect(rejected.status).toBe(401);expect(rejected.headers.get('x-relay-upstream-status')).toBe('401');expect(rejected.headers.get('x-relay-host-id')).toBe(created.data.id);
   const error=await rejected.json();expect(error.error.code).toBe('RELAY_UPSTREAM_ERROR');expect(error.error.message).toContain('HTTP 401');
  }finally{await new Promise<void>(resolve=>upstream.close(()=>resolve()))}

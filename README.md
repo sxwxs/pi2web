@@ -50,10 +50,12 @@ pi2web --help
 ```bash
 curl -X POST http://127.0.0.1:11318/api/v1/hosts \
   -H "Authorization: Bearer <主 backend 配对码>" -H "content-type: application/json" \
-  -d '{"name":"lab","base":"http://lab:11318","token":"<目标配对码>"}'
+  -d '{"name":"lab","base":"https://lab.example","token":"<目标 pi2web 配对码>","tunnelAuthorization":"tunnel <tunnel access token>"}'
 ```
 
-之后该主机会出现在「配置 → 中继节点保存的主机」列表里，点击「连接」时浏览器只向主 backend 发送主机 ID，并使用主 backend 自己的 token 认证；目标 token 不会返回浏览器，而是由中继节点从 SQLite 读取并自动附加。也可以在「添加 Backend」对话框勾选代理选项来现场注册一个新主机（目标 token 只提交这一次给中继保存）。中继仅限已保存的主机（allowlist），不会成为任意地址的开放代理。转发时目标 token 以 `Authorization: Bearer <token>` 和 `X-Tunnel-Authorization: <token>`（裸 token）两个头携带，pi2web 自身也接受这两种头，适配会消耗标准 Authorization 的隧道环境。配置页提供「测试」按钮；上游失败时响应带 `X-Relay-Upstream-Status` / `X-Relay-Host-Id`，空错误响应会转换成 JSON，服务端 stderr 同时记录不含 token 的诊断行。
+之后该主机会出现在「配置 → 中继节点保存的主机」列表里，点击「连接」时浏览器只向主 backend 发送主机 ID，并使用主 backend 自己的 token 认证；目标凭据不会返回浏览器，而是由中继节点从 SQLite 读取并自动附加。也可以在「添加 Backend」对话框勾选代理选项来现场注册一个新主机。中继仅限已保存的主机（allowlist），不会成为任意地址的开放代理。
+
+目标 pi2web 配对码和 tunnel access token 是两个独立凭据：`token` 以 `Authorization: Bearer <token>` 发送给目标 pi2web；可选的 `tunnelAuthorization` 会作为 `X-Tunnel-Authorization` 的**完整 header 值原样发送**，例如 Microsoft Dev Tunnels 常见的 `tunnel eyJ...`。两者都只保存在中继节点；配置页的「编辑凭据」可以更新它们，留空表示保持现值。为兼容旧记录，未设置 `tunnelAuthorization` 时暂时使用目标 pi2web token 作为该头的值。配置页还提供「测试」按钮；上游失败时响应带 `X-Relay-Upstream-Status` / `X-Relay-Host-Id`，空错误响应会转换成 JSON，服务端 stderr 会记录 header 形式、secret 长度和 sha256 短指纹（不记录明文）。
 
 连接信息（含短名称）保存在浏览器本地存储；是否保存配对码仍由用户在连接成功后逐个确认。选择了保存配对码的 backend 在页面刷新或重新打开后自动重连，不再弹出配对窗；未保存或自动连接失败时才会弹窗重新输入。旧版本保存过的单个连接会自动迁移为名为「本机」的 backend，已有的键盘绑定也会同步迁移。
 
