@@ -7,7 +7,7 @@
     try {
       if (stored !== null) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) return parsed.filter(item => item && typeof item.base === 'string' && typeof item.id === 'string').map(item => ({id:item.id, name:String(item.name||''), base:item.base, token:String(item.token||''), saved:Boolean(item.token)}));
+        if (Array.isArray(parsed)) return parsed.filter(item => item && typeof item.base === 'string' && typeof item.id === 'string').map(item => ({id:item.id, name:String(item.name||''), base:item.base, token:String(item.token||''), saved:Boolean(item.token), ...(item.relayHostId ? {relayHostId:String(item.relayHostId), relayVia:String(item.relayVia||'')} : {})}));
       }
     } catch {}
     // Single-backend clients stored one base/token pair; upgrade them in place,
@@ -77,11 +77,18 @@
     }
     return body.data;
   }
+  /** Direct backends talk to their own origin; relayed ones go through the primary backend's proxy, same-origin with the page. */
+  const backendWire = backend => {
+    if (!backend.relayHostId) return {prefix: backend.base, token: backend.token};
+    const via = backendOf(backend.relayVia);
+    return {prefix: `${via?.base || ''}/api/v1/hosts/${backend.relayHostId}`, token: via?.token || ''};
+  };
   async function apiB(backendId, url, options = {}) {
     const backend = backendOf(backendId);
     if (!backend) throw Error('Backend 不存在');
     if (backend.status !== 'connected') throw Error(`Backend「${backend.name || backendId}」未连接`);
-    return request(backend.base, backend.token, url, options, true);
+    const wire = backendWire(backend);
+    return request(wire.prefix, wire.token, url, options, true);
   }
   const postB = (backendId, url, body = {}) => apiB(backendId, url, {method:'POST', body:JSON.stringify(body)});
   // Agents and terminals carry composite ids (backendId:serverId); strip the prefix on the wire.
@@ -97,7 +104,7 @@
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
   function persistConnections() {
-    localStorage[CONNECTIONS_KEY] = JSON.stringify(state.backends.map(item => ({id:item.id, name:item.name, base:item.base, token:item.saved ? item.token : ''})));
+    localStorage[CONNECTIONS_KEY] = JSON.stringify(state.backends.map(item => ({id:item.id, name:item.name, base:item.base, token:item.saved && item.token ? item.token : '', ...(item.relayHostId ? {relayHostId:item.relayHostId, relayVia:item.relayVia} : {})})));
   }
   function updateHeaderStatus() {
     const total = state.backends.length, connected = connectedBackends(), reconnecting = state.backends.some(item => item.reconnecting);
@@ -132,11 +139,15 @@
     $('voicePlayback').hidden = !state.voiceEnabled; $('voiceInput').hidden = !state.voiceSttEnabled; updateVoiceButton();
   }
   async function connectBackend(entry, {confirmSave = true} = {}) {
-    const candidateBase = String(entry.base || '').trim().replace(/\/$/, '') || location.origin, candidateToken = String(entry.token || '').trim();
+    const isRelay = Boolean(entry.relayHostId), via = isRelay ? backendOf(entry.relayVia) : null;
+    if (isRelay && (!via || via.status !== 'connected')) throw Error('代理连接需要先连接主 Backend');
+    const wire = isRelay
+      ? {prefix: `${via.base}/api/v1/hosts/${entry.relayHostId}`, token: via.token}
+      : {prefix: String(entry.base || '').trim().replace(/\/$/, '') || location.origin, token: String(entry.token || '').trim()};
     let authRequired = true;
-    try { authRequired = (await request(candidateBase, '', '/health')).authRequired !== false; } catch { /* Server may be down; the status call below reports that normally. */ }
-    if (!candidateToken && authRequired) { openPair(entry); throw Error('请先输入配对码'); }
-    const status = await request(candidateBase, candidateToken, '/api/v1/system/status');
+    try { authRequired = (await request(wire.prefix, '', '/health')).authRequired !== false; } catch { /* Server may be down; the status call below reports that normally. */ }
+    if (!wire.token && authRequired) { openPair(entry); throw Error('请先输入配对码'); }
+    const status = await request(wire.prefix, wire.token, '/api/v1/system/status');
     if (status.protocolVersion !== 1) throw Error(`不支持的协议版本 ${status.protocolVersion}（需要 1）`);
     let backend = backendOf(entry.id);
     if (!backend) {
@@ -144,7 +155,7 @@
       state.backends.push(backend);
     }
     closeBackendSocket(backend);
-    Object.assign(backend, {name: String(entry.name || '').trim() || candidateBase, base: candidateBase, token: candidateToken, status: 'connected', error: '', serverInfo: `v${status.version} · Pi ${status.piVersion}`, reconnectAttempt: 0, authRequired, voiceEnabled: !!(status.voiceCapabilities?.tts ?? status.voiceEnabled), voiceSttEnabled: !!(status.voiceCapabilities?.stt ?? status.voiceEnabled)});
+    Object.assign(backend, {name: String(entry.name || '').trim() || (isRelay ? entry.base : wire.prefix), base: String(entry.base || '').trim().replace(/\/$/, '') || wire.prefix, token: isRelay ? '' : wire.token, relayHostId: entry.relayHostId, relayVia: entry.relayVia, status: 'connected', error: '', serverInfo: `v${status.version} · Pi ${status.piVersion}`, reconnectAttempt: 0, authRequired, voiceEnabled: !!(status.voiceCapabilities?.tts ?? status.voiceEnabled), voiceSttEnabled: !!(status.voiceCapabilities?.stt ?? status.voiceEnabled)});
     if (confirmSave && authRequired && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) backend.saved = true;
     persistConnections();
     updateVoiceAvailability(); updateHeaderStatus(); renderBackendList(); renderBackendFilter();
@@ -532,7 +543,8 @@
     try{
       const term=await ensureTerminalEmulator();if(attempt!==state.terminalConnectAttempt||state.selectedKind!=='terminal'||state.terminal?.terminalId!==terminalId)return;term.reset();term.clear();$('terminalStatus').textContent=`${terminal.cwd} · 正在连接…`;
       const terminalBackend=backendOf(terminal.backendId);if(!terminalBackend||terminalBackend.status!=='connected')throw Error(`Backend「${terminal.backendName||terminal.backendId}」未连接`);
-      const ws=new WebSocket(terminalBackend.base.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(scid(terminalId))}/ws`,['access-token.'+terminalBackend.token]);state.terminalWs=ws;
+      const terminalWire=backendWire(terminalBackend);
+      const ws=new WebSocket(terminalWire.prefix.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(scid(terminalId))}/ws`,terminalWire.token?['access-token.'+terminalWire.token]:[]);state.terminalWs=ws;
       ws.onopen=()=>{if(ws!==state.terminalWs)return;requestAnimationFrame(()=>{try{state.fitAddon.fit();ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));term.focus();}catch{}});};
       ws.onmessage=event=>{if(ws!==state.terminalWs)return;try{const message=JSON.parse(event.data);if(message.type==='snapshot'){term.reset();if(message.data)term.write(message.data);terminal.status=message.record.status;updateTerminalHeader();renderAgentList();}else if(message.type==='output')term.write(message.data);else if(message.type==='exit'){terminal.status='exited';terminal.exitCode=message.exitCode;updateTerminalHeader();renderAgentList();void refreshAgents();}else if(message.type==='error')toast(message.message);}catch(error){console.error(error);}};
       ws.onerror=()=>{};ws.onclose=()=>{if(ws===state.terminalWs&&terminal.status==='running')$('terminalStatus').textContent=`${terminal.cwd} · 连接已断开`;};
@@ -769,7 +781,7 @@
   }
   async function transcribeVoice(){
     clearTimeout(state.mediaTimer);const recorder=state.mediaRecorder,mime=recorder?.mimeType||'audio/webm',blob=new Blob(state.mediaChunks,{type:mime}),agentId=state.mediaAgentId;state.mediaStream?.getTracks().forEach(track=>track.stop());state.mediaRecorder=null;state.mediaStream=null;state.mediaChunks=[];state.mediaAgentId=null;$('voiceInput').textContent='…';$('voiceInput').classList.remove('recording');
-    if(!agentId){$('voiceInput').textContent='🎙';return;}const transcribeBackend=backendOf(agentBackendId(agentId));if(!transcribeBackend){$('voiceInput').textContent='🎙';return toast('该 Session 的 backend 已断开');}try{const response=await fetch(transcribeBackend.base+`/api/v1/agents/${encodeURIComponent(scid(agentId))}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${transcribeBackend.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
+    if(!agentId){$('voiceInput').textContent='🎙';return;}const transcribeBackend=backendOf(agentBackendId(agentId));if(!transcribeBackend){$('voiceInput').textContent='🎙';return toast('该 Session 的 backend 已断开');}const transcribeWire=backendWire(transcribeBackend);try{const response=await fetch(transcribeWire.prefix+`/api/v1/agents/${encodeURIComponent(scid(agentId))}/transcribe`,{method:'POST',headers:{...(transcribeWire.token?{Authorization:`Bearer ${transcribeWire.token}`}:{}),'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
   }
   function handleAgentEvent(message) {
     if(message.type==='voice_event'){handleVoiceEvent(message);return;}
@@ -855,7 +867,8 @@
   function connectSocket(backend) {
     if (!backend || backend.status !== 'connected') return;
     clearTimeout(backend.reconnectTimer); backend.manuallyClosed = true; const previous = backend.ws; backend.ws = null; previous?.close(); backend.manuallyClosed = false;
-    const ws = new WebSocket(backend.base.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + backend.token]); backend.ws = ws;
+    const wire = backendWire(backend);
+    const ws = new WebSocket(wire.prefix.replace(/^http/, 'ws') + '/api/v1/ws', wire.token ? ['access-token.' + wire.token] : []); backend.ws = ws;
     ws.onopen = () => { if (ws !== backend.ws) return; backend.reconnectAttempt = 0; backend.reconnecting = false; updateHeaderStatus(); for (const agent of backend.agents) subscribeAgent(backend, agent); ws.send(JSON.stringify({type:'subscribe_all', fromNow:true})); };
     ws.onmessage = event => { if (ws !== backend.ws) return; try { const message = JSON.parse(event.data); if (typeof message.agentId === 'string') message.agentId = cid(backend.id, message.agentId); message.backendId = backend.id; handleAgentEvent(message); } catch (error) { console.error(error); } };
     ws.onclose = () => { if (backend.ws !== ws || backend.manuallyClosed) return; backend.reconnecting = true; updateHeaderStatus(); const delays=[1000,2000,4000,8000,15000,30000], delay=delays[Math.min(backend.reconnectAttempt++, delays.length-1)]; backend.reconnectTimer = setTimeout(() => connectSocket(backend), delay); };
@@ -991,7 +1004,19 @@
 
   $('pairCancel').onclick=()=>$('pairDialog').close();
   $('modalCancel').onclick=()=>$('modal').close('cancel');
-  $('pairForm').onsubmit=async event=>{event.preventDefault();$('pairSubmit').disabled=true;try{const base=$('pairBase').value,token=$('pairToken').value;let name=$('pairName').value.trim();if(!name){try{name=new URL(base.trim()).hostname}catch{}}const existing=state.backends.find(item=>item.base===base.trim().replace(/\/$/,''));const entry=existing||{id:`bk-${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`,name:'',base:'',token:'',saved:false};entry.name=name;entry.base=base;entry.token=token;await connectBackend(entry,{confirmSave:true});$('pairDialog').close();}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
+  $('pairForm').onsubmit=async event=>{event.preventDefault();$('pairSubmit').disabled=true;try{const base=$('pairBase').value,token=$('pairToken').value;let name=$('pairName').value.trim();if(!name){try{name=new URL(base.trim()).hostname}catch{}}let entry;
+    if($('pairRelay').checked){
+      const primary=primaryBackend();
+      if(!primary||primary.status!=='connected')throw Error('请先连接主 Backend，再添加代理连接');
+      const host=await postB(primary.id,'/api/v1/hosts',{name:name||base,base:base.trim(),token:token.trim()});
+      entry=state.backends.find(item=>item.relayHostId===host.id)||{id:`bk-relay-${host.id}`,name:'',base:'',token:'',saved:false};
+      Object.assign(entry,{name:name||base,base:base.trim(),token:'',relayHostId:host.id,relayVia:primary.id});
+    } else {
+      const existing=state.backends.find(item=>!item.relayHostId&&item.base===base.trim().replace(/\/$/,''));
+      entry=existing||{id:`bk-${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`,name:'',base:'',token:'',saved:false};
+      entry.name=name;entry.base=base;entry.token=token;
+    }
+    await connectBackend(entry,{confirmSave:true});$('pairDialog').close();}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
   $('openConfig').onclick=openConfig;$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('disconnectAll').onclick=()=>disconnectAll();$('backendFilter').onchange=()=>{state.backendFilter=$('backendFilter').value;localStorage.rpBackendFilter=state.backendFilter;renderWorkspaces().catch(()=>{});renderAgentList();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){const target=state.workspace?.backendId||primaryBackend()?.id;if(!target)return toast('没有可用的 Backend');await postB(target,'/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
