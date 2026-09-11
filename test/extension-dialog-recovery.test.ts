@@ -25,19 +25,19 @@ function setup() {
   const $ = (id:string) => [messages, ...messages.descendants()].find(element => element.id === id);
   const agent = {agentId:'agent-a', status:'idle'};
   const state = {agent, agents:[agent], selectedKind:'agent'};
-  const post = vi.fn(async () => {});
+  const postAgent = vi.fn(async () => {});
   const addCard = vi.fn(() => { const body = new Element(); messages.append(body); return {body}; });
   const renderMessages = vi.fn(() => messages.append(new Element()));
   const sessionKeyboard = {updateAgent:vi.fn(), setAgentSnapshot:vi.fn(), handleAgentEvent:vi.fn()};
   const setAgentStatus = vi.fn(), selectAgent = vi.fn(async () => {}), navigateMobile = vi.fn();
   const {handleAgentEvent, onKey} = runInNewContext(`${keyboardSource}\n${dialogSource}\n${handlerSource}\n({handleAgentEvent, onKey:sessionKeyboard.onKey})`, {
-    state, $, localStorage:{}, post, addCard, renderMessages, toast:vi.fn(),
+    state, $, localStorage:{}, postAgent, addCard, renderMessages, toast:vi.fn(),
     document:{createElement:() => new Element(), createTextNode:(text:string) => Object.assign(new Element(), {textContent:text})},
     window:{SessionKeyboardController:function(options:unknown) { return Object.assign(sessionKeyboard, options); }},
     updateKeyboardUi:vi.fn(), renderAgentList:vi.fn(), renderKeyboardBindings:vi.fn(), selectAgent, navigateMobile,
     setAgentStatus, discardStreams:vi.fn(), updateMessageHistoryControl:vi.fn(),
   }, {filename:'web/app.js'});
-  return {handleAgentEvent, $, messages, post, addCard, renderMessages, state, onKey, setAgentStatus, selectAgent, navigateMobile};
+  return {handleAgentEvent, $, messages, postAgent, addCard, renderMessages, state, onKey, setAgentStatus, selectAgent, navigateMobile};
 }
 
 const request = {type:'extension_ui_request', requestId:'dialog-1', kind:'select', title:'Choose an action', options:['Keep', 'Replace']};
@@ -56,7 +56,7 @@ describe('extension dialog recovery', () => {
     expect(ui.addCard).toHaveBeenCalledWith(request.title, '', 'dialog', true, undefined);
     expect(controls!.children.map(button => button.textContent)).toEqual(request.options);
     await controls!.children[1].onclick!();
-    expect(ui.post).toHaveBeenCalledWith('/api/v1/agents/agent-a/extension-response', {requestId:request.requestId, value:'Replace'});
+    expect(ui.postAgent).toHaveBeenCalledWith('agent-a', '/extension-response', {requestId:request.requestId, value:'Replace'});
     expect(controls!.children[0].textContent).toBe('已响应');
   });
 
@@ -74,7 +74,7 @@ describe('extension dialog recovery', () => {
     ui.handleAgentEvent(baseline('agent_state', [], 3));
     expect(controls.children).toHaveLength(1);
     expect(controls.children[0].textContent).toBe('已结束');
-    expect(ui.post).not.toHaveBeenCalled();
+    expect(ui.postAgent).not.toHaveBeenCalled();
   });
 
   it('replaces obsolete dialogs on a replay gap and handles subsequent completion normally', () => {
