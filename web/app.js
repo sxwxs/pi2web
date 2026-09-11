@@ -101,6 +101,7 @@
     $('pairName').value = target?.name || '';
     $('pairBase').value = target?.base || location.origin;
     $('pairToken').value = target?.saved ? target.token : target?.token || '';
+    $('pairRelay').checked = false; $('pairHostRow').hidden = true; $('pairHost').value = '';
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
   function persistConnections() {
@@ -1008,16 +1009,37 @@
     if($('pairRelay').checked){
       const primary=primaryBackend();
       if(!primary||primary.status!=='connected')throw Error('请先连接主 Backend，再添加代理连接');
-      const host=await postB(primary.id,'/api/v1/hosts',{name:name||base,base:base.trim(),token:token.trim()});
-      entry=state.backends.find(item=>item.relayHostId===host.id)||{id:`bk-relay-${host.id}`,name:'',base:'',token:'',saved:false};
-      Object.assign(entry,{name:name||base,base:base.trim(),token:'',relayHostId:host.id,relayVia:primary.id});
+      const savedHostId=$('pairHost').value;
+      if(savedHostId){
+        // Host already registered on the relay (token stored server-side); the web never touches it.
+        const listed=(await apiB(primary.id,'/api/v1/hosts')).find(item=>item.id===savedHostId);
+        if(!listed)throw Error('该主机已不在中继节点上，请刷新后重选');
+        entry=state.backends.find(item=>item.relayHostId===savedHostId)||{id:`bk-relay-${savedHostId}`,name:'',base:'',token:'',saved:false};
+        Object.assign(entry,{name:listed.name,base:listed.base,token:'',relayHostId:savedHostId,relayVia:primary.id});
+      } else {
+        const host=await postB(primary.id,'/api/v1/hosts',{name:name||base,base:base.trim(),token:token.trim()});
+        entry=state.backends.find(item=>item.relayHostId===host.id)||{id:`bk-relay-${host.id}`,name:'',base:'',token:'',saved:false};
+        Object.assign(entry,{name:name||base,base:base.trim(),token:'',relayHostId:host.id,relayVia:primary.id});
+      }
     } else {
       const existing=state.backends.find(item=>!item.relayHostId&&item.base===base.trim().replace(/\/$/,''));
       entry=existing||{id:`bk-${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`,name:'',base:'',token:'',saved:false};
       entry.name=name;entry.base=base;entry.token=token;
     }
     await connectBackend(entry,{confirmSave:true});$('pairDialog').close();}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
-  $('openConfig').onclick=openConfig;$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('disconnectAll').onclick=()=>disconnectAll();$('backendFilter').onchange=()=>{state.backendFilter=$('backendFilter').value;localStorage.rpBackendFilter=state.backendFilter;renderWorkspaces().catch(()=>{});renderAgentList();};
+  $('openConfig').onclick=openConfig;$('pairRelay').onchange=async()=>{
+    const row=$('pairHostRow'),select=$('pairHost');
+    if(!$('pairRelay').checked){row.hidden=true;select.value='';return;}
+    const primary=primaryBackend();
+    if(!primary||primary.status!=='connected'){row.hidden=true;return;}
+    try{
+      const hosts=await apiB(primary.id,'/api/v1/hosts');
+      select.replaceChildren(...hosts.map(host=>{const option=document.createElement('option');option.value=host.id;option.textContent=`${host.name} (${host.base})`;return option;}));
+      if(hosts.length){
+        const fresh=document.createElement('option');fresh.value='';fresh.textContent='新主机（下方填写地址和配对码）';select.prepend(fresh);select.value='';row.hidden=false;
+      } else row.hidden=true;
+    }catch{row.hidden=true;}
+  };$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('disconnectAll').onclick=()=>disconnectAll();$('backendFilter').onchange=()=>{state.backendFilter=$('backendFilter').value;localStorage.rpBackendFilter=state.backendFilter;renderWorkspaces().catch(()=>{});renderAgentList();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){const target=state.workspace?.backendId||primaryBackend()?.id;if(!target)return toast('没有可用的 Backend');await postB(target,'/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
