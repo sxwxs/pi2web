@@ -103,7 +103,7 @@
     $('pairName').value = target?.name || '';
     $('pairBase').value = target?.base || location.origin;
     $('pairToken').value = target?.saved ? target.token : target?.token || '';
-    $('pairRelay').checked = false;
+    $('pairRelay').checked = false; $('pairTunnelAuthRow').hidden = true; $('pairTunnelAuthorization').value = '';
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
   function persistConnections() {
@@ -263,15 +263,16 @@
     if(!state.relayHosts.length){const empty=document.createElement('div');empty.className='relay-host-empty';empty.textContent=`「${via.name}」尚未保存中继主机。`;list.replaceChildren(empty);return;}
     list.replaceChildren(...state.relayHosts.map(host=>{
       const row=document.createElement('div');row.className='backend-row';
-      const info=document.createElement('div');info.className='backend-row-info';const name=document.createElement('b');name.textContent=host.name;const detail=document.createElement('small');detail.textContent=`${host.base} · 保存在「${via.name}」 · ${host.hasToken?'目标 token 已保存':'未保存目标 token'}`;info.append(name,detail);
+      const info=document.createElement('div');info.className='backend-row-info';const name=document.createElement('b');name.textContent=host.name;const detail=document.createElement('small');detail.textContent=`${host.base} · 保存在「${via.name}」 · ${host.hasToken?'目标 token 已保存':'未保存目标 token'} · ${host.hasTunnelAuthorization?'Tunnel auth 已保存':'无 Tunnel auth'}`;info.append(name,detail);
       const actions=document.createElement('div');actions.className='backend-row-actions';
       const existing=state.backends.find(item=>item.relayHostId===host.id&&item.relayVia===via.id);
       const connect=document.createElement('button');connect.type='button';connect.textContent=existing?.status==='connected'?'已连接':'连接';connect.disabled=existing?.status==='connected';
       connect.onclick=async()=>{connect.disabled=true;try{const entry=existing||{id:`bk-relay-${via.id}-${host.id}`,name:host.name,base:host.base,token:'',saved:false,relayHostId:host.id,relayVia:via.id};await connectBackend(entry,{confirmSave:false});renderRelayHostList();toast(`已通过「${via.name}」连接 ${host.name}`)}catch(error){toast(error.message)}finally{connect.disabled=false}};
       const probe=document.createElement('button');probe.type='button';probe.textContent='测试';probe.onclick=async()=>{probe.disabled=true;try{const health=await apiB(via.id,`/api/v1/hosts/${encodeURIComponent(host.id)}/health`);toast(`${host.name} 中继测试成功${health?.status?` · ${health.status}`:''}`)}catch(error){toast(`${host.name} 中继测试失败：${error.message}`)}finally{probe.disabled=false}};
+      const edit=document.createElement('button');edit.type='button';edit.textContent='编辑凭据';edit.onclick=async()=>{const patch=await modal('编辑中继主机',body=>{const hostName=field(body,'短名称',host.name),base=field(body,'目标地址',host.base),token=field(body,'目标 pi2web 配对码（留空保持不变）','','password'),tunnel=field(body,'Tunnel Authorization 完整值（留空保持不变）','','password');const note=document.createElement('small');note.className='muted';note.textContent='示例：tunnel eyJ...。凭据保存于中继节点，不会返回浏览器。';body.append(note);return()=>{const value={name:hostName.value.trim(),base:base.value.trim()};if(token.value.trim())value.token=token.value.trim();if(tunnel.value.trim())value.tunnelAuthorization=tunnel.value.trim();return value}},'保存');if(!patch)return;edit.disabled=true;try{const updated=await apiB(via.id,`/api/v1/hosts/${encodeURIComponent(host.id)}`,{method:'PATCH',body:JSON.stringify(patch)});state.relayHosts=state.relayHosts.map(item=>item.id===host.id?updated:item);if(existing){closeBackendSocket(existing);existing.status='off';existing.name=updated.name;existing.base=updated.base;persistConnections()}renderBackendList();renderRelayHostList();toast('凭据已更新，请重新连接测试')}catch(error){toast(error.message)}finally{edit.disabled=false}};
       const remove=document.createElement('button');remove.type='button';remove.className='danger-action';remove.textContent='删除主机';
       remove.onclick=async()=>{if(!confirm(`从中继「${via.name}」删除主机「${host.name}」及其保存的 token？`))return;remove.disabled=true;try{await apiB(via.id,`/api/v1/hosts/${encodeURIComponent(host.id)}`,{method:'DELETE'});state.relayHosts=state.relayHosts.filter(item=>item.id!==host.id);if(existing)removeBackendConnection(existing);renderRelayHostList();toast('已从中继删除主机')}catch(error){toast(error.message)}finally{remove.disabled=false}};
-      actions.append(connect,probe,remove);row.append(info,actions);return row;
+      actions.append(connect,probe,edit,remove);row.append(info,actions);return row;
     }));
   }
   async function loadRelayHosts(){
@@ -1039,7 +1040,7 @@
     if($('pairRelay').checked){
       const relay=relayController();
       if(!relay)throw Error('请先连接一个直连 Backend，再添加代理主机');
-      const host=await postB(relay.id,'/api/v1/hosts',{name:name||base,base:base.trim(),token:token.trim()});
+      const host=await postB(relay.id,'/api/v1/hosts',{name:name||base,base:base.trim(),token:token.trim(),tunnelAuthorization:$('pairTunnelAuthorization').value.trim()});
       state.relayHostsVia=relay.id;state.relayHosts=[...state.relayHosts.filter(item=>item.id!==host.id),host];renderRelayHostList();
       entry={id:`bk-relay-${relay.id}-${host.id}`,name:name||base,base:base.trim(),token:'',saved:false,relayHostId:host.id,relayVia:relay.id};
     } else {
@@ -1048,7 +1049,7 @@
       entry.name=name;entry.base=base;entry.token=token;
     }
     await connectBackend(entry,{confirmSave:true});$('pairDialog').close();}catch(e){$('status').className='bad';$('status').textContent='连接失败';toast(e.message);}finally{$('pairSubmit').disabled=false;}};
-  $('openConfig').onclick=openConfig;$('refreshRelayHosts').onclick=()=>void loadRelayHosts();$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('disconnectAll').onclick=()=>disconnectAll();$('backendFilter').onchange=()=>{state.backendFilter=$('backendFilter').value;localStorage.rpBackendFilter=state.backendFilter;renderWorkspaces().catch(()=>{});renderAgentList();};
+  $('openConfig').onclick=openConfig;$('pairRelay').onchange=()=>$('pairTunnelAuthRow').hidden=!$('pairRelay').checked;$('refreshRelayHosts').onclick=()=>void loadRelayHosts();$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=openPair;$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('disconnectAll').onclick=()=>disconnectAll();$('backendFilter').onchange=()=>{state.backendFilter=$('backendFilter').value;localStorage.rpBackendFilter=state.backendFilter;renderWorkspaces().catch(()=>{});renderAgentList();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){const target=state.workspace?.backendId||primaryBackend()?.id;if(!target)return toast('没有可用的 Backend');await postB(target,'/api/v1/workspaces',result);await refreshWs();}};
   $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
