@@ -15,3 +15,20 @@ describe('no-auth mode',()=>{it('serves the API without a token and reports auth
  const login=await fetch(base+'/api/v1/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:'whatever'})});
  expect(login.status).toBe(401);
 })});
+describe('relay hosts',()=>{it('lists, relays HTTP and pipes WebSocket to a saved host',async()=>{
+ const target=new RemotePiServer({port:0,dataDir:await mkdtemp(path.join(tmpdir(),'remote-pi-relay-target-'))});const targetAuth=await target.auth.init();const targetAddress=await target.start();
+ try{
+  server=new RemotePiServer({port:0,dataDir:await mkdtemp(path.join(tmpdir(),'remote-pi-relay-main-'))});const primaryAuth=await server.auth.init();const address=await server.start();
+  const base=`http://127.0.0.1:${address!.port}`,auth={authorization:`Bearer ${primaryAuth.token}`,'content-type':'application/json'};
+  const created=await (await fetch(`${base}/api/v1/hosts`,{method:'POST',headers:auth,body:JSON.stringify({name:'target',base:`http://127.0.0.1:${targetAddress!.port}`,token:targetAuth.token})})).json();
+  expect(created.data.id).toBeTruthy();expect(created.data.token).toBeUndefined();
+  const hostId=created.data.id;
+  const list=await (await fetch(`${base}/api/v1/hosts`,{headers:{authorization:auth.authorization}})).json();
+  expect(list.data).toHaveLength(1);expect(list.data[0].name).toBe('target');expect(list.data[0].token).toBeUndefined();
+  const relayed=await (await fetch(`${base}/api/v1/hosts/${hostId}/api/v1/system/status`,{headers:{authorization:auth.authorization}})).json();
+  expect(relayed.data.piVersion).toBeTruthy();expect(relayed.data.protocolVersion).toBe(1);
+  expect((await fetch(`${base}/api/v1/hosts/host-x/api/v1/system/status`,{headers:{authorization:auth.authorization}})).status).toBe(404);
+  const ws=await new Promise<any>((resolve,reject)=>{const socket=new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/hosts/${hostId}/api/v1/ws`,{headers:{authorization:`Bearer ${primaryAuth.token}`}});socket.on('open',()=>socket.send(JSON.stringify({type:'subscribe_all',fromNow:true})));socket.on('message',raw=>{const value=JSON.parse(String(raw));if(value.type==='subscribed_all'){socket.close();resolve(value)}});socket.on('error',reject)});
+  expect(ws.protocolVersion).toBe(1);
+ } finally{await target.stop()}
+})});
