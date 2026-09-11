@@ -45,7 +45,15 @@ pi2web --help
 - 六键 Session 键盘在一个页面内统一绑定到任意 backend 的 Session；按键绑定和键盘灯光按 `backend + Session` 唯一标识，不会混淆。
 - 新建 Agent / Terminal / 打开文件等操作都会路由到所选 Workspace 所属的 backend。
 
-如果浏览器直连某个 backend 受限（跨域、HTTPS 页面连 HTTP 服务等混合内容限制），可以在配对对话框勾选「通过主 Backend 代理连接」：该主机会注册到已连接的主 backend（`/api/v1/hosts`，仅保存名称、地址和配对码），浏览器只与主 backend 同源通信，HTTP 与 WebSocket 均由主 backend 原样转发并注入目标主机的配对码。中继仅限已保存的主机（allowlist），不会成为任意地址的开放代理。
+如果浏览器直连某个 backend 受限（跨域、HTTPS 页面连 HTTP 服务等混合内容限制），可以在配对对话框勾选「通过主 Backend 代理连接」：浏览器只与主 backend 同源通信，HTTP 与 WebSocket 均由主 backend 原样转发。目标主机的配对码保存在主 backend 的元数据里，由它在转发时自动携带，浏览器不保存、也不随请求发送目标配对码；Web 只需告诉中继要访问哪个目标。主机可以先用 curl 在服务端侧注册：
+
+```bash
+curl -X POST http://127.0.0.1:11318/api/v1/hosts \
+  -H "Authorization: Bearer <主 backend 配对码>" -H "content-type: application/json" \
+  -d '{"name":"lab","base":"http://lab:11318","token":"<目标配对码>"}'
+```
+
+之后 Web 的代理模式下拉里就能直接选中该主机，全程不需要在浏览器输入它的配对码；也可以在对话框里现场录入新主机（配对码只会提交这一次给中继保存）。中继仅限已保存的主机（allowlist），不会成为任意地址的开放代理。转发时目标 token 同时通过 `Authorization` 和 `X-Tunnel-Authorization` 头携带，pi2web 自身也接受这两种头，适配会消耗标准 Authorization 的隧道环境。
 
 连接信息（含短名称）保存在浏览器本地存储；是否保存配对码仍由用户在连接成功后逐个确认。选择了保存配对码的 backend 在页面刷新或重新打开后自动重连，不再弹出配对窗；未保存或自动连接失败时才会弹窗重新输入。旧版本保存过的单个连接会自动迁移为名为「本机」的 backend，已有的键盘绑定也会同步迁移。
 
