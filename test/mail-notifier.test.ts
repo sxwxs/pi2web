@@ -40,4 +40,13 @@ describe('MailNotifier',()=>{
     const fetcher=vi.fn<typeof fetch>(async()=>ok());const notifier=new MailNotifier({endpoint:'https://mail.example.com/api/v1/messages',apiKey:'key',recipient:'owner@example.com'},fetcher);
     notifier.handleAgentEvent('agent-1',{type:'agent_end'});await notifier.close();expect(fetcher).not.toHaveBeenCalled();
   });
+
+  it('sends only once when a run emits agent_settled more than once',async()=>{
+    const fetcher=vi.fn<typeof fetch>(async()=>ok());const notifier=new MailNotifier({endpoint:'https://mail.example.com/api/v1/messages',apiKey:'key',recipient:'owner@example.com'},fetcher);
+    notifier.handleAgentEvent('agent-1',{type:'agent_start'});
+    notifier.handleAgentEvent('agent-1',{type:'message_end',message:'final response'});
+    notifier.handleAgentEvent('agent-1',{type:'agent_settled'});
+    notifier.handleAgentEvent('agent-1',{type:'agent_settled'});
+    await notifier.close();expect(fetcher).toHaveBeenCalledTimes(1);
+  });
 });
