@@ -29,6 +29,7 @@ describe('queued steering and follow-up messages',()=>{
   expect((await (await fetch(base+`/api/v1/agents/${agent.agentId}/queue`,{headers})).json()).data).toEqual({steering:[],followUp:[]});
 
   const running=post(`/api/v1/agents/${agent.agentId}/prompt`,{message:'work'});
+  await expect.poll(()=>agents.get(agent.agentId).record.status).toBe('streaming');
   expect((await (await post(`/api/v1/agents/${agent.agentId}/steer`,{message:'redirect'})).json()).data).toEqual({success:true,disposition:'queued'});
   expect((await (await post(`/api/v1/agents/${agent.agentId}/follow-up`,{message:'and then'})).json()).data).toEqual({success:true,disposition:'queued'});
   const queued={steering:['redirect'],followUp:['and then']};
