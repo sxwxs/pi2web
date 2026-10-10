@@ -239,6 +239,33 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 卸载 Agent 会通过同一条可回放事件流发送 `agent_unloaded`；在线客户端据此设为 `unloaded`、清除活动灯效并关闭待回答控件，无需重连。
 
+## 语音客户端 API（会话槽位 / 关注事件 / 受限 Token）
+
+给外部语音助手（例如 [Sotto](https://github.com/sxwxs/sotto)）用的一组**增量**接口，普通 Web UI 不受影响。
+
+**受限 voice token**：配对码等同于宿主机 Shell 权限（Terminal、`bash`）。语音客户端应改用单独的 voice token：
+
+```bash
+pi2web --create-voice-token     # 创建或替换，明文只显示一次；旧 token 立即失效
+pi2web --revoke-voice-token     # 停用
+```
+
+voice token 只能：列出 Agent、读 Agent 状态与最近结果、对 Agent 发 `prompt/steer/follow-up/abort`、回答扩展对话框、读写会话槽位的**读取**与 prompt、读取并确认关注事件、WebSocket 的 `subscribe`/`subscribe_all`/`subscribe_attention` 与同样的四个命令。
+其余（Terminal、bash、Workspace 文件、Collab、邮件设置、创建/Archive Agent、**修改**槽位绑定）一律 `403`（Collab 返回 `401`）。它也不能当作配对码登录，更不能在 Collab 里充当"人"。注意：能给 Agent 发 prompt 就等于能让 Agent 使用它被授予的工具，请按此评估风险。
+
+**会话槽位（"会话一"）**：六键 Session 键盘的槽位 1–6 现在保存在服务端（Web UI 连接后自动与浏览器本地绑定同步，服务端已有绑定时以服务端为准）。
+
+- `GET /api/v1/session-aliases`、`GET/DELETE /api/v1/session-aliases/:slot|:alias`、`PUT /api/v1/session-aliases`（整体替换，仅配对码）。
+- `POST /api/v1/session-aliases/:slot|:alias/prompt`，body `{message, mode?, idempotencyKey?, source?}`：`mode` 默认 `auto`，Agent 忙碌时自动转为 `follow-up`，已卸载的 Agent 按需启动；相同 `idempotencyKey` 在 10 分钟内只执行一次（避免重复识别结果重复提交）。绑定的 Agent 已不存在时返回 `404 ALIAS_TARGET_MISSING`。
+- `GET /api/v1/agents/:id/last-result`：服务启动后最近一次完成任务的最终文本。
+
+**关注事件（Attention）**：把"需要人看一眼/处理"的信号统一成一个有界、可确认的列表（仅内存）：`agent_settled`（任务完成，含最终文本）、`needs_input`（扩展对话框待回答，回答后自动 resolved，用 `extension-response` 作答）、`collab_escalation`（协作升级待裁定）。
+
+- `GET /api/v1/attention?since=<seq>&pending=true`、`POST /api/v1/attention/:id/ack`（幂等，第一个确认者生效）。
+- WebSocket：`{"type":"subscribe_attention","sinceSeq":0}` → `subscribed_attention`，随后 `attention_event`（`change: new|updated`，补发的历史带 `replay:true`）。
+
+协议定义见 `packages/protocol/`。
+
 ## 多 Agent 协作中枢（Collab Hub）
 
 在"人 ↔ 单个 Agent"之上叠加一层协作中枢：多个 Agent 只通过结构化 HTTP API 交互，中枢负责身份、状态机推进、盲评、去重、僵局告警和人工升级。设计文档见 [`COLLAB_PLAN.md`](COLLAB_PLAN.md)。
