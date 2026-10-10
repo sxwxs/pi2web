@@ -66,7 +66,7 @@
     disconnect();state.base=candidateBase;state.token=candidateToken;state.connected=true;localStorage.rpBase=state.base;$('api').value=state.base;
     $('status').className='ok';$('status').textContent='已配对';$('serverInfo').textContent=`v${status.version} · Pi ${status.piVersion}`;
     state.voiceEnabled=!!(status.voiceCapabilities?.tts??status.voiceEnabled);state.voiceSttEnabled=!!(status.voiceCapabilities?.stt??status.voiceEnabled);$('voicePlayback').hidden=!state.voiceEnabled;$('voiceInput').hidden=!state.voiceSttEnabled;updateVoiceButton();
-    await loadMailNotificationSettings(status);updateConfigUi();await refreshWs();await refreshAgents(true);setMobileView('home',{replace:true});
+    await loadMailNotificationSettings(status);updateConfigUi();await refreshWs();await refreshAgents(true);void syncSessionSlots();setMobileView('home',{replace:true});
     if(localStorage.rpToken!==state.token){if(confirm('是否将配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。'))localStorage.rpToken=state.token;else localStorage.removeItem('rpToken');}
     $('pairDialog').close();
   }
@@ -235,7 +235,7 @@
     $('keyboardConnect').hidden=connected;$('keyboardDisconnect').hidden=!connected;
     const unavailable=!window.isSecureContext?'需要 HTTPS 或 localhost':!navigator.hid?'当前浏览器不支持 WebHID':'';
     $('keyboardConnect').disabled=Boolean(unavailable);$('keyboardConnect').title=unavailable;
-    $('keyboardStatus').textContent=connected?`已连接 ${name} · LLM 慢速呼吸，Tool 中速呼吸，Retry 快速呼吸，等待输入浅呼吸，空闲常亮`:unavailable||'未连接 · 绑定保存在当前浏览器';
+    $('keyboardStatus').textContent=connected?`已连接 ${name} · LLM 慢速呼吸，Tool 中速呼吸，Retry 快速呼吸，等待输入浅呼吸，空闲常亮`:unavailable||'未连接 · 绑定同步到服务器（供语音助手按“会话N”寻址）';
     renderKeyboardBindings();
   }
   function renderKeyboardBindings() {
@@ -272,6 +272,25 @@
     }));
     if (focusedId) $(focusedId)?.focus();
   }
+  // Keyboard slots are mirrored to the server ("session slots", 1-based) so voice clients can address "会话一".
+  let applyingServerSlots=false,slotPushTimer=null;
+  function pushSessionSlots(){
+    if(!state.connected||applyingServerSlots)return;
+    clearTimeout(slotPushTimer);
+    slotPushTimer=setTimeout(()=>{
+      const bindings=sessionKeyboard.getBindings().map(item=>({slot:item.slot+1,agentId:item.agentId,color:item.color}));
+      api('/api/v1/session-aliases',{method:'PUT',body:JSON.stringify({bindings})}).catch(error=>console.warn('Session slot sync failed',error));
+    },300);
+  }
+  async function syncSessionSlots(){
+    let remote;
+    try{remote=await api('/api/v1/session-aliases');}catch{return;} // older server without the API
+    if(!Array.isArray(remote))return;
+    if(remote.length){
+      applyingServerSlots=true;
+      try{sessionKeyboard.replaceBindings(remote.map(item=>({slot:item.slot-1,agentId:item.agentId,color:item.color})));}finally{applyingServerSlots=false;}
+    }else if(sessionKeyboard.getBindings().length)pushSessionSlots();
+  }
   const sessionKeyboard = new window.SessionKeyboardController({
     onKey:binding=>{
       const agent=state.agents.find(item=>item.agentId===binding.agentId);
@@ -280,7 +299,7 @@
       selectAgent(agent).catch(error=>toast(error.message));
     },
     onStateChange:updateKeyboardUi,
-    onBindingsChange:()=>{renderAgentList();renderKeyboardBindings();},
+    onBindingsChange:()=>{renderAgentList();renderKeyboardBindings();pushSessionSlots();},
     onError:error=>{console.error('Session keyboard error',error);toast(`键盘：${error.message}`);}
   });
   const formatTokens = value => { const n=Number(value); if(!Number.isFinite(n)||n<=0)return '0'; if(n>=1e6)return `${(n/1e6).toFixed(1)}M`;if(n>=1e3)return `${(n/1e3).toFixed(n>=1e4?0:1)}k`;return String(Math.round(n)); };

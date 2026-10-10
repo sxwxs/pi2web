@@ -4,9 +4,14 @@
   "title": "Remote Pi WebSocket v1",
   "oneOf": [
     {"$ref":"#/$defs/subscribe"}, {"$ref":"#/$defs/command"}, {"$ref":"#/$defs/subscribed"},
-    {"$ref":"#/$defs/commandResult"}, {"$ref":"#/$defs/agentEvent"}, {"$ref":"#/$defs/agentSnapshot"}, {"$ref":"#/$defs/agentStateUpdate"}
+    {"$ref":"#/$defs/commandResult"}, {"$ref":"#/$defs/agentEvent"}, {"$ref":"#/$defs/agentSnapshot"}, {"$ref":"#/$defs/agentStateUpdate"},
+    {"$ref":"#/$defs/subscribeAttention"}, {"$ref":"#/$defs/subscribedAttention"}, {"$ref":"#/$defs/attentionEvent"}
   ],
   "$defs": {
+    "subscribeAttention": {"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"subscribe_attention"},"sinceSeq":{"type":"integer","minimum":0},"pendingOnly":{"type":"boolean"}},"description":"Voice/notification clients: replay attention items newer than sinceSeq, then stream new and updated ones."},
+    "subscribedAttention": {"type":"object","required":["type","protocolVersion","lastSeq"],"properties":{"type":{"const":"subscribed_attention"},"protocolVersion":{"const":1},"lastSeq":{"type":"integer","minimum":0}}},
+    "attentionEvent": {"type":"object","required":["type","change","item"],"properties":{"type":{"const":"attention_event"},"change":{"enum":["new","updated"]},"replay":{"type":"boolean"},"item":{"$ref":"#/$defs/attentionItem"}}},
+    "attentionItem": {"type":"object","required":["id","seq","kind","priority","requiresResponse","createdAt","data"],"properties":{"id":{"type":"string"},"seq":{"type":"integer","minimum":1},"kind":{"enum":["agent_settled","needs_input","collab_escalation"]},"priority":{"enum":["low","normal","high"]},"requiresResponse":{"type":"boolean"},"agentId":{"type":"string"},"sessionName":{"type":"string"},"createdAt":{"type":"string"},"resolvedAt":{"type":"string"},"ackedAt":{"type":"string"},"ackedBy":{"type":"string"},"data":{"type":"object"}}},
     "subscribe": {"type":"object","additionalProperties":false,"required":["type","agentId"],"properties":{"type":{"const":"subscribe"},"agentId":{"type":"string"},"lastSequence":{"type":"integer","minimum":0},"fromNow":{"type":"boolean"},"messageLimit":{"type":"integer","minimum":1,"maximum":200}}},
     "command": {"type":"object","additionalProperties":false,"required":["type","requestId","agentId"],"properties":{"type":{"enum":["prompt","steer","follow-up","abort"]},"requestId":{"type":"string"},"agentId":{"type":"string"},"message":{"type":"string","maxLength":2097152}}},
     "subscribed": {"type":"object","required":["type","agentId","protocolVersion"],"properties":{"type":{"const":"subscribed"},"agentId":{"type":"string"},"protocolVersion":{"const":1},"currentSequence":{"type":"integer","minimum":0}}},
