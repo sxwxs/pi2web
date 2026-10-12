@@ -5,9 +5,13 @@
   "oneOf": [
     {"$ref":"#/$defs/subscribe"}, {"$ref":"#/$defs/command"}, {"$ref":"#/$defs/subscribed"},
     {"$ref":"#/$defs/commandResult"}, {"$ref":"#/$defs/agentEvent"}, {"$ref":"#/$defs/agentSnapshot"}, {"$ref":"#/$defs/agentStateUpdate"},
-    {"$ref":"#/$defs/subscribeAttention"}, {"$ref":"#/$defs/subscribedAttention"}, {"$ref":"#/$defs/attentionEvent"}
+    {"$ref":"#/$defs/subscribeAttention"}, {"$ref":"#/$defs/subscribedAttention"}, {"$ref":"#/$defs/attentionEvent"},
+    {"$ref":"#/$defs/subscribeDrafts"}, {"$ref":"#/$defs/draftAck"}, {"$ref":"#/$defs/draftEvent"}
   ],
   "$defs": {
+    "subscribeDrafts": {"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"subscribe_drafts"}},"description":"Web UI only (full pairing code): receive text dictated by voice clients; pending drafts are replayed first."},
+    "draftAck": {"type":"object","additionalProperties":false,"required":["type","id"],"properties":{"type":{"const":"draft_ack"},"id":{"type":"string"}}},
+    "draftEvent": {"type":"object","required":["type","draft"],"properties":{"type":{"const":"draft_event"},"replay":{"type":"boolean"},"draft":{"type":"object","required":["id","text","mode","createdAt"],"properties":{"id":{"type":"string"},"text":{"type":"string"},"mode":{"enum":["append","replace"]},"agentId":{"type":"string"},"source":{"type":"string"},"createdAt":{"type":"string"}}}}},
     "subscribeAttention": {"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"subscribe_attention"},"sinceSeq":{"type":"integer","minimum":0},"pendingOnly":{"type":"boolean"}},"description":"Voice/notification clients: replay attention items newer than sinceSeq, then stream new and updated ones."},
     "subscribedAttention": {"type":"object","required":["type","protocolVersion","lastSeq"],"properties":{"type":{"const":"subscribed_attention"},"protocolVersion":{"const":1},"lastSeq":{"type":"integer","minimum":0}}},
     "attentionEvent": {"type":"object","required":["type","change","item"],"properties":{"type":{"const":"attention_event"},"change":{"enum":["new","updated"]},"replay":{"type":"boolean"},"item":{"$ref":"#/$defs/attentionItem"}}},

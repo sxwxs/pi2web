@@ -223,6 +223,13 @@ voice token 只能：列出 Agent、读 Agent 状态与最近结果、对 Agent 
 - `POST /api/v1/session-aliases/:slot|:alias/prompt`，body `{message, mode?, idempotencyKey?, source?}`：`mode` 默认 `auto`，Agent 忙碌时自动转为 `follow-up`，已卸载的 Agent 按需启动；相同 `idempotencyKey` 在 10 分钟内只执行一次（避免重复识别结果重复提交）。绑定的 Agent 已不存在时返回 `404 ALIAS_TARGET_MISSING`。
 - `GET /api/v1/agents/:id/last-result`：服务启动后最近一次完成任务的最终文本。
 
+**语音输入到输入框（Draft）**：语音客户端可以把一段文字**写进 Web UI 的输入框而不发送**（不经过任何模型）。
+
+- `POST /api/v1/draft`（当前页面正在显示的 Agent）、`POST /api/v1/agents/:id/draft`、`POST /api/v1/session-aliases/:slot|:alias/draft`，body `{text, mode?: append|replace, source?}`。
+  响应 `{id, agentId, slot, delivered, queued}`：`delivered` 是此刻收到它的网页数；没有页面在线时为 0，文字仍会**暂存**（最多 50 条、1 小时），网页订阅后补发。
+- 网页连接后自动 `subscribe_drafts`；收到 `draft_event` 后先切换到目标会话（如果指定了），再把文字追加（或替换）到输入框并聚焦，然后回 `draft_ack`；第一个确认的网页会让暂存条目消失。
+- voice token 可以调用这三个接口，但不能订阅 `subscribe_drafts`（那是网页的通道）。
+
 **关注事件（Attention）**：把"需要人看一眼/处理"的信号统一成一个有界、可确认的列表（仅内存）：`agent_settled`（任务完成，含最终文本）、`needs_input`（扩展对话框待回答，回答后自动 resolved，用 `extension-response` 作答）、`collab_escalation`（协作升级待裁定）。
 
 - `GET /api/v1/attention?since=<seq>&pending=true`、`POST /api/v1/attention/:id/ack`（幂等，第一个确认者生效）。
