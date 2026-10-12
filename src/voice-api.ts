@@ -1,4 +1,5 @@
 import {AttentionFeed} from './attention.js';
+import {DraftHub} from './drafts.js';
 import type {AgentManager} from './agents.js';
 import type {MetadataStore} from './metadata-store.js';
 
@@ -21,7 +22,8 @@ export function voiceAllowed(method:string,pathname:string){
   const p=pathname;
   if(method==='GET')return p==='/api/v1/system/status'||p==='/api/v1/agents'||p==='/api/v1/session-aliases'||p==='/api/v1/attention'||
     /^\/api\/v1\/agents\/[^/]+\/(state|last-result)$/.test(p)||/^\/api\/v1\/session-aliases\/[^/]+$/.test(p);
-  if(method==='POST')return /^\/api\/v1\/agents\/[^/]+\/(prompt|steer|follow-up|abort|extension-response)$/.test(p)||
+  if(method==='POST')return p==='/api/v1/draft'||/^\/api\/v1\/agents\/[^/]+\/(prompt|steer|follow-up|abort|extension-response|draft)$/.test(p)||
+    /^\/api\/v1\/session-aliases\/[^/]+\/draft$/.test(p)||
     /^\/api\/v1\/session-aliases\/[^/]+\/prompt$/.test(p)||/^\/api\/v1\/attention\/[^/]+\/ack$/.test(p);
   return false;
 }
@@ -32,7 +34,7 @@ export class VoiceApi {
   private idempotent=new Map<string,{at:number;result:unknown}>();
   private readonly idempotencyTtlMs=10*60_000;
   constructor(private readonly deps:{
-    metadata:MetadataStore;agents:AgentManager;feed:AttentionFeed;
+    metadata:MetadataStore;agents:AgentManager;feed:AttentionFeed;drafts:DraftHub;
     /** Sends a command the same way the REST/WS prompt endpoints do (naming, voice bookkeeping, indexing). */
     send:(agentId:string,kind:PromptKind,message:string)=>Promise<void>;
   }){}
@@ -80,6 +82,8 @@ export class VoiceApi {
     const {method,parts,url}=ctx;
     if(parts[0]!=='api'||parts[1]!=='v1')return;
     if(parts[2]==='session-aliases')return this.handleAliases(ctx);
+    if(method==='POST'&&parts.length===3&&parts[2]==='draft')return this.draft(ctx,undefined);
+    if(method==='POST'&&parts.length===5&&parts[2]==='agents'&&parts[4]==='draft')return this.draft(ctx,{agentId:parts[3]});
     if(parts[2]==='agents'&&parts[4]==='last-result'&&method==='GET'&&parts.length===5){
       let record;try{record=this.deps.agents.get(parts[3]).record}catch{return fail(404,'AGENT_NOT_FOUND','Agent not found')}
       const r=this.deps.feed.lastResult(parts[3]);
@@ -124,7 +128,28 @@ export class VoiceApi {
       return;
     }
     if(parts.length===5&&parts[4]==='prompt'&&method==='POST')return this.promptAlias(ctx);
+    if(parts.length===5&&parts[4]==='draft'&&method==='POST'){
+      const alias=this.resolve(parts[3]);
+      if(!alias)return missing(parts[3]);
+      return this.draft(ctx,{agentId:alias.agentId,slot:alias.slot});
+    }
     return;
+  }
+
+  /**
+   * Places text into a Web UI input box without sending it. Target: an agent (path), a slot/alias (path), or — on
+   * POST /draft — an optional body {agentId}; with no target the UI uses whichever agent it currently shows.
+   */
+  private async draft(ctx:Ctx,target:{agentId:string;slot?:number}|undefined):Promise<ApiResult>{
+    const body=await ctx.body(),text=typeof body.text==='string'?body.text:'';
+    if(!text.trim())return fail(400,'INVALID_REQUEST','text is required');
+    if(text.length>20000)return fail(413,'REQUEST_TOO_LARGE','text is too long');
+    const mode=body.mode===undefined?'append':String(body.mode);
+    if(mode!=='append'&&mode!=='replace')return fail(400,'INVALID_REQUEST','mode must be append or replace');
+    const agentId=target?.agentId??(typeof body.agentId==='string'&&body.agentId?body.agentId:undefined);
+    if(agentId){try{this.deps.agents.get(agentId)}catch{return fail(404,target?.slot!==undefined?'ALIAS_TARGET_MISSING':'AGENT_NOT_FOUND',target?.slot!==undefined?`The session bound to slot ${target.slot} no longer exists; rebind it`:'Agent not found')}}
+    const {draft,delivered}=this.deps.drafts.add({text,mode,agentId,source:typeof body.source==='string'?body.source.slice(0,32):undefined});
+    return ok({id:draft.id,agentId:agentId??null,slot:target?.slot??null,mode,delivered,queued:true});
   }
 
   private async promptAlias(ctx:Ctx):Promise<ApiResult>{

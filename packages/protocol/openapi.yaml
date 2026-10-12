@@ -32,6 +32,12 @@ paths:
     post: {operationId: promptSessionAlias, description: 'Body {message, mode?: auto|prompt|steer|follow-up, idempotencyKey?, source?}. auto sends a follow-up while the agent is busy; unloaded agents are started on demand.', parameters: [{name: ref, in: path, required: true, schema: {type: string}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
   /agents/{id}/last-result:
     get: {operationId: agentLastResult, description: 'Final assistant text of the last settled task since server start (404 NO_RESULT otherwise).', parameters: [{$ref: '#/components/parameters/Id'}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /draft:
+    post: {operationId: draftText, description: 'Put text into the Web UI input box without sending it. Body {text, mode?: append|replace, agentId?, source?}; without agentId the UI uses the agent it is showing. Response {id, agentId, slot, delivered, queued}; undelivered drafts are kept pending until a UI acknowledges them.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /agents/{id}/draft:
+    post: {operationId: draftTextForAgent, parameters: [{$ref: '#/components/parameters/Id'}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /session-aliases/{ref}/draft:
+    post: {operationId: draftTextForAlias, parameters: [{name: ref, in: path, required: true, description: slot number or alias name, schema: {type: string}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
   /attention:
     get: {operationId: listAttention, description: 'Things that need the human: finished tasks, pending extension dialogs, collab escalations. ?since=<seq>&pending=true', responses: {'200': {$ref: '#/components/responses/Success'}}}
   /attention/{id}/ack:

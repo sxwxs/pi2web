@@ -611,7 +611,30 @@
     clearTimeout(state.mediaTimer);const recorder=state.mediaRecorder,mime=recorder?.mimeType||'audio/webm',blob=new Blob(state.mediaChunks,{type:mime}),agentId=state.mediaAgentId;state.mediaStream?.getTracks().forEach(track=>track.stop());state.mediaRecorder=null;state.mediaStream=null;state.mediaChunks=[];state.mediaAgentId=null;$('voiceInput').textContent='…';$('voiceInput').classList.remove('recording');
     if(!agentId){$('voiceInput').textContent='🎙';return;}try{const response=await fetch(state.base+`/api/v1/agents/${agentId}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
   }
+  // Text dictated by a voice client (e.g. Sotto) is put into the input box — never sent. A target agent is selected first.
+  const handledDrafts=new Set();
+  async function handleDraftEvent(message){
+    const draft=message.draft;
+    if(!draft||typeof draft.text!=='string'||handledDrafts.has(draft.id))return;
+    const ack=()=>{handledDrafts.add(draft.id);if(handledDrafts.size>200)handledDrafts.delete(handledDrafts.values().next().value);state.ws?.send(JSON.stringify({type:'draft_ack',id:draft.id}));};
+    try{
+      if(draft.agentId&&(state.selectedKind!=='agent'||state.agent?.agentId!==draft.agentId)){
+        let agent=state.agents.find(x=>x.agentId===draft.agentId);
+        if(!agent){await refreshAgents();agent=state.agents.find(x=>x.agentId===draft.agentId);}
+        if(!agent){toast('语音输入：目标会话不存在');ack();return;}
+        await selectAgent(agent);
+      }
+      if(state.selectedKind!=='agent'||!state.agent){toast('语音输入：请先选择一个 Agent（文字已暂存）');return;} // not acknowledged → stays pending on the server
+      const input=$('input');
+      if(draft.mode==='replace')input.value=draft.text;
+      else{const prefix=input.value&&!/\s$/.test(input.value)?' ':'';input.value+=prefix+draft.text;}
+      input.focus();input.setSelectionRange(input.value.length,input.value.length);input.scrollTop=input.scrollHeight;
+      toast('语音输入已写入输入框');ack();
+    }catch(error){toast(`语音输入失败：${error.message}`);}
+  }
   function handleAgentEvent(message) {
+    if(message.type==='draft_event'){void handleDraftEvent(message);return;}
+    if(message.type==='subscribed_drafts')return;
     if(message.type==='voice_event'){handleVoiceEvent(message);return;}
     if (message.type === 'subscribed') {
       const key = `rpSeq:${message.agentId}`, saved = Number(localStorage[key] || 0), current = Number(message.currentSequence || 0);
@@ -691,7 +714,7 @@
     if (!state.connected) return;
     clearTimeout(state.reconnectTimer); state.manuallyClosed = true; const previous=state.ws; state.ws=null; previous?.close(); state.manuallyClosed = false;
     const ws = new WebSocket(state.base.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + state.token]); state.ws = ws;
-    ws.onopen = () => { if(ws!==state.ws)return;state.reconnectAttempt = 0; $('status').textContent = '已配对 · 实时'; for (const agent of state.agents) { const key=`rpSeq:${agent.agentId}`, cursor=localStorage[key]; ws.send(JSON.stringify(cursor===undefined?{type:'subscribe',agentId:agent.agentId,fromNow:true,messageLimit:state.messagePageSize}:{type:'subscribe',agentId:agent.agentId,lastSequence:Number(cursor),messageLimit:state.messagePageSize})); } ws.send(JSON.stringify({type:'subscribe_all',fromNow:true})); };
+    ws.onopen = () => { if(ws!==state.ws)return;state.reconnectAttempt = 0; $('status').textContent = '已配对 · 实时'; for (const agent of state.agents) { const key=`rpSeq:${agent.agentId}`, cursor=localStorage[key]; ws.send(JSON.stringify(cursor===undefined?{type:'subscribe',agentId:agent.agentId,fromNow:true,messageLimit:state.messagePageSize}:{type:'subscribe',agentId:agent.agentId,lastSequence:Number(cursor),messageLimit:state.messagePageSize})); } ws.send(JSON.stringify({type:'subscribe_all',fromNow:true})); ws.send(JSON.stringify({type:'subscribe_drafts'})); };
     ws.onmessage = event => { if(ws!==state.ws)return;try { handleAgentEvent(JSON.parse(event.data)); } catch (error) { console.error(error); } };
     ws.onclose = () => { if (!state.connected || state.manuallyClosed || ws !== state.ws) return; $('status').textContent = '正在重连…'; const delays=[1000,2000,4000,8000,15000,30000], delay=delays[Math.min(state.reconnectAttempt++,delays.length-1)]; state.reconnectTimer=setTimeout(connectSocket,delay); };
     ws.onerror = () => {};
