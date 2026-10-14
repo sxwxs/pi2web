@@ -51,6 +51,17 @@
 .msg.dialog{border-left-color:var(--blue);background:#2f3644}
 .msg.voice{border-left-color:#b48ead}
 
+/* Multi-backend connections: short-name tag on sessions and the sidebar filter. */
+.backend-tag{flex:0 0 auto;max-width:92px;padding:2px 7px;border:1px solid #6b7688;border-radius:999px;background:#39404e;color:#d8dee9;font:700 10px/1.4 system-ui,sans-serif;text-transform:uppercase;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.backend-filter{max-width:140px;padding:4px 6px;font-size:12px}
+.backend-row{display:flex;align-items:center;gap:10px;margin:6px 0;padding:8px;background:var(--input);border:1px solid var(--line);border-radius:6px}
+.backend-row-info{flex:1;min-width:0}
+.backend-row-info b,.backend-row-info small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.backend-row-info small{margin-top:2px;color:var(--muted)}
+.backend-row-actions{display:flex;gap:6px}.backend-row-actions button{padding:4px 8px;font-size:12px}
+.relay-hosts-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.relay-hosts-title button{padding:4px 8px;font-size:12px}.relay-host-empty{padding:8px 2px;color:var(--muted)}
+
 /* Six-key WebHID session keyboard. */
 .key-binding{flex:0 0 auto;min-width:27px;padding:2px 6px;border:1px solid var(--key-color);border-radius:5px;background:#20232b;color:#fff;font:700 11px ui-monospace,monospace;text-align:center;box-shadow:inset 3px 0 var(--key-color)}
 .keyboard-slots{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:10px}
