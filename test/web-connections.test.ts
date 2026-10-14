@@ -76,6 +76,51 @@ describe('backend state', () => {
     });
   });
 
+  it('matches a cwd to the deepest owning workspace and to nothing outside it', () => {
+    const {api} = loadBackendState();
+    const workspaces = [{id:'outer', rootPath:'/home/dev'}, {id:'inner', rootPath:'/home/dev/project'}, {id:'other', rootPath:'/srv/app'}];
+    expect(api.matchWorkspace(workspaces, '/home/dev/project/src')).toMatchObject({id:'inner'});
+    expect(api.matchWorkspace(workspaces, '/home/dev/notes')).toMatchObject({id:'outer'});
+    expect(api.matchWorkspace(workspaces, 'C:\\home\\dev\\project')).toBeNull();
+    expect(api.matchWorkspace(workspaces, '/home/development')).toBeNull();
+    expect(api.matchWorkspace([], '/home/dev')).toBeNull();
+  });
+
+  it('shares one saved connection list between the console and the collaboration page', () => {
+    const {api, localStorage} = loadBackendState({rpBase:'http://localhost:11318', rpToken:'legacy-token'});
+    // The collaboration page sees the console's single-backend pairing...
+    expect(api.selectConnection(localStorage, 'http://localhost')).toMatchObject({base:'http://localhost:11318', token:'legacy-token'});
+    // ...and a Backend it pairs itself stays visible to the console.
+    api.rememberConnection(localStorage, {base:'https://work.example.com/', token:'work-token', name:'Work', remember:true});
+    expect(api.loadStoredBackends(localStorage, 'http://localhost').map((item:any) => [item.base, item.token, item.saved])).toEqual([
+      ['http://localhost:11318', 'legacy-token', true],
+      ['https://work.example.com', 'work-token', true],
+    ]);
+    expect(api.selectConnection(localStorage, 'http://localhost', 'https://work.example.com')).toMatchObject({name:'Work', token:'work-token'});
+  });
+
+  it('updates a connection in place and never keeps a code the user declined to save', () => {
+    const {api, localStorage} = loadBackendState({
+      rpConnections:JSON.stringify([{id:'one', name:'One', base:'http://one', token:'token-one'}, {id:'two', name:'Two', base:'http://two', token:'token-two'}]),
+    });
+    api.rememberConnection(localStorage, {base:'http://two', token:'rotated', remember:true});
+    expect(JSON.parse(localStorage.rpConnections)).toEqual([
+      {id:'one', name:'One', base:'http://one', token:'token-one'},
+      {id:'two', name:'Two', base:'http://two', token:'rotated'},
+    ]);
+    api.rememberConnection(localStorage, {base:'http://two', token:'rotated', remember:false});
+    expect(JSON.parse(localStorage.rpConnections)[1]).toEqual({id:'two', name:'Two', base:'http://two', token:''});
+  });
+
+  it('drops the migrated single-backend code once the shared list owns the connection', () => {
+    const {api, localStorage} = loadBackendState({rpBase:'http://localhost:11318', rpToken:'legacy-token'});
+    api.rememberConnection(localStorage, {base:'http://localhost:11318', token:'legacy-token', remember:false});
+    expect(localStorage.rpToken).toBeUndefined();
+    expect(api.savedConnections(localStorage, 'http://localhost')).toEqual([
+      {id:'bk-main', name:'本机', base:'http://localhost:11318', token:''},
+    ]);
+  });
+
   it('persists tokens only for connections the user chose to save', () => {
     const {api, localStorage} = loadBackendState({rpConnections:'[]'});
     const registry = new api.BackendRegistry(localStorage, 'http://localhost');
