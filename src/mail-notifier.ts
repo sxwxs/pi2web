@@ -27,6 +27,8 @@ const oneLine=(value:string,max:number)=>value.replace(/[\r\n\t]+/g,' ').replace
 
 export class MailNotifier{
   private lastAssistant=new Map<string,string>();
+  /** Agents with a run in progress. A run may emit duplicate settled events; notify only once. */
+  private activeRuns=new Set<string>();
   private queue:PendingNotification[]=[];
   private timer?:ReturnType<typeof setTimeout>;
   private pending=new Set<Promise<void>>();
@@ -47,8 +49,9 @@ export class MailNotifier{
   }
   handleAgentEvent(agentId:string,event:{type:string,[key:string]:unknown},context:MailNotificationContext={}){
     if(this.closed)return;
-    if(event.type==='message_end'){const text=assistantText(event.message);if(text)this.lastAssistant.set(agentId,text);return}
-    if(event.type!=='agent_settled')return;
+    if(event.type==='before_agent_start'||event.type==='agent_start'){this.activeRuns.add(agentId);return}
+    if(event.type==='message_end'){this.activeRuns.add(agentId);const text=assistantText(event.message);if(text)this.lastAssistant.set(agentId,text);return}
+    if(event.type!=='agent_settled'||!this.activeRuns.delete(agentId))return;
     const finalOutput=this.lastAssistant.get(agentId)??'';this.lastAssistant.delete(agentId);
     if(!this.settings.enabled)return;
     this.queue.push({agentId,finalOutput,context});
@@ -67,7 +70,7 @@ export class MailNotifier{
   async close(){
     this.closed=true;this.clearTimer();
     if(this.queue.length)await this.flushQueue();
-    await Promise.allSettled([...this.pending]);this.lastAssistant.clear();
+    await Promise.allSettled([...this.pending]);this.lastAssistant.clear();this.activeRuns.clear();
   }
   private scheduleFlush(){
     const delay=this.settings.aggregationDelaySeconds*1000;
