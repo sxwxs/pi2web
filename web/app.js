@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const {BackendRegistry, createBackendId, resourceKey, splitResourceKey} = window.RemotePiBackendState;
+  const {BackendRegistry, createBackendId, resourceKey, splitResourceKey, normalizePath, isInsidePath, matchWorkspace} = window.RemotePiBackendState;
   const backendRegistry = new BackendRegistry(localStorage, location.origin);
   // The registry owns backend connections and their resource caches. This object
   // only keeps cross-backend UI selections and transient view state.
@@ -25,11 +25,13 @@
   $('pairBase').value = state.backends[0]?.base || location.origin;
   $('pairName').value = state.backends[0]?.name || '';
 
-  const clean = value => String(value || '').split('\\').join('/').replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+  const clean = normalizePath;
   const joinPath = (base, name) => base === '.' ? name : `${base}/${name}`;
   const parentPath = value => { const p = value.split('/'); p.pop(); return p.join('/') || '.'; };
   const absolutePath = relative => clean(`${state.workspace.rootPath}/${relative === '.' ? '' : relative}`);
-  const isInside = (file, dir) => file === dir || file.startsWith(`${dir}/`);
+  const isInside = isInsidePath;
+  /** A cwd only belongs to a Workspace of the same Backend: the same path on two machines is two directories. */
+  const ownsPath = (workspace, item) => !!workspace && workspace.backendId === item.backendId && isInside(clean(item.cwd), clean(workspace.rootPath));
   const relativeTo = (file, dir) => file === dir ? '.' : file.slice(dir.length + 1);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const toast = text => { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => $('toast').hidden = true, 3000); };
@@ -421,11 +423,12 @@
       button.onclick=async()=>{try{$('workspaces').value=workspaceKey(workspace);await selectWorkspace();navigateMobile('workspace');}catch(error){toast(error.message);}};return button;
     }));
   }
-  async function selectWorkspace() {
-    const selectedKey = $('workspaces').value;
+  async function selectWorkspace(selectedKey = $('workspaces').value) {
     const {backendId, remoteId} = splitResourceKey(selectedKey);
     state.workspace = backendOf(backendId)?.workspaces.find(workspace => workspace.id === remoteId) || null;
     if (!state.workspace) return;
+    // A Backend filter can hide the owning Workspace from the picker; the selection still has to follow it.
+    if ([...$('workspaces').options].some(option => option.value === selectedKey)) $('workspaces').value = selectedKey;
     localStorage.rpWorkspaceId = selectedKey;
     state.treePath = '.';
     $('agentCwd').value = '.';
@@ -749,7 +752,23 @@
     }catch(error){if(attempt===state.terminalConnectAttempt&&state.selectedKind==='terminal'&&state.terminal?.terminalId===terminalId){$('terminalStatus').textContent=`${terminal.cwd} · Terminal 加载失败`;toast(`Terminal 加载失败：${error.message}`);}}
   }
   function updateTerminalHeader(){const terminal=state.terminal;if(!terminal)return;$('terminalTitle').textContent=terminal.title||'Terminal';$('terminalStatus').textContent=`${terminal.cwd}${terminal.exitCode===undefined?'':` · exit ${terminal.exitCode}`}`;const badge=$('terminalStateBadge');badge.textContent=terminal.status;badge.className=`state-badge state-${terminal.status}`;}
+  /**
+   * Mentions, cwd defaults and "start agent here" all read the selected Workspace, so selecting a
+   * session on another Backend must move the file browser with it. Without this the browser keeps
+   * pointing at the previous machine and inserts its paths into prompts sent elsewhere.
+   */
+  async function syncWorkspaceForSelection(item) {
+    const backend = backendOf(item.backendId);
+    if (!backend || backend.status !== 'connected') return;
+    if (ownsPath(state.workspace, item)) return;
+    const match = matchWorkspace(backend.workspaces, item.cwd)
+      || (state.workspace?.backendId === item.backendId ? state.workspace : backend.workspaces[0]);
+    if (!match) { clearWorkspaceSelection(); return; }
+    if (state.workspace && workspaceKey(state.workspace) === workspaceKey(match)) return;
+    await selectWorkspace(workspaceKey(match));
+  }
   async function selectTerminal(terminal,openView=true){
+    await syncWorkspaceForSelection(terminal);
     state.selectedKind='terminal';state.terminal=terminal;localStorage.rpTerminalId=terminal.terminalId;localStorage.rpSelectedKind='terminal';$('agentToolbar').hidden=true;$('terminalToolbar').hidden=false;$('terminalView').hidden=false;$('widgets').hidden=true;$('messages').hidden=true;$('prompt').hidden=true;updateTerminalHeader();renderAgentList();if(openView)navigateMobile('agent');void connectTerminalSocket(terminal);
   }
   const autoBindNewSession=agent=>sessionKeyboard.autoBind(agent.agentId);
@@ -799,7 +818,8 @@
   async function selectAgent(agent, openView = true) {
     state.selectedKind='agent';state.terminalWs?.close();state.terminalWs=null;state.agent = agent; localStorage.rpAgentId = agent.agentId;localStorage.rpSelectedKind='agent';showAgentView();updateAgentHeader();
     if (openView) navigateMobile('agent');
-    if (state.workspace && isInside(clean(agent.cwd), clean(state.workspace.rootPath))) $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
+    await syncWorkspaceForSelection(agent);
+    if (ownsPath(state.workspace, agent)) $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
     $('messages').replaceChildren(); discardStreams();state.messagePageStart=0;state.messageTotal=0;closeCommandPicker();state.commands=[];state.commandsAgentId=null;
     try { await loadMessagePage(agent.agentId,undefined,true); await loadSessionIdentity(); } catch (error) { addCard('加载消息失败', error.message, 'error', true); }
     renderAgentList();
@@ -1362,7 +1382,7 @@
   };
   $('openConfig').onclick=openConfig;$('configClose').onclick=()=>$('configDialog').close();$('configSave').onclick=saveMailSettings;$('connect').onclick=()=>openPair();$('keyboardConnect').onclick=async()=>{try{$('keyboardConnect').disabled=true;await sessionKeyboard.connect();}catch(error){toast(`键盘连接失败：${error.message}`);}finally{$('keyboardConnect').disabled=false;}};$('keyboardDisconnect').onclick=()=>sessionKeyboard.disconnect().catch(error=>toast(`键盘断开失败：${error.message}`));$('notifications').onclick=enableNotifications;$('voicePlayback').onclick=toggleVoicePlayback;$('voiceInput').onclick=toggleVoiceInput;$('disconnectAll').onclick=()=>void disconnectAll();$('backendFilter').onchange=()=>{state.backendFilter=$('backendFilter').value;if(state.backendFilter)localStorage.rpBackendFilter=state.backendFilter;else localStorage.removeItem('rpBackendFilter');renderWorkspaces().catch(()=>{});renderAgentList();};
   $('refreshWs').onclick=()=>refreshWs().catch(e=>toast(e.message));$('addWs').onclick=async()=>{if(!requireConnection())return;const result=await modal('添加 Workspace',body=>{const n=field(body,'名称');const p=field(body,'主机绝对路径');return()=>({label:n.value.trim(),rootPath:p.value.trim()});},'添加');if(result?.label&&result.rootPath){const target=state.backendFilter||state.workspace?.backendId||primaryBackend()?.id;if(!target)return toast('没有可用的 Backend');await postBackend(target,'/api/v1/workspaces',result);await refreshWs();}};
-  $('workspaces').onchange=selectWorkspace;$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
+  $('workspaces').onchange=()=>void selectWorkspace();$('agentPageSize').value=String(state.agentPageSize);$('agentPageSize').onchange=()=>{state.agentPageSize=Number($('agentPageSize').value)||10;state.agentVisibleCount=state.agentPageSize;localStorage.rpAgentPageSize=String(state.agentPageSize);renderAgentList();};$('loadMoreAgents').onclick=()=>{state.agentVisibleCount+=state.agentPageSize;renderAgentList();};$('treeRoot').onclick=()=>openDirectory('.');$('treeUp').onclick=()=>openDirectory(parentPath(state.treePath));$('mentionCurrent').onclick=()=>insertMention(state.treePath);$('terminalCurrent').onclick=()=>openTerminal(state.treePath);
   $('treePath').oncontextmenu=e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'});enableLongPressMenu($('treePath'),e=>showContextMenu(e,{relativePath:state.treePath,type:'directory'}));$('filePrev').onclick=()=>openFile(state.filePath,Math.max(0,state.fileOffset-state.fileLimit),false);$('fileNext').onclick=()=>openFile(state.filePath,state.fileOffset+state.fileLimit,false);
   $('menuStartAgent').onclick=()=>startAgent(state.contextTarget.relativePath);$('menuOpenTerminal').onclick=()=>openTerminal(state.contextTarget.relativePath);$('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuBindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void bindKeyboard({agentId:agent.agentId}).catch(error=>toast(error.message));};$('menuKeyboardColor').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void changeKeyboardColor(agent).catch(error=>toast(error.message));};$('menuUnbindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent&&sessionKeyboard.unbind(agent.agentId))toast('已取消键盘按键绑定');};$('menuCloseTerminal').onclick=()=>{const terminal=agentContextTarget?.kind==='terminal'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal(terminal);};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await postAgent(agent.agentId,'/archive');sessionKeyboard.unbind(agent.agentId);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
   $('newAgent').onclick=createAgent;$('newTerminal').onclick=()=>openTerminal($('agentCwd').value.trim()||'.');$('abort').onclick=()=>{if(!state.agent)return;const id=state.agent.agentId;Promise.all([postAgent(id,'/abort'),postAgent(id,'/bash-abort')]).catch(e=>toast(e.message));};$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await requestAgent(state.agent.agentId,'',{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
