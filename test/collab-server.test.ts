@@ -15,8 +15,8 @@ afterEach(async()=>{await server?.stop();server=undefined});
 const temp=(prefix:string)=>mkdtemp(path.join(tmpdir(),prefix));
 const rid=()=>`req-${randomUUID()}`;
 
-async function boot(){
-  const harness=await bootCollabServer('remote-pi-collab');
+async function boot(options:{noAuth?:boolean}={}){
+  const harness=await bootCollabServer('remote-pi-collab',options);
   server=harness.server;
   return harness;
 }
@@ -207,5 +207,18 @@ describe('collaboration HTTP API',()=>{
     const restored=await (await fetch(`http://127.0.0.1:${address!.port}/api/v1/collab/sessions/${session.sessionId}`,{headers})).json();
     expect(restored.data).toMatchObject({title:'Persisted review',phase:'draft'});
     expect(restored.data.participants).toHaveLength(1);
+  });
+
+  it('treats a tokenless caller as the human and still identifies participants when auth is off',async()=>{
+    const {call,workspace,collabAgent}=await boot({noAuth:true});
+    const created=await call('POST','/api/v1/collab/sessions',{kind:'review',title:'No-auth review',workspaceId:workspace.id,subject:{type:'commit_range',value:'HEAD~1..HEAD'}},'');
+    expect(created.status).toBe(201);
+    const sessionId=created.data.sessionId;
+    const reviewer=(await call('POST',`/api/v1/collab/sessions/${sessionId}/participants`,{role:'reviewer',displayName:'reviewer-security',agentId:await collabAgent()},'')).data;
+    expect(reviewer.participantToken).toMatch(/^cpt_/);
+    const digest=await call('GET',`/api/v1/collab/sessions/${sessionId}/digest`,undefined,reviewer.participantToken);
+    expect(digest.status).toBe(200);
+    expect(digest.data.task).toEqual(expect.any(String));
+    expect((await call('POST','/api/v1/collab/sessions',{kind:'review',title:'Seat cannot create',workspaceId:workspace.id,subject:{type:'commit_range',value:'HEAD~1..HEAD'}},reviewer.participantToken)).status).toBe(403);
   });
 });

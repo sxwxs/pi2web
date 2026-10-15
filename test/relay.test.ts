@@ -8,15 +8,18 @@ import {RemotePiServer} from '../src/server.js';
 
 type Target = {base:string, requests:{method:string, url:string, authorization?:string, body:string}[], close:() => Promise<void>};
 
-/** Stands in for the pi2web instance the browser cannot reach: it only records what the relay forwards. */
-async function startTarget():Promise<Target> {
+/**
+ * Stands in for the pi2web instance the browser cannot reach: it only records what the relay forwards.
+ * A null token stands for a target started with --no-auth, which accepts a request without any code.
+ */
+async function startTarget(token:string|null = 'target-token'):Promise<Target> {
   const requests:Target['requests'] = [];
   const server = http.createServer((req, res) => {
     const chunks:Buffer[] = [];
     req.on('data', chunk => chunks.push(chunk));
     req.on('end', () => {
       requests.push({method:req.method ?? '', url:req.url ?? '', authorization:req.headers.authorization, body:Buffer.concat(chunks).toString()});
-      if (req.headers.authorization !== 'Bearer target-token') { res.statusCode = 401; return res.end('{"error":{"message":"nope"}}') }
+      if (token !== null && req.headers.authorization !== `Bearer ${token}`) { res.statusCode = 401; return res.end('{"error":{"message":"nope"}}') }
       res.statusCode = 200;
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({data:{seen:req.url}}));
@@ -108,6 +111,22 @@ describe('backend relay', () => {
     // The target sees its own pairing code, never the one the browser used to reach this server.
     expect(JSON.parse(messages[0]).protocol).toBe('access-token.target-token');
     expect(messages[1]).toBe('echo:ping');
+  });
+
+  it('relays without a pairing code when neither end asks for one', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'pi2web-relay-noauth-'));
+    server = new RemotePiServer({port:0, dataDir:dir, noAuth:true});
+    const address = await server.start();
+    target = await startTarget(null);
+    const base = `http://127.0.0.1:${address!.port}`;
+    const created = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'local', base:target.base})});
+    expect(created.status).toBe(201);
+    const host = (await created.json()).data;
+    expect(host.hasToken).toBe(false);
+
+    expect((await fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`)).status).toBe(200);
+    // Nothing to authenticate with and nothing to invent: the target must see no Authorization header.
+    expect(target!.requests.at(-1)!.authorization).toBeUndefined();
   });
 
   it('closes relayed sockets on shutdown', async () => {
