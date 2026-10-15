@@ -52,6 +52,23 @@ pi2web --help
 
 连接信息（含短名称）保存在浏览器本地存储，并与协作看板（`/collab.html`）共用同一份列表：在任一页面配对过的 backend，另一个页面可以直接复用，不必重新输入配对码。是否保存配对码仍由用户在连接成功后逐个确认。选择了保存配对码的 backend 在页面刷新或重新打开后自动重连，不再弹出配对窗；未保存或自动连接失败时才会弹窗重新输入。旧版本保存过的单个连接会自动迁移为名为「本机」的 backend，已有的键盘绑定也会同步迁移。
 
+## 通过已连接的 Backend 中继
+
+有些机器浏览器直接访问不到：只在局域网里、或者页面跑在 HTTPS 下而目标只有 HTTP（浏览器按混合内容拦掉）。这种情况可以让**另一台已连接的 backend 代为转发**：浏览器只跟中继那台通信，它再把 HTTP 请求和 WebSocket 帧原样转给目标机。
+
+在「配置 → Backend 连接 → 添加 Backend」里，把「连接方式」选成某台已连接的 backend 即可；地址和配对码填**目标机**的。**目标机的配对码只保存在中继那台服务器上**（`relayHosts` 设置），不会落到浏览器本地，浏览器只保存一个中继记录 id；目标地址仍然留在浏览器里，用于显示、编辑和去重。调用中继接口依然需要中继那台的配对码，没配对的人拿不到转发能力。
+
+中继后的 backend 在 UI 里和普通 backend 完全一样（Session 聚合、键盘绑定、Workspace 归属都不变），只是：
+
+- 它要等所属的中继 backend 连上之后才能连，刷新页面时也是先连直连的、再连中继的；
+- 中继那台断开时，通过它中继的 backend 一起断开；
+- 在另一个浏览器里用同一个目标地址再添加一次，会复用服务器上已有的那条中继记录，不会重复创建；
+- 在配置里删掉一个中继 backend，会同时删掉中继服务器上的那条记录（含目标配对码）；删掉一台中继 backend 时，它名下所有中继记录会先删干净再移除本地条目，删不掉会明确告诉你。
+- 协作看板（`/collab.html`）直连 backend，不走中继，因此不会列出中继 backend。
+- 目标机用 `--no-auth` 起的话，配对码留空即可；但 `--no-auth` 只响应 loopback 请求，所以这种目标只能由**同一台机器上**的另一个 pi2web 中继（比如 `http://127.0.0.1:11319`）。
+
+对应的接口：`GET/POST /api/v1/hosts`、`PATCH/DELETE /api/v1/hosts/:id`（`token` 只写不读，列表里只返回 `hasToken`），以及 `/api/v1/hosts/:id/<目标路径>` 的转发（HTTP 和 WebSocket 都走这个前缀）。
+
 ## Agent 完成邮件通知（MailDispatch）
 
 如果启动时同时配置 MailDispatch 消息 API endpoint、API key 环境变量和通知邮箱，Pi 发出 `agent_settled`（不会再自动重试、自动 compact 或执行排队的 follow-up）后，Remote Pi 可以提交事务邮件。MailDispatch 返回 `202` 后邮件进入其持久队列；实际投递由 MailDispatch worker 完成。
@@ -300,6 +317,7 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET/POST /api/v1/workspaces`
 - `GET /api/v1/workspaces/:id/tree|file|stat`
 - `GET /api/v1/sessions`
+- `GET/POST /api/v1/hosts`、`PATCH/DELETE /api/v1/hosts/:id`（中继目标）、`/api/v1/hosts/:id/*`（转发到目标，含 WebSocket）
 - `GET/POST /api/v1/agents`（创建时可带 `profile`：`default`（默认）或 `collab`；`collab` 会加载协作工具，供协作看板占座使用）
 - `GET/DELETE /api/v1/agents/:id`
 - `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/recheck`（**仅人**，重开时轮换每个座位的 token 并在响应 `participantTokens` 里返回一次）、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/issue-votes`、`/merge-votes`、`/issue-discussions`、`/review-consensus`、`/review-rounds`（**仅人**）、`/retry-waiting`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
