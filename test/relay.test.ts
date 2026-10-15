@@ -6,13 +6,16 @@ import path from 'node:path';
 import {WebSocket, WebSocketServer} from 'ws';
 import {RemotePiServer} from '../src/server.js';
 
+/** Shaped like a real pairing code, which is what the relay accepts for a target. */
+const TARGET_TOKEN = 'target-token-7VqK3nZt0aLpXb';
+
 type Target = {base:string, requests:{method:string, url:string, authorization?:string, body:string}[], close:() => Promise<void>};
 
 /**
  * Stands in for the pi2web instance the browser cannot reach: it only records what the relay forwards.
  * A null token stands for a target started with --no-auth, which accepts a request without any code.
  */
-async function startTarget(token:string|null = 'target-token'):Promise<Target> {
+async function startTarget(token:string|null = TARGET_TOKEN):Promise<Target> {
   const requests:Target['requests'] = [];
   const server = http.createServer((req, res) => {
     const chunks:Buffer[] = [];
@@ -49,7 +52,7 @@ async function start() {
   const address = await server.start();
   target = await startTarget();
   const base = `http://127.0.0.1:${address!.port}`, headers = {Authorization:`Bearer ${first.token}`, 'Content-Type':'application/json'};
-  const created = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'lab', base:target.base, token:'target-token'})});
+  const created = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'lab', base:target.base, token:TARGET_TOKEN})});
   const host = (await created.json()).data;
   return {base, headers, token:first.token!, host, status:created.status};
 }
@@ -63,7 +66,7 @@ describe('backend relay', () => {
     const relayed = await fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents?limit=2`, {headers});
     expect(relayed.status).toBe(200);
     expect((await relayed.json()).data).toEqual({seen:'/api/v1/agents?limit=2'});
-    expect(target!.requests.at(-1)).toMatchObject({method:'GET', url:'/api/v1/agents?limit=2', authorization:'Bearer target-token'});
+    expect(target!.requests.at(-1)).toMatchObject({method:'GET', url:'/api/v1/agents?limit=2', authorization:`Bearer ${TARGET_TOKEN}`});
 
     const posted = await fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`, {method:'POST', headers, body:JSON.stringify({workspaceId:'w'})});
     expect(posted.status).toBe(200);
@@ -90,6 +93,28 @@ describe('backend relay', () => {
     expect(listed.data).toHaveLength(1);
   });
 
+  it('stores a prefix a path can be appended to, and only a pairing code it could have issued', async () => {
+    const {base, headers} = await start();
+    const register = (body:unknown) => fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify(body)});
+    // A query or fragment would swallow the relayed path, and a fragment makes the WebSocket throw.
+    const trimmed = await register({name:'trimmed', base:'http://10.0.0.5:11318/edge/?probe=1#top'});
+    expect((await trimmed.json()).data.base).toBe('http://10.0.0.5:11318/edge');
+    expect((await register({name:'creds', base:'http://user:pw@10.0.0.6:11318'})).status).toBe(400);
+    // A code with a space cannot be sent as a subprotocol, so it is refused here, not at connect time.
+    expect((await register({name:'spaced', base:'http://10.0.0.7:11318', token:'has a space'})).status).toBe(400);
+    expect((await register({name:'short', base:'http://10.0.0.7:11318', token:'short'})).status).toBe(400);
+  });
+
+  it('survives a saved host that no longer passes validation', async () => {
+    const {base, headers, token} = await start();
+    // Written the way a record saved before that validation existed would look.
+    server!.metadata.setSetting('relayHosts', [{id:'host-legacy', name:'legacy', base:'http://127.0.0.1:1/#top', token:'has a space', createdAt:new Date().toISOString()}]);
+    const socket = new WebSocket(`${base.replace('http', 'ws')}/api/v1/hosts/host-legacy/api/v1/ws`, [`access-token.${token}`]);
+    await expect(new Promise<void>((resolve, reject) => { socket.on('open', () => resolve()); socket.on('error', reject) })).rejects.toThrow();
+    // The handshake fails on its own socket instead of taking the process down with it.
+    expect((await fetch(`${base}/api/v1/hosts`, {headers})).status).toBe(200);
+  });
+
   it('deletes a host and rejects an invalid base', async () => {
     const {base, headers, host} = await start();
     expect((await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'bad', base:'ftp://example.com'})})).status).toBe(400);
@@ -109,7 +134,7 @@ describe('backend relay', () => {
     });
     socket.close();
     // The target sees its own pairing code, never the one the browser used to reach this server.
-    expect(JSON.parse(messages[0]).protocol).toBe('access-token.target-token');
+    expect(JSON.parse(messages[0]).protocol).toBe(`access-token.${TARGET_TOKEN}`);
     expect(messages[1]).toBe('echo:ping');
   });
 
