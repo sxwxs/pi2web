@@ -3,6 +3,7 @@ import http from 'node:http';
 import {mkdtemp} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import {WebSocket, WebSocketServer} from 'ws';
 import {RemotePiServer} from '../src/server.js';
 
@@ -31,7 +32,7 @@ async function startTarget(token:string|null = TARGET_TOKEN):Promise<Target> {
   const sockets = new WebSocketServer({server, path:'/api/v1/ws'});
   sockets.on('connection', (socket, req) => {
     socket.send(JSON.stringify({protocol:req.headers['sec-websocket-protocol']}));
-    socket.on('message', data => socket.send(`echo:${data}`));
+    socket.on('message', data => socket.send(String(data) === 'snapshot' ? 'B'.repeat(3 * 1024 * 1024) : `echo:${data}`));
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as {port:number}).port;
@@ -155,6 +156,45 @@ describe('backend relay', () => {
     expect((await fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`)).status).toBe(200);
     // Nothing to authenticate with and nothing to invent: the target must see no Authorization header.
     expect(target!.requests.at(-1)!.authorization).toBeUndefined();
+  });
+
+  it('carries a reply larger than the limit on commands coming the other way', async () => {
+    const {base, token, host} = await start();
+    const socket = new WebSocket(`${base.replace('http', 'ws')}/api/v1/hosts/${host.id}/api/v1/ws`, [`access-token.${token}`]);
+    // An Agent snapshot with large tool results passes straight to a direct browser, so it must pass here.
+    const received = await new Promise<number|string>((resolve, reject) => {
+      socket.on('error', reject);
+      socket.on('close', code => resolve(`closed ${code}`));
+      socket.on('message', data => { if (String(data).startsWith('B')) resolve(String(data).length) });
+      socket.on('open', () => socket.send('snapshot'));
+    });
+    socket.close();
+    expect(received).toBe(3 * 1024 * 1024);
+  });
+
+  it('does not let a target that never answers hold the browser or the shutdown', async () => {
+    const {base, headers, token} = await start();
+    // Accepts the connection and then says nothing at all, the one case with no error to react to.
+    const pending:net.Socket[] = [];
+    const silent = net.createServer(socket => { pending.push(socket) });
+    await new Promise<void>(resolve => silent.listen(0, '127.0.0.1', resolve));
+    const port = (silent.address() as {port:number}).port;
+    const created = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'silent', base:`http://127.0.0.1:${port}`})});
+    const host = (await created.json()).data;
+
+    const socket = new WebSocket(`${base.replace('http', 'ws')}/api/v1/hosts/${host.id}/api/v1/ws`, [`access-token.${token}`]);
+    socket.on('error', () => {});
+    await new Promise<void>(resolve => setTimeout(resolve, 200));
+    expect(socket.readyState).toBe(WebSocket.CONNECTING);
+
+    // A handshake nobody will ever answer must not hold the shutdown with it.
+    const started = Date.now();
+    await server!.stop();
+    server = undefined;
+    expect(Date.now() - started).toBeLessThan(2000);
+
+    for (const socket of pending) socket.destroy();
+    await new Promise<void>(resolve => silent.close(() => resolve()));
   });
 
   it('closes relayed sockets on shutdown', async () => {

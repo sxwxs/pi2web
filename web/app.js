@@ -109,10 +109,14 @@
 
   /** Only a connected direct Backend can relay: it is the one that will reach the target and store its code. */
   function renderRelayOptions(backend = null) {
-    const select = $('pairRelayVia'), relays = connectedBackends().filter(item => !item.relayHostId && item.id !== backend?.id);
+    const select = $('pairRelayVia'), connected = connectedBackends().filter(item => !item.relayHostId && item.id !== backend?.id);
+    // The Backend's own relay stays on the list while it is offline: dropping it would leave the route
+    // silently set to 直连, so editing a name would try to reach the target the browser cannot reach.
+    const current = backend?.relayVia ? backendOf(backend.relayVia) : null;
+    const relays = current && !connected.includes(current) ? [...connected, current] : connected;
     const direct = document.createElement('option'); direct.value = ''; direct.textContent = '直连';
     select.replaceChildren(direct, ...relays.map(item => {
-      const option = document.createElement('option'); option.value = item.id; option.textContent = `经「${item.name || item.base}」中继`; return option;
+      const option = document.createElement('option'); option.value = item.id; option.textContent = `经「${item.name || item.base}」中继${item.status === 'connected' ? '' : '（未连接）'}`; return option;
     }));
     select.value = relays.some(item => item.id === backend?.relayVia) ? backend.relayVia : '';
     select.closest('label').hidden = !relays.length;
@@ -1417,22 +1421,30 @@
       }
       const editingId = $('pairDialog').dataset.backendId, relayVia = $('pairRelayVia').value;
       const existing = backendOf(editingId) || backendRegistry.findByBase(base, relayVia);
+      // Where this Backend was reached before. Its record holds the target's pairing code, so it may
+      // only be dropped once the new route has proved it works.
+      const previous = existing?.relayHostId ? {via:existing.relayVia, hostId:existing.relayHostId} : null;
       let entry = {id:existing?.id || createBackendId(), name, base, token, saved:existing?.saved || false};
       if (relayVia) {
+        const children = existing ? relayChildren(state.backends, existing.id) : [];
+        if (children.length) throw Error(`「${existing.name}」正在为 ${children.length} 个 backend 中继，不能再把它自己改成中继连接`);
         // The relay stores the target pairing code; this browser only keeps the host id.
-        const host = existing?.relayHostId && existing.relayVia === relayVia
-          ? await requestBackend(relayVia, `/api/v1/hosts/${encodeURIComponent(existing.relayHostId)}`, {method:'PATCH', body:JSON.stringify({name, base, ...(token ? {token} : {})})})
+        const host = previous && previous.via === relayVia
+          ? await requestBackend(relayVia, `/api/v1/hosts/${encodeURIComponent(previous.hostId)}`, {method:'PATCH', body:JSON.stringify({name, base, ...(token ? {token} : {})})})
           : await postBackend(relayVia, '/api/v1/hosts', {name, base, token});
         entry = {...entry, token:'', relayHostId:host.id, relayVia};
-      } else if (existing?.relayHostId) {
-        // Back to a direct connection: the relay must not keep the target's code, and the code just
-        // typed here needs the usual consent, which relayed Backends never had to give.
-        await requestBackend(existing.relayVia, `/api/v1/hosts/${encodeURIComponent(existing.relayHostId)}`, {method:'DELETE'})
-          .catch(error => toast(`中继记录未能删除：${error.message}`));
+      } else if (previous) {
+        // Back to a direct connection: the code just typed needs the usual consent, which a relayed
+        // Backend never had to give.
         existing.saved = false;
         entry = {...entry, saved:false, relayHostId:'', relayVia:''};
       }
       await connectBackend(entry, {confirmSave:true});
+      // Only now is the old record unreachable from this browser, and only now may it be deleted.
+      if (previous && previous.hostId !== entry.relayHostId) {
+        await requestBackend(previous.via, `/api/v1/hosts/${encodeURIComponent(previous.hostId)}`, {method:'DELETE'})
+          .catch(error => toast(`旧中继记录未能删除：${error.message}`));
+      }
       $('pairDialog').close();
     } catch (error) {
       updateHeaderStatus();
