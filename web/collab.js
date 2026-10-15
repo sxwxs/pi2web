@@ -38,13 +38,15 @@
     $('pairRemember').checked = !!saved?.token;
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
-  async function connect(base, token) {
+  // `remember` is undefined for the automatic reconnect: it must leave storage alone, or opening this
+  // page would delete the saved pairing code of every page sharing the connection list.
+  async function connect(base, token, remember) {
     const candidateBase = base.trim().replace(/\/$/, '') || location.origin;
     await request(candidateBase, token.trim(), '/api/v1/system/status');
     state.base = candidateBase; state.token = token.trim(); state.connected = true;
     // Same rule as the main console: the code is only persisted when the user asks for it on this device.
     // Unchecking must always clear it, including when the saved code is the one just used to reconnect.
-    connections.rememberConnection(localStorage, {base: state.base, token: state.token, remember: $('pairRemember').checked});
+    if (remember !== undefined) connections.rememberConnection(localStorage, {base: state.base, token: state.token, remember});
     $('status').className = 'ok'; $('status').textContent = '已配对';
     $('pairDialog').close();
     openSocket();
@@ -636,7 +638,7 @@
   $('pairCancel').onclick = () => $('pairDialog').close();
   $('pairForm').onsubmit = async event => {
     event.preventDefault();
-    try {await connect($('pairBase').value, $('pairToken').value)} catch (error) {toast(error.message)}
+    try {await connect($('pairBase').value, $('pairToken').value, $('pairRemember').checked)} catch (error) {toast(error.message)}
   };
   $('refresh').onclick = () => void refreshAll();
   $('statusFilter').onchange = () => void refreshAll();
