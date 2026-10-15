@@ -23,12 +23,17 @@ pi2web --data-dir ~/.pi/remote-pi
 pi2web --rotate-access-token   # 旧配对码立即失效，输出新配对码
 pi2web --set-access-token <token>          # 手动设置配对码（16–128 位 URL-safe 字符）
 pi2web --set-access-token-env MY_TOKEN_ENV # 从环境变量读取配对码，推荐方式
+pi2web --no-auth                           # 关闭配对码认证，仅限本机监听
 pi2web --help
 ```
 
 服务器会同时提供 API、WebSocket 和 Web UI，无需另起静态文件服务器。请勿直接暴露到公网；远程访问建议使用 SSH tunnel、Tailscale、devtunnel 或配置 HTTPS 的可信反向代理。
 
 配对失败有速率限制：同一来源地址在 60 秒窗口内累计 10 次失败后会被锁定，锁定时间从 60 秒起按次翻倍，最长 15 分钟，HTTP 返回 `429` 与 `Retry-After`，WebSocket 升级同样受限；一次成功配对立即清除该地址的计数。注意限流按 TCP 来源地址统计，通过 devtunnel、Cloudflare Tunnel 或反向代理访问时所有客户端共用同一个计数桶。Remote Pi 不校验 `Origin` / `Host`，因此可以直接配合内网穿透使用。
+
+完全受信任的本地环境（只在本机使用，或通过 SSH tunnel / Tailscale 访问）可以用 `--no-auth` 关掉配对码认证：Web UI 连接时配对码留空即可，也不会再询问是否保存配对码。该选项只允许绑定 `127.0.0.1`、`::1` 或 `localhost`，遇到 `0.0.0.0` 等对外地址会直接拒绝启动，避免把无认证的 Agent 控制接口暴露到网络；请勿在不受信任的网络环境中使用。
+
+没有配对码时，浏览器就是最后一道边界，所以 `--no-auth` 下服务端只响应 `Host` 为 loopback、且 `Origin`（如果带）同为 loopback 的请求，HTTP 和 WebSocket 都一样，其余一律 `403`，也不再返回 `Access-Control-Allow-Origin: *`，以免任意网页读取你的工作区或驱动 Agent。SSH tunnel（访问 `localhost:端口`）不受影响；改写 `Host` 的本机反向代理会被拒绝，请改用配对码模式。
 
 配对码默认随机生成；也可以用 `--set-access-token <token>` 或 `--set-access-token-env <环境变量名>` 手动指定。自定义值必须由 16–128 个 URL-safe 字符组成（字母、数字、`.`、`_`、`~`、`-`），这样它能安全用于 HTTP 和 WebSocket 认证。环境变量方式不会把配对码暴露在进程列表中，推荐优先使用。手动设置的配对码同样只保存 sha256 hash，后续可用 `--rotate-access-token` 换回随机码。
 
@@ -60,6 +65,7 @@ pi2web --help
 - 在另一个浏览器里用同一个目标地址再添加一次，会复用服务器上已有的那条中继记录，不会重复创建；
 - 在配置里删掉一个中继 backend，会同时删掉中继服务器上的那条记录（含目标配对码）；删掉一台中继 backend 时，它名下所有中继记录会先删干净再移除本地条目，删不掉会明确告诉你。
 - 协作看板（`/collab.html`）直连 backend，不走中继，因此不会列出中继 backend。
+- 目标机用 `--no-auth` 起的话，配对码留空即可；但 `--no-auth` 只响应 loopback 请求，所以这种目标只能由**同一台机器上**的另一个 pi2web 中继（比如 `http://127.0.0.1:11319`）。
 
 对应的接口：`GET/POST /api/v1/hosts`、`PATCH/DELETE /api/v1/hosts/:id`（`token` 只写不读，列表里只返回 `hasToken`），以及 `/api/v1/hosts/:id/<目标路径>` 的转发（HTTP 和 WebSocket 都走这个前缀）。
 
