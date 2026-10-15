@@ -30,7 +30,33 @@ it('serves only loopback callers and never answers a foreign origin',async()=>{
  expect(rebound).toBe(403);
  await expect(new Promise((resolve,reject)=>{const ws=new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`,{origin:'https://evil.example'});ws.on('open',()=>{ws.close();resolve(null)});ws.on('error',reject)})).rejects.toThrow('403');
 });
-it('refuses to listen on a non-loopback address',async()=>{
- const dir=await mkdtemp(path.join(tmpdir(),'remote-pi-noauth-'));server=new RemotePiServer({host:'0.0.0.0',port:0,dataDir:dir,noAuth:true});
- await expect(server.start()).rejects.toThrow('loopback');
+it.each(['0.0.0.0','::','192.168.1.10'])('refuses to listen on %s without the override',async host=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'remote-pi-noauth-'));server=new RemotePiServer({host,port:0,dataDir:dir,noAuth:true});
+ await expect(server.start()).rejects.toMatchObject({code:'INVALID_BIND_ADDRESS',message:expect.stringContaining('loopback')});
+});
+it('requires noAuth when enabling the insecure override',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'remote-pi-noauth-'));server=new RemotePiServer({host:'0.0.0.0',port:0,dataDir:dir,allowInsecureNoAuth:true});
+ await expect(server.start()).rejects.toMatchObject({code:'INVALID_OPTIONS'});
+});
+it('allows remote HTTP and websocket requests only with the explicit insecure override',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'remote-pi-noauth-'));server=new RemotePiServer({host:'0.0.0.0',port:0,dataDir:dir,noAuth:true,allowInsecureNoAuth:true});
+ const address=await server.start();expect(server.server.address()).toMatchObject({address:'0.0.0.0'});
+ const {request}=await import('node:http');
+ const remoteRequest=(pathname:string,method='GET',origin?:string)=>new Promise<{status:number|undefined,headers:import('node:http').IncomingHttpHeaders,body:string}>((resolve,reject)=>{
+  const req=request({host:'127.0.0.1',port:address!.port,path:pathname,method,headers:{host:`remote.example:${address!.port}`,...(origin?{origin}:{})}},response=>{
+   let body='';response.setEncoding('utf8');response.on('data',chunk=>{body+=chunk});response.on('end',()=>resolve({status:response.statusCode,headers:response.headers,body}));response.on('error',reject);
+  });req.on('error',reject);req.end();
+ });
+ for(const origin of [undefined,`http://remote.example:${address!.port}`,'https://ui.example']){
+  for(const pathname of ['/','/collab','/health','/api/v1/system/status','/api/v1/workspaces']){
+   const response=await remoteRequest(pathname,'GET',origin);expect(response.status).toBe(200);
+   expect(response.headers['access-control-allow-origin']).toBe(origin);
+   if(pathname==='/health'||pathname==='/api/v1/system/status')expect(JSON.parse(response.body).data.authRequired).toBe(false);
+  }
+  const preflight=await remoteRequest('/api/v1/workspaces','OPTIONS',origin);expect(preflight.status).toBe(204);expect(preflight.headers['access-control-allow-origin']).toBe(origin);
+  for(const pathname of ['/api/v1/ws','/api/v1/terminals/missing/ws'])await new Promise<void>((resolve,reject)=>{
+   const ws=new WebSocket(`ws://127.0.0.1:${address!.port}${pathname}`,{headers:{host:`remote.example:${address!.port}`},origin});ws.on('open',()=>{ws.close();resolve()});ws.on('error',reject);
+  });
+ }
+ await expect(import('node:fs/promises').then(fs=>fs.access(path.join(dir,'auth.json')))).rejects.toThrow();
 })});
