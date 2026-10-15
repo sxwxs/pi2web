@@ -190,9 +190,12 @@ export class RemotePiServer {
   let settled=false;
   const fail=(status:number)=>{if(settled)return;settled=true;socket.write(`HTTP/1.1 ${status} Relay Failed\r\nContent-Length: 0\r\n\r\n`);socket.destroy()};
   upstream.on('open',()=>{settled=true;this.wss.handleUpgrade(req,socket,head,client=>{
-   const forward=(from:WebSocket,to:WebSocket)=>from.on('message',(data,isBinary)=>{if(to.readyState===WebSocket.OPEN)to.send(data,{binary:isBinary})});
+   // Relayed sockets must be known to stop(), or an open Agent or Terminal keeps shutdown waiting.
+   this.clients.add(client);
+   // Same rule as the direct connections: a peer that cannot keep up is closed instead of queued for.
+   const forward=(from:WebSocket,to:WebSocket)=>from.on('message',(data,isBinary)=>{if(to.readyState!==WebSocket.OPEN)return;if(to.bufferedAmount>2*1024*1024){to.close(1013,'Relay peer is too slow');return}to.send(data,{binary:isBinary})});
    forward(client,upstream);forward(upstream,client);
-   client.on('close',()=>upstream.close());upstream.on('close',()=>client.close());
+   client.on('close',()=>{this.clients.delete(client);upstream.close()});upstream.on('close',()=>client.close());
    client.on('error',()=>upstream.terminate());upstream.on('error',()=>client.terminate());
   })});
   upstream.on('unexpected-response',(_request,response)=>{response.resume();fail(response.statusCode??502)});
@@ -204,32 +207,34 @@ export class RemotePiServer {
  private async binaryBody(req:http.IncomingMessage,maxBytes=25*1024*1024){const chunks:Buffer[]=[];let size=0;for await(const value of req){const chunk=Buffer.isBuffer(value)?value:Buffer.from(value);size+=chunk.length;if(size>maxBytes)throw Object.assign(new Error('Request too large'),{code:'REQUEST_TOO_LARGE'});chunks.push(chunk)}return Buffer.concat(chunks)}
  private async handle(req:http.IncomingMessage,res:http.ServerResponse){const requestId=randomUUID();res.setHeader('x-request-id',requestId);res.setHeader('access-control-allow-origin','*');res.setHeader('access-control-allow-headers','Authorization,Content-Type,X-Audio-Filename');res.setHeader('access-control-allow-methods','GET,POST,PATCH,DELETE,OPTIONS');try{if(req.method==='OPTIONS'){res.statusCode=204;return res.end()}const u=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`);if(req.method==='GET'&&await this.serveWeb(u.pathname,req,res))return;if(req.method==='GET'&&u.pathname==='/health')return json(res,200,{data:{status:'ok'}});const parts=u.pathname.split('/').filter(Boolean);if(req.method==='POST'&&u.pathname==='/api/v1/auth/login'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed pairing attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const b=await this.body(req);if(await this.auth.verify(String(b.token??''))){this.loginFailures.delete(key);return json(res,200,{data:{authenticated:true}})}const lockedFor=this.recordLoginFailure(key);if(lockedFor>0)res.setHeader('retry-after',String(Math.ceil(lockedFor/1000)));return json(res,401,{error:{code:'UNAUTHORIZED',message:'Invalid token',requestId}})}if(parts[0]==='api'&&parts[1]==='v1'&&parts[2]==='collab'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const header=String(req.headers.authorization??''),token=header.startsWith('Bearer ')?header.slice(7):'';const result=await this.collabRouter.handle({method:req.method??'GET',url:u,parts,token,body:()=>this.body(req)});if(!result)return json(res,404,{error:{code:'NOT_FOUND',message:'Not found',requestId}});if(result.authFailed)this.recordLoginFailure(key);else this.loginFailures.delete(key);return json(res,result.status,result.payload)}if(!(await this.authorized(req.headers.authorization)))return json(res,401,{error:{code:'UNAUTHORIZED',message:'Authentication required',requestId}});
 if(parts[2]==='hosts'){
- const hosts=this.relayHosts();
- if(parts.length===3&&req.method==='GET')return json(res,200,{data:hosts.map(host=>this.safeRelayHost(host))});
+ // Every branch reads the stored list *after* awaiting its request body: a snapshot taken before that
+ // can already be stale, and two concurrent registrations would then overwrite each other.
+ if(parts.length===3&&req.method==='GET')return json(res,200,{data:this.relayHosts().map(host=>this.safeRelayHost(host))});
  if(parts.length===3&&req.method==='POST'){
   const b=await this.body(req),base=this.relayBase(b.base),name=String(b.name??'').trim(),token=String(b.token??'').trim();
   if(!name||!base)return json(res,400,{error:{code:'INVALID_REQUEST',message:'name and an http(s) base are required',requestId}});
   // Adding the same target from a second browser returns the existing host, so both share one id.
-  const existing=hosts.find(host=>host.base===base);
+  const hosts=this.relayHosts(),existing=hosts.find(host=>host.base===base);
   const host:RelayHost=existing?{...existing,name,token:token||existing.token}:{id:`host-${randomUUID()}`,name,base,token:token||undefined,createdAt:new Date().toISOString()};
   this.metadata.setSetting('relayHosts',existing?hosts.map(item=>item.id===host.id?host:item):[...hosts,host]);
   return json(res,existing?200:201,{data:this.safeRelayHost(host)});
  }
  if(parts.length===4){
-  const index=hosts.findIndex(host=>host.id===parts[3]);
-  if(index<0)return json(res,404,{error:{code:'HOST_NOT_FOUND',message:'Relay host not found',requestId}});
-  if(req.method==='DELETE'){this.metadata.setSetting('relayHosts',hosts.filter((_,position)=>position!==index));return json(res,200,{data:{deleted:true}})}
+  if(req.method==='DELETE'){const hosts=this.relayHosts();if(!hosts.some(host=>host.id===parts[3]))return json(res,404,{error:{code:'HOST_NOT_FOUND',message:'Relay host not found',requestId}});this.metadata.setSetting('relayHosts',hosts.filter(host=>host.id!==parts[3]));return json(res,200,{data:{deleted:true}})}
   if(req.method==='PATCH'){
-   const b=await this.body(req),host={...hosts[index]};
+   const b=await this.body(req),hosts=this.relayHosts(),index=hosts.findIndex(host=>host.id===parts[3]);
+   if(index<0)return json(res,404,{error:{code:'HOST_NOT_FOUND',message:'Relay host not found',requestId}});
+   const host={...hosts[index]};
    if(typeof b.name==='string'&&b.name.trim())host.name=b.name.trim();
    if(typeof b.base==='string'){const base=this.relayBase(b.base);if(!base)return json(res,400,{error:{code:'INVALID_REQUEST',message:'base must be an http(s) URL',requestId}});host.base=base}
    if(typeof b.token==='string')host.token=b.token.trim()||undefined;
    this.metadata.setSetting('relayHosts',hosts.map((item,position)=>position===index?host:item));
    return json(res,200,{data:this.safeRelayHost(host)});
   }
+  return json(res,404,{error:{code:'HOST_NOT_FOUND',message:'Relay host not found',requestId}});
  }
  if(parts.length>=5){
-  const host=hosts.find(item=>item.id===parts[3]);
+  const host=this.relayHosts().find(item=>item.id===parts[3]);
   if(!host)return json(res,404,{error:{code:'HOST_NOT_FOUND',message:'Relay host not found',requestId}});
   return this.relayRequest(req,res,host,u.pathname.slice(`/api/v1/hosts/${parts[3]}`.length)+u.search);
  }
