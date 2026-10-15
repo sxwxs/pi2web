@@ -756,6 +756,9 @@
    * Mentions, cwd defaults and "start agent here" all read the selected Workspace, so selecting a
    * session on another Backend must move the file browser with it. Without this the browser keeps
    * pointing at the previous machine and inserts its paths into prompts sent elsewhere.
+   *
+   * Never await this from a selection: the Workspace is committed synchronously and only the tree
+   * load is asynchronous, so waiting for it would let a slow tree restore the older selection.
    */
   async function syncWorkspaceForSelection(item) {
     const backend = backendOf(item.backendId);
@@ -768,8 +771,7 @@
     await selectWorkspace(workspaceKey(match));
   }
   async function selectTerminal(terminal,openView=true){
-    await syncWorkspaceForSelection(terminal);
-    state.selectedKind='terminal';state.terminal=terminal;localStorage.rpTerminalId=terminal.terminalId;localStorage.rpSelectedKind='terminal';$('agentToolbar').hidden=true;$('terminalToolbar').hidden=false;$('terminalView').hidden=false;$('widgets').hidden=true;$('messages').hidden=true;$('prompt').hidden=true;updateTerminalHeader();renderAgentList();if(openView)navigateMobile('agent');void connectTerminalSocket(terminal);
+    state.selectedKind='terminal';state.terminal=terminal;localStorage.rpTerminalId=terminal.terminalId;localStorage.rpSelectedKind='terminal';$('agentToolbar').hidden=true;$('terminalToolbar').hidden=false;$('terminalView').hidden=false;$('widgets').hidden=true;$('messages').hidden=true;$('prompt').hidden=true;updateTerminalHeader();renderAgentList();if(openView)navigateMobile('agent');void syncWorkspaceForSelection(terminal);void connectTerminalSocket(terminal);
   }
   const autoBindNewSession=agent=>sessionKeyboard.autoBind(agent.agentId);
   async function startAgent(relativePath) {
@@ -818,7 +820,7 @@
   async function selectAgent(agent, openView = true) {
     state.selectedKind='agent';state.terminalWs?.close();state.terminalWs=null;state.agent = agent; localStorage.rpAgentId = agent.agentId;localStorage.rpSelectedKind='agent';showAgentView();updateAgentHeader();
     if (openView) navigateMobile('agent');
-    await syncWorkspaceForSelection(agent);
+    void syncWorkspaceForSelection(agent);
     if (ownsPath(state.workspace, agent)) $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
     $('messages').replaceChildren(); discardStreams();state.messagePageStart=0;state.messageTotal=0;closeCommandPicker();state.commands=[];state.commandsAgentId=null;
     try { await loadMessagePage(agent.agentId,undefined,true); await loadSessionIdentity(); } catch (error) { addCard('加载消息失败', error.message, 'error', true); }
