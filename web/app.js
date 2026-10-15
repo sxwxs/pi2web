@@ -85,6 +85,7 @@
   const postAgent = (agentId, suffix = '', body = {}) => requestAgent(agentId, suffix, {method:'POST', body:JSON.stringify(body)});
 
   function openPair(backend = null) {
+    if ($('pairDialog').open) return;
     if ($('configDialog').open) $('configDialog').close();
     $('pairDialog').dataset.backendId = backend?.id || '';
     $('pairName').value = backend?.name || '';
@@ -225,11 +226,11 @@
     if (!state.voiceEnabled) stopVoiceAudio();
     updateVoiceButton();
   }
-  async function connectBackend(entry, {confirmSave = true} = {}) {
+  async function connectBackend(entry, {confirmSave = true, pair = true} = {}) {
     const base = String(entry.base || '').trim().replace(/\/$/, '') || location.origin;
     let token = String(entry.token || '').trim();
     if (!token && await backendRequiresAuth(base)) {
-      openPair(entry);
+      if (pair) openPair(entry);
       throw Error('请先输入配对码');
     }
 
@@ -1415,7 +1416,7 @@
   void (async () => {
     const candidates = state.backends.filter(backend => backend.base && (backend.saved || !backend.token));
     if (!candidates.length) { openPair(state.backends[0] || null); return; }
-    const results = await Promise.allSettled(candidates.map(backend => connectBackend(backend, {confirmSave:false})));
+    const results = await Promise.allSettled(candidates.map(backend => connectBackend(backend, {confirmSave:false, pair:false})));
     if (!hasConnection()) {
       const error = results.find(result => result.status === 'rejected')?.reason;
       if (error) toast(`自动连接失败：${error.message}`);
