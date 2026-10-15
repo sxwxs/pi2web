@@ -68,6 +68,31 @@ The following findings are intentionally recorded but not fixed in this change, 
 - **Problem:** Login calls the full `/session` endpoint sequentially for every Agent just to retrieve its name. This loads SDK backends/extensions and transfers complete session trees.
 - **Recommended fix:** Use the `sessionName` already returned by the Agent list, or add a client method for `/session?summary=true`. Avoid loading sessions that do not need additional metadata.
 
+## Deferred: multi-backend Web UI
+
+Both findings only occur with several Backends connecting in parallel. The straightforward fixes add
+attempt generations and a startup barrier, so they are recorded rather than implemented for now.
+
+### A cancelled connection attempt can revive a removed Backend
+
+- **Severity:** Medium
+- **Location:** `web/app.js`, `connectBackend()`
+- **Problem:** Deleting a Backend or choosing "Disconnect All" while its `/api/v1/system/status` request
+  is still in flight does not stop the continuation. It re-adds the removed Backend, marks it connected,
+  persists it and opens its WebSocket.
+- **Recommended fix:** Give each attempt a generation that deactivation and removal invalidate, and drop
+  stale completions before adding or activating a Backend.
+
+### Parallel reconnects overwrite the stored startup selection
+
+- **Severity:** Low
+- **Location:** `web/app.js`, `connectBackend()` / `restorePreviousSelection()`
+- **Problem:** Every Backend restores the previous selection on its own completion. When the stored
+  Workspace or Session belongs to a slower Backend, a faster one selects a fallback first and overwrites
+  `rpWorkspaceId` / `rpSelectedKind`, so the stored position is lost instead of restored.
+- **Recommended fix:** Keep the startup selection until the first batch of connection attempts settles,
+  and never override a selection the user made meanwhile.
+
 ## Remaining maintenance notes
 
 - `src/server.ts` still combines HTTP routing, WebSocket handling, static assets, and session indexing in one class. Future feature work should split these responsibilities before the route surface grows further.

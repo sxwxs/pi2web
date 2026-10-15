@@ -6,7 +6,12 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const state = {base: localStorage.rpBase || location.origin, token: localStorage.rpToken || '', connected: false,
+  // Connections are shared with the console: this page must read and write the same saved list,
+  // otherwise a Backend paired there cannot be reused here.
+  const connections = window.RemotePiBackendState;
+  const savedFor = base => connections.savedConnections(localStorage, location.origin).find(item => item.base === String(base || '').replace(/\/$/, ''));
+  const initial = connections.selectConnection(localStorage, location.origin) || {base: location.origin, token: ''};
+  const state = {base: initial.base || location.origin, token: initial.token || '', connected: false,
     sessions: [], sessionId: new URLSearchParams(location.search).get('session') || '', detail: null, escalations: [],
     workspaces: [], agents: [], ws: null, reconnectTimer: null, refreshTimer: null,
     modelCatalogs: new Map(), agentCapabilities: new Map()};
@@ -27,20 +32,21 @@
 
   // ---------------------------------------------------------------- connection
   function openPair() {
+    const saved = savedFor(state.base);
     $('pairBase').value = state.base;
-    $('pairToken').value = state.token || localStorage.rpToken || '';
-    $('pairRemember').checked = !!localStorage.rpToken;
+    $('pairToken').value = state.token || saved?.token || '';
+    $('pairRemember').checked = !!saved?.token;
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
-  async function connect(base, token) {
+  // `remember` is undefined for the automatic reconnect: it must leave storage alone, or opening this
+  // page would delete the saved pairing code of every page sharing the connection list.
+  async function connect(base, token, remember) {
     const candidateBase = base.trim().replace(/\/$/, '') || location.origin;
     await request(candidateBase, token.trim(), '/api/v1/system/status');
     state.base = candidateBase; state.token = token.trim(); state.connected = true;
-    localStorage.rpBase = state.base;
     // Same rule as the main console: the code is only persisted when the user asks for it on this device.
     // Unchecking must always clear it, including when the saved code is the one just used to reconnect.
-    if ($('pairRemember').checked) localStorage.rpToken = state.token;
-    else localStorage.removeItem('rpToken');
+    if (remember !== undefined) connections.rememberConnection(localStorage, {base: state.base, token: state.token, remember});
     $('status').className = 'ok'; $('status').textContent = '已配对';
     $('pairDialog').close();
     openSocket();
@@ -632,7 +638,7 @@
   $('pairCancel').onclick = () => $('pairDialog').close();
   $('pairForm').onsubmit = async event => {
     event.preventDefault();
-    try {await connect($('pairBase').value, $('pairToken').value)} catch (error) {toast(error.message)}
+    try {await connect($('pairBase').value, $('pairToken').value, $('pairRemember').checked)} catch (error) {toast(error.message)}
   };
   $('refresh').onclick = () => void refreshAll();
   $('statusFilter').onchange = () => void refreshAll();
