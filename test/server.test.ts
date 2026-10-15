@@ -13,7 +13,22 @@ describe('no-auth mode',()=>{it('serves the API and websocket without a pairing 
  const status=await fetch(base+'/api/v1/system/status');expect(status.status).toBe(200);
  expect((await status.json()).data.authRequired).toBe(false);
  expect((await fetch(base+'/api/v1/workspaces')).status).toBe(200);
- await new Promise<void>((resolve,reject)=>{const ws=new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`);ws.on('open',()=>{ws.close();resolve()});ws.on('error',reject)});
- // No pairing code exists, so the login route keeps rejecting every token instead of pretending one is valid.
+ for(const protocols of [undefined,['access-token.']])await new Promise<void>((resolve,reject)=>{const ws=new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`,protocols);ws.on('open',()=>{ws.close();resolve()});ws.on('error',reject)});
  expect((await fetch(base+'/api/v1/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:'whatever'})})).status).toBe(401);
+});
+it('serves only loopback callers and never answers a foreign origin',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'remote-pi-noauth-'));server=new RemotePiServer({port:0,dataDir:dir,noAuth:true});
+ const address=await server.start(),base=`http://127.0.0.1:${address!.port}`;
+ const same=await fetch(base+'/api/v1/workspaces',{headers:{origin:`http://localhost:${address!.port}`}});
+ expect(same.status).toBe(200);expect(same.headers.get('access-control-allow-origin')).toBe(`http://localhost:${address!.port}`);
+ const foreign=await fetch(base+'/api/v1/workspaces',{headers:{origin:'https://evil.example'}});
+ expect(foreign.status).toBe(403);expect(foreign.headers.get('access-control-allow-origin')).toBe(null);
+ const {request}=await import('node:http');
+ const rebound=await new Promise<number>((resolve,reject)=>{const req=request({host:'127.0.0.1',port:address!.port,path:'/api/v1/workspaces',headers:{host:'attacker.example'}},response=>{response.resume();resolve(response.statusCode??0)});req.on('error',reject);req.end()});
+ expect(rebound).toBe(403);
+ await expect(new Promise((resolve,reject)=>{const ws=new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`,{origin:'https://evil.example'});ws.on('open',()=>{ws.close();resolve(null)});ws.on('error',reject)})).rejects.toThrow('403');
+});
+it('refuses to listen on a non-loopback address',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'remote-pi-noauth-'));server=new RemotePiServer({host:'0.0.0.0',port:0,dataDir:dir,noAuth:true});
+ await expect(server.start()).rejects.toThrow('loopback');
 })});
