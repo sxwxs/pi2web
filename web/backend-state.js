@@ -111,9 +111,11 @@
   function savedConnections(storage, origin) {
     const stored = storedConnections(storage);
     if (stored) return stored;
-    if (!storage.rpToken) return [];
+    // A user who declined to save the pairing code still has a base, selections and keyboard bindings.
+    // Migrating without a code keeps their Backend id, so those keep matching after pairing again.
+    if (!storage.rpToken && !storage.rpBase) return [];
     migrateLegacySelections(storage);
-    return [{id:LEGACY_BACKEND_ID, name:'本机', base:normalizeBase(storage.rpBase || origin), token:String(storage.rpToken)}];
+    return [{id:LEGACY_BACKEND_ID, name:'本机', base:normalizeBase(storage.rpBase || origin), token:String(storage.rpToken || '')}];
   }
 
   /** Connection a page should offer first: the one for `base`, else any with a saved pairing code. */
@@ -185,6 +187,8 @@
         base: backend.base,
         token: backend.saved ? backend.token : '',
       })));
+      // The list is authoritative now, so the migrated single-backend copy of the code must not survive.
+      delete this.storage.rpToken;
     }
 
     deactivate(backend, status = 'off', error = '') {

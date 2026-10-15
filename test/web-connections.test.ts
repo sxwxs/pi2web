@@ -45,6 +45,18 @@ describe('backend state', () => {
     expect(localStorage['rpSeq:agent-a']).toBeUndefined();
   });
 
+  it('migrates a connection whose pairing code was never saved', () => {
+    const {api, localStorage} = loadBackendState({
+      rpBase:'http://localhost:11318',
+      rpAgentId:'agent-a',
+      rpSessionKeyboardBindings:JSON.stringify([{agentId:'agent-a', slot:0}]),
+    });
+    const [backend] = api.loadStoredBackends(localStorage, 'http://localhost');
+    expect(backend).toMatchObject({id:'bk-main', base:'http://localhost:11318', token:'', saved:false});
+    expect(localStorage.rpAgentId).toBe('bk-main:agent-a');
+    expect(JSON.parse(localStorage.rpSessionKeyboardBindings)).toEqual([{agentId:'bk-main:agent-a', slot:0}]);
+  });
+
   it('uses reversible composite resource keys', () => {
     const {api} = loadBackendState();
     const key = api.resourceKey('backend-a', 'agent:with:colons');
@@ -131,5 +143,14 @@ describe('backend state', () => {
       {id:'saved', name:'Saved', base:'http://saved', token:'saved-token'},
       {id:'memory', name:'Memory', base:'http://memory', token:''},
     ]);
+  });
+
+  it('leaves no migrated pairing code behind once the list is written', () => {
+    const {api, localStorage} = loadBackendState({rpBase:'http://localhost:11318', rpToken:'legacy-token'});
+    const registry = new api.BackendRegistry(localStorage, 'http://localhost');
+    registry.remove(registry.find('bk-main'));
+    registry.persist();
+    expect(JSON.parse(localStorage.rpConnections)).toEqual([]);
+    expect(localStorage.rpToken).toBeUndefined();
   });
 });
