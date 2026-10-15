@@ -9,8 +9,10 @@ export type AuthFile = {
 };
 
 const hash = (token:string) => createHash('sha256').update(token).digest('hex');
+/** The shape of every pi2web pairing code. A relay stores a target's code, so it checks the same rule. */
+export const isAccessTokenShape = (token:string) => /^[A-Za-z0-9._~-]{16,128}$/.test(token);
 const validateToken = (token:string) => {
-  if (!/^[A-Za-z0-9._~-]{16,128}$/.test(token)) {
+  if (!isAccessTokenShape(token)) {
     throw Object.assign(
       new Error('Access token must be 16-128 URL-safe characters (letters, digits, dot, underscore, tilde or hyphen)'),
       {code:'INVALID_ACCESS_TOKEN'},
