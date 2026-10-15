@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import {RemotePiServer} from './server.js';
+import {RemotePiServer,LOOPBACK_HOSTS} from './server.js';
 import {VoiceManager,type VoiceConfig} from './voice.js';
 import {SessionNamer,DEFAULT_SESSION_NAMER} from './session-namer.js';
 import {MailNotifier} from './mail-notifier.js';
@@ -18,8 +18,7 @@ if(args.includes('--version')||args.includes('-v')){console.log(pkg.version);pro
 const host=value('--host','127.0.0.1'),port=Number(value('--port','11318'));
 if(!Number.isInteger(port)||port<0||port>65535){console.error('Invalid --port');process.exit(1)}
 const noAuth=args.includes('--no-auth');
-// An unauthenticated agent-control surface must never be reachable from a network; put it behind SSH or Tailscale instead.
-if(noAuth&&!['127.0.0.1','::1','localhost'].includes(host.trim())){console.error('--no-auth requires --host 127.0.0.1, ::1 or localhost; any other bind address needs a pairing code');process.exit(1)}
+if(noAuth&&!LOOPBACK_HOSTS.includes(host.trim())){console.error('--no-auth requires --host 127.0.0.1, ::1 or localhost; any other bind address needs a pairing code');process.exit(1)}
 const voiceBaseUrl=value('--voice-base-url','');let voice:VoiceManager|undefined;
 if(voiceBaseUrl){
   const required=(name:string)=>{const result=value(name,'').trim();if(!result){console.error(`${name} is required when voice is enabled`);process.exit(1)}return result};

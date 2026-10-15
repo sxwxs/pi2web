@@ -66,7 +66,6 @@
     }
     return body.data;
   }
-  /** A --no-auth server answers /health with authRequired:false; anything else is treated as needing a code. */
   async function backendRequiresAuth(base) {
     try { return (await request(base, '', '/health')).authRequired !== false; } catch { return true; }
   }
@@ -228,10 +227,8 @@
   }
   async function connectBackend(entry, {confirmSave = true} = {}) {
     const base = String(entry.base || '').trim().replace(/\/$/, '') || location.origin;
-    const token = String(entry.token || '').trim();
-    // A server started with --no-auth reports authRequired:false and serves the API without a pairing code.
-    const authRequired = token ? true : await backendRequiresAuth(base);
-    if (!token && authRequired) {
+    let token = String(entry.token || '').trim();
+    if (!token && await backendRequiresAuth(base)) {
       openPair(entry);
       throw Error('请先输入配对码');
     }
@@ -240,6 +237,8 @@
     if (statusInfo.protocolVersion !== 1) {
       throw Error(`不支持的协议版本 ${statusInfo.protocolVersion}（需要 1）`);
     }
+    const authRequired = statusInfo.authRequired !== false;
+    if (!authRequired) token = '';
 
     let backend = backendOf(entry.id);
     if (!backend) {
@@ -1410,9 +1409,9 @@
   window.addEventListener('beforeunload',()=>{for(const backend of state.backends)closeBackendSocket(backend);state.terminalWs?.close();cancelVoiceRecording();stopVoiceAudio();});
   window.addEventListener('focus',updateNotificationButton);
   setMobileView('home', {replace:true}); updateConfigUi(); updateKeyboardUi(); renderBackendFilter(); updateHeaderStatus(); void sessionKeyboard.restoreAuthorized();
-  // Backends whose pairing code was explicitly saved reconnect on their own, and so do backends
-  // stored without a code because a --no-auth server needs none; the pairing dialog is only for
-  // first-time or failed connections.
+  // Backends whose pairing code was explicitly saved reconnect on their own, and so do codeless
+  // backends because a --no-auth server needs none; the pairing dialog is only for first-time
+  // or failed connections.
   void (async () => {
     const candidates = state.backends.filter(backend => backend.base && (backend.saved || !backend.token));
     if (!candidates.length) { openPair(state.backends[0] || null); return; }

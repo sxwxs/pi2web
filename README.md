@@ -33,6 +33,8 @@ pi2web --help
 
 完全受信任的本地环境（只在本机使用，或通过 SSH tunnel / Tailscale 访问）可以用 `--no-auth` 关掉配对码认证：Web UI 连接时配对码留空即可，也不会再询问是否保存配对码。该选项只允许绑定 `127.0.0.1`、`::1` 或 `localhost`，遇到 `0.0.0.0` 等对外地址会直接拒绝启动，避免把无认证的 Agent 控制接口暴露到网络；请勿在不受信任的网络环境中使用。
 
+没有配对码时，浏览器就是最后一道边界，所以 `--no-auth` 下服务端只响应 `Host` 为 loopback、且 `Origin`（如果带）同为 loopback 的请求，HTTP 和 WebSocket 都一样，其余一律 `403`，也不再返回 `Access-Control-Allow-Origin: *`，以免任意网页读取你的工作区或驱动 Agent。SSH tunnel（访问 `localhost:端口`）不受影响；改写 `Host` 的本机反向代理会被拒绝，请改用配对码模式。
+
 配对码默认随机生成；也可以用 `--set-access-token <token>` 或 `--set-access-token-env <环境变量名>` 手动指定。自定义值必须由 16–128 个 URL-safe 字符组成（字母、数字、`.`、`_`、`~`、`-`），这样它能安全用于 HTTP 和 WebSocket 认证。环境变量方式不会把配对码暴露在进程列表中，推荐优先使用。手动设置的配对码同样只保存 sha256 hash，后续可用 `--rotate-access-token` 换回随机码。
 
 ## 多 Backend 聚合
