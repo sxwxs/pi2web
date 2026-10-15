@@ -4,6 +4,8 @@ import type {CollabAction,CollabToolBridge} from './collab/pi-extension.js';impo
 export type ServerOptions={host?:string,port?:number,noAuth?:boolean,dataDir?:string,workspaces?:WorkspaceStore,agents?:AgentManager,terminals?:TerminalManager,voice?:VoiceManager,sessionNamer?:SessionNamer,mailNotifier?:MailNotifier};
 /** A saved pi2web instance this server forwards browser traffic to, for targets the browser cannot reach itself. */
 export type RelayHost={id:string,name:string,base:string,token?:string,createdAt:string};
+/** A code outside this set cannot be sent as a WebSocket subprotocol, and older versions allowed manually setting one that is. */
+const RELAY_TOKEN_REQUIRED='token must be a pairing code: 16-128 characters from letters, digits, dot, underscore, tilde or hyphen. A code set by hand on an older version can fall outside this set and cannot be relayed; rotate it on the target with --rotate-access-token';
 type LoginFailure={count:number,expiresAt:number,lockedUntil:number,lockLevel:number};
 export const LOOPBACK_HOSTS=['127.0.0.1','::1','localhost'];
 const isLoopbackHost=(value:string)=>{try{return LOOPBACK_HOSTS.includes(new URL(`http://${value}`).hostname.replace(/^\[|\]$/g,''))}catch{return false}};
@@ -220,7 +222,7 @@ if(parts[2]==='hosts'){
   const b=await this.body(req),base=this.relayBase(b.base),name=String(b.name??'').trim(),token=String(b.token??'').trim();
   if(!name||!base)return json(res,400,{error:{code:'INVALID_REQUEST',message:'name and an http(s) base are required',requestId}});
   // An empty code means the target runs without one; anything else must be a code it could have issued.
-  if(token&&!isAccessTokenShape(token))return json(res,400,{error:{code:'INVALID_REQUEST',message:'token must be a pairing code: 16-128 letters, digits, dot, underscore, tilde or hyphen',requestId}});
+  if(token&&!isAccessTokenShape(token))return json(res,400,{error:{code:'INVALID_REQUEST',message:RELAY_TOKEN_REQUIRED,requestId}});
   // Adding the same target from a second browser returns the existing host, so both share one id.
   const hosts=this.relayHosts(),existing=hosts.find(host=>host.base===base);
   const host:RelayHost=existing?{...existing,name,token:token||existing.token}:{id:`host-${randomUUID()}`,name,base,token:token||undefined,createdAt:new Date().toISOString()};
@@ -235,7 +237,7 @@ if(parts[2]==='hosts'){
    const host={...hosts[index]};
    if(typeof b.name==='string'&&b.name.trim())host.name=b.name.trim();
    if(typeof b.base==='string'){const base=this.relayBase(b.base);if(!base)return json(res,400,{error:{code:'INVALID_REQUEST',message:'base must be an http(s) URL',requestId}});host.base=base}
-   if(typeof b.token==='string'){const token=b.token.trim();if(token&&!isAccessTokenShape(token))return json(res,400,{error:{code:'INVALID_REQUEST',message:'token must be a pairing code: 16-128 letters, digits, dot, underscore, tilde or hyphen',requestId}});host.token=token||undefined}
+   if(typeof b.token==='string'){const token=b.token.trim();if(token&&!isAccessTokenShape(token))return json(res,400,{error:{code:'INVALID_REQUEST',message:RELAY_TOKEN_REQUIRED,requestId}});host.token=token||undefined}
    this.metadata.setSetting('relayHosts',hosts.map((item,position)=>position===index?host:item));
    return json(res,200,{data:this.safeRelayHost(host)});
   }
