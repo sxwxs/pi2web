@@ -57,8 +57,7 @@
   const mobileBack = fallback => { if (isMobile() && history.state?.rpView === state.mobileView && state.mobileView !== 'home') history.back(); else setMobileView(fallback, {replace:true}); };
 
   async function request(base, token, url, options = {}, onUnauthorized) {
-    if (!token) throw Error('请先输入配对码');
-    const headers = {Authorization: `Bearer ${token}`, ...(options.body ? {'Content-Type':'application/json'} : {}), ...options.headers};
+    const headers = {...(token ? {Authorization: `Bearer ${token}`} : {}), ...(options.body ? {'Content-Type':'application/json'} : {}), ...options.headers};
     const response = await fetch(base + url, {...options, headers});
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -66,6 +65,9 @@
       throw Error(body.error?.message || `HTTP ${response.status}`);
     }
     return body.data;
+  }
+  async function backendRequiresAuth(base) {
+    try { return (await request(base, '', '/health')).authRequired !== false; } catch { return true; }
   }
   async function requestBackend(backendId, url, options = {}) {
     const backend = backendOf(backendId);
@@ -83,6 +85,7 @@
   const postAgent = (agentId, suffix = '', body = {}) => requestAgent(agentId, suffix, {method:'POST', body:JSON.stringify(body)});
 
   function openPair(backend = null) {
+    if ($('pairDialog').open) return;
     if ($('configDialog').open) $('configDialog').close();
     $('pairDialog').dataset.backendId = backend?.id || '';
     $('pairName').value = backend?.name || '';
@@ -223,11 +226,11 @@
     if (!state.voiceEnabled) stopVoiceAudio();
     updateVoiceButton();
   }
-  async function connectBackend(entry, {confirmSave = true} = {}) {
+  async function connectBackend(entry, {confirmSave = true, pair = true} = {}) {
     const base = String(entry.base || '').trim().replace(/\/$/, '') || location.origin;
-    const token = String(entry.token || '').trim();
-    if (!token) {
-      openPair(entry);
+    let token = String(entry.token || '').trim();
+    if (!token && await backendRequiresAuth(base)) {
+      if (pair) openPair(entry);
       throw Error('请先输入配对码');
     }
 
@@ -235,6 +238,8 @@
     if (statusInfo.protocolVersion !== 1) {
       throw Error(`不支持的协议版本 ${statusInfo.protocolVersion}（需要 1）`);
     }
+    const authRequired = statusInfo.authRequired !== false;
+    if (!authRequired) token = '';
 
     let backend = backendOf(entry.id);
     if (!backend) {
@@ -252,6 +257,7 @@
       status: 'connected',
       error: '',
       statusInfo,
+      authRequired,
       serverInfo: `v${statusInfo.version} · Pi ${statusInfo.piVersion}`,
       reconnectAttempt: 0,
       voiceEnabled: Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled),
@@ -266,7 +272,7 @@
     }
 
     if (entry.saved) backend.saved = true;
-    if (confirmSave && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) {
+    if (confirmSave && authRequired && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) {
       backend.saved = true;
     }
     persistConnections();
@@ -360,7 +366,7 @@
       const info = document.createElement('div'); info.className = 'backend-row-info';
       const name = document.createElement('b'); name.textContent = backend.name || backend.base;
       const detail = document.createElement('small');
-      const statusText = backend.status === 'connected' ? (backend.reconnecting ? '已连接 · 重连中' : `已连接 · ${backend.serverInfo}`) : backend.status === 'error' ? `连接失败 · ${backend.error || ''}` : '未连接';
+      const statusText = backend.status === 'connected' ? (backend.reconnecting ? '已连接 · 重连中' : `已连接 · ${backend.authRequired === false ? '无需认证 · ' : ''}${backend.serverInfo}`) : backend.status === 'error' ? `连接失败 · ${backend.error || ''}` : '未连接';
       detail.textContent = `${backend.base} · ${statusText}`;
       info.append(name, detail);
       const actions = document.createElement('div'); actions.className = 'backend-row-actions';
@@ -1404,12 +1410,13 @@
   window.addEventListener('beforeunload',()=>{for(const backend of state.backends)closeBackendSocket(backend);state.terminalWs?.close();cancelVoiceRecording();stopVoiceAudio();});
   window.addEventListener('focus',updateNotificationButton);
   setMobileView('home', {replace:true}); updateConfigUi(); updateKeyboardUi(); renderBackendFilter(); updateHeaderStatus(); void sessionKeyboard.restoreAuthorized();
-  // Backends whose pairing code was explicitly saved reconnect on their own;
-  // the pairing dialog is only for first-time or failed connections.
+  // Backends whose pairing code was explicitly saved reconnect on their own, and so do codeless
+  // backends because a --no-auth server needs none; the pairing dialog is only for first-time
+  // or failed connections.
   void (async () => {
-    const saved = state.backends.filter(backend => backend.saved && backend.token);
-    if (!saved.length) { openPair(state.backends[0] || null); return; }
-    const results = await Promise.allSettled(saved.map(backend => connectBackend(backend, {confirmSave:false})));
+    const candidates = state.backends.filter(backend => backend.base && (backend.saved || !backend.token));
+    if (!candidates.length) { openPair(state.backends[0] || null); return; }
+    const results = await Promise.allSettled(candidates.map(backend => connectBackend(backend, {confirmSave:false, pair:false})));
     if (!hasConnection()) {
       const error = results.find(result => result.status === 'rejected')?.reason;
       if (error) toast(`自动连接失败：${error.message}`);

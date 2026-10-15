@@ -18,8 +18,7 @@
 
   const toast = text => {$('toast').textContent = text; $('toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => $('toast').hidden = true, 4000)};
   async function request(base, token, url, options = {}) {
-    if (!token) throw Error('请先输入配对码');
-    const response = await fetch(base + url, {...options, headers: {Authorization: `Bearer ${token}`, ...(options.body ? {'Content-Type': 'application/json'} : {}), ...options.headers}});
+    const response = await fetch(base + url, {...options, headers: {...(token ? {Authorization: `Bearer ${token}`} : {}), ...(options.body ? {'Content-Type': 'application/json'} : {}), ...options.headers}});
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       const fields = (body.error?.fieldErrors || []).map(entry => `${entry.path}: ${entry.message}`).join('；');
@@ -28,6 +27,9 @@
     return body.data;
   }
   const api = (url, options) => request(state.base, state.token, url, options);
+  const requiresAuth = async base => {
+    try { return (await request(base, '', '/health')).authRequired !== false; } catch { return true; }
+  };
   const post = (url, body = {}) => api(url, {method: 'POST', body: JSON.stringify(body)});
 
   // ---------------------------------------------------------------- connection
@@ -42,8 +44,11 @@
   // page would delete the saved pairing code of every page sharing the connection list.
   async function connect(base, token, remember) {
     const candidateBase = base.trim().replace(/\/$/, '') || location.origin;
-    await request(candidateBase, token.trim(), '/api/v1/system/status');
-    state.base = candidateBase; state.token = token.trim(); state.connected = true;
+    let candidateToken = token.trim();
+    if (!candidateToken && await requiresAuth(candidateBase)) throw Error('请先输入配对码');
+    const statusInfo = await request(candidateBase, candidateToken, '/api/v1/system/status');
+    if (statusInfo.authRequired === false) candidateToken = '';
+    state.base = candidateBase; state.token = candidateToken; state.connected = true;
     // Same rule as the main console: the code is only persisted when the user asks for it on this device.
     // Unchecking must always clear it, including when the saved code is the one just used to reconnect.
     if (remember !== undefined) connections.rememberConnection(localStorage, {base: state.base, token: state.token, remember});
@@ -55,7 +60,7 @@
   function openSocket() {
     state.ws?.close(); clearTimeout(state.reconnectTimer);
     const url = `${state.base.replace(/^http/, 'ws')}/api/v1/ws`;
-    const socket = new WebSocket(url, [`access-token.${state.token}`]);
+    const socket = new WebSocket(url, state.token ? [`access-token.${state.token}`] : []);
     state.ws = socket;
     socket.onopen = () => {socket.send(JSON.stringify({type: 'subscribe_collab'})); socket.send(JSON.stringify({type: 'subscribe_all', fromNow: true}))};
     socket.onmessage = event => {
@@ -658,6 +663,5 @@
   };
   window.addEventListener('beforeunload', () => state.ws?.close());
 
-  if (state.token) connect(state.base, state.token).catch(() => openPair());
-  else openPair();
+  connect(state.base, state.token).catch(() => openPair());
 })();
