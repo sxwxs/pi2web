@@ -110,6 +110,17 @@ describe('backend relay', () => {
     expect(messages[1]).toBe('echo:ping');
   });
 
+  it('closes relayed sockets on shutdown', async () => {
+    const {base, token, host} = await start();
+    const socket = new WebSocket(`${base.replace('http', 'ws')}/api/v1/hosts/${host.id}/api/v1/ws`, [`access-token.${token}`]);
+    await new Promise<void>((resolve, reject) => { socket.on('open', () => resolve()); socket.on('error', reject) });
+    const closed = new Promise<void>(resolve => socket.on('close', () => resolve()));
+    // A relayed socket that nobody tracks would keep server.close() waiting forever.
+    await server!.stop();
+    server = undefined;
+    await closed;
+  });
+
   it('reports an unreachable target instead of hanging', async () => {
     const {base, headers} = await start();
     const created = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'down', base:'http://127.0.0.1:1'})});

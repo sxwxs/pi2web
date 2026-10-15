@@ -91,7 +91,11 @@
   }
 
   const normalizeBase = value => String(value || '').replace(/\/$/, '');
-  /** Stored shape of one connection. Relay fields are only written for connections that use a relay. */
+  /**
+   * Stored shape of one connection. Relay fields are only written for connections that use a relay.
+   * The target address is kept here for display, editing and de-duplication; only the target's pairing
+   * code is withheld from this browser, and it lives on the relay instead.
+   */
   const storedEntry = item => ({id:item.id, name:item.name, base:item.base, token:item.token,
     ...(item.relayHostId ? {relayHostId:item.relayHostId, relayVia:item.relayVia} : {})});
 
@@ -99,11 +103,18 @@
    * Where the browser actually sends traffic for a Backend. A direct one is reached at its own address
    * with its own pairing code; a relayed one goes through the Backend that stores it, so the target's
    * address and code stay on that server and never reach this browser.
+   *
+   * Returns null when a relayed Backend has no usable relay: without one there is no address to send to,
+   * and the target's own address is by definition unreachable from here.
    */
   function backendWire(backend, via) {
     if (!backend.relayHostId) return {prefix:backend.base, token:backend.token};
-    return {prefix:`${via?.base || ''}/api/v1/hosts/${backend.relayHostId}`, token:via?.token || ''};
+    if (!via || via.status !== 'connected' || !via.base) return null;
+    return {prefix:`${via.base}/api/v1/hosts/${backend.relayHostId}`, token:via.token};
   }
+
+  /** The Backends reached through `backendId`. They exist only while it is connected. */
+  const relayChildren = (backends, backendId) => backends.filter(backend => backend.relayVia === backendId);
 
   function storedConnections(storage) {
     const stored = storage.getItem(CONNECTIONS_KEY);
@@ -137,7 +148,9 @@
 
   /** Connection a page should offer first: the one for `base`, else any with a saved pairing code. */
   function selectConnection(storage, origin, base = '') {
-    const items = savedConnections(storage, origin);
+    // A relayed Backend can only be reached through the console that knows its relay, so pages that
+    // connect directly (the collaboration board) must never be offered one.
+    const items = savedConnections(storage, origin).filter(item => !item.relayHostId);
     const wanted = normalizeBase(base);
     return (wanted && items.find(item => item.base === wanted)) || items.find(item => item.token) || items[0] || null;
   }
@@ -147,7 +160,8 @@
     const value = normalizeBase(base);
     if (!value) return null;
     const items = savedConnections(storage, value);
-    const existing = items.find(item => item.base === value);
+    // Only a direct entry may be updated in place: a relayed one just happens to share the address.
+    const existing = items.find(item => item.base === value && !item.relayHostId);
     const entry = existing || {id:createBackendId(), name:'', base:value, token:''};
     if (name) entry.name = String(name);
     if (!entry.name) entry.name = value;
@@ -174,8 +188,9 @@
       return this.items.find(backend => backend.id === id);
     }
 
-    findByBase(base) {
-      return this.items.find(backend => backend.base === base);
+    /** Same address through the same route. Two networks can expose different targets at one address. */
+    findByBase(base, relayVia = '') {
+      return this.items.find(backend => backend.base === base && (backend.relayVia || '') === relayVia);
     }
 
     connected() {
@@ -245,5 +260,6 @@
     isInsidePath,
     matchWorkspace,
     backendWire,
+    relayChildren,
   };
 })();
