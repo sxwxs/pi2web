@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const {BackendRegistry, createBackendId, resourceKey, splitResourceKey, normalizePath, isInsidePath, matchWorkspace} = window.RemotePiBackendState;
+  const {BackendRegistry, createBackendId, resourceKey, splitResourceKey, normalizePath, isInsidePath, matchWorkspace, backendWire} = window.RemotePiBackendState;
   const backendRegistry = new BackendRegistry(localStorage, location.origin);
   // The registry owns backend connections and their resource caches. This object
   // only keeps cross-backend UI selections and transient view state.
@@ -36,6 +36,8 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const toast = text => { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => $('toast').hidden = true, 3000); };
   const backendOf = id => backendRegistry.find(id);
+  const wireOf = backend => backendWire(backend, backendOf(backend.relayVia));
+  const relayName = backend => backend.relayHostId ? `经「${backendOf(backend.relayVia)?.name || '?'}」中继` : '';
   const connectedBackends = () => backendRegistry.connected();
   const primaryBackend = () => backendRegistry.primary();
   const hasConnection = () => connectedBackends().length > 0;
@@ -71,7 +73,8 @@
     const backend = backendOf(backendId);
     if (!backend) throw Error('Backend 不存在');
     if (backend.status !== 'connected') throw Error(`Backend「${backend.name || backendId}」未连接`);
-    return request(backend.base, backend.token, url, options, () => {
+    const wire = wireOf(backend);
+    return request(wire.prefix, wire.token, url, options, () => {
       if (backend.status === 'connected') void deactivateBackend(backend, {status:'error', error:'配对码无效或已失效'});
     });
   }
@@ -88,10 +91,23 @@
     $('pairName').value = backend?.name || '';
     $('pairBase').value = backend?.base || location.origin;
     $('pairToken').value = backend?.token || '';
+    renderRelayOptions(backend);
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
   function persistConnections() {
     backendRegistry.persist();
+  }
+
+  /** Only a connected direct Backend can relay: it is the one that will reach the target and store its code. */
+  function renderRelayOptions(backend = null) {
+    const select = $('pairRelayVia'), relays = connectedBackends().filter(item => !item.relayHostId && item.id !== backend?.id);
+    const direct = document.createElement('option'); direct.value = ''; direct.textContent = '直连';
+    select.replaceChildren(direct, ...relays.map(item => {
+      const option = document.createElement('option'); option.value = item.id; option.textContent = `经「${item.name || item.base}」中继`; return option;
+    }));
+    select.value = relays.some(item => item.id === backend?.relayVia) ? backend.relayVia : '';
+    select.closest('label').hidden = !relays.length;
+    $('pairToken').required = !select.value;
   }
 
   function updateHeaderStatus() {
@@ -181,6 +197,8 @@
     clearWorkspaceSelection(backend.id);
     clearAgentSelection(backend.id);
     clearTerminalSelection(backend.id);
+    // A relayed Backend only exists through its relay, so it goes down with it.
+    for (const relayed of state.backends.filter(item => item.relayVia === backend.id && item.status === 'connected')) deactivateBackendState(relayed, status, error);
   }
 
   async function deactivateBackend(backend, {status = 'off', error = ''} = {}) {
@@ -226,12 +244,14 @@
   async function connectBackend(entry, {confirmSave = true} = {}) {
     const base = String(entry.base || '').trim().replace(/\/$/, '') || location.origin;
     const token = String(entry.token || '').trim();
-    if (!token) {
+    const wire = backendWire({...entry, base, token}, backendOf(entry.relayVia));
+    if (entry.relayHostId && !wire.token) throw Error('中继 Backend 需要先连接它所属的 Backend');
+    if (!entry.relayHostId && !token) {
       openPair(entry);
       throw Error('请先输入配对码');
     }
 
-    const statusInfo = await request(base, token, '/api/v1/system/status');
+    const statusInfo = await request(wire.prefix, wire.token, '/api/v1/system/status');
     if (statusInfo.protocolVersion !== 1) {
       throw Error(`不支持的协议版本 ${statusInfo.protocolVersion}（需要 1）`);
     }
@@ -249,6 +269,8 @@
       name: String(entry.name || '').trim() || base,
       base,
       token,
+      relayHostId: entry.relayHostId || '',
+      relayVia: entry.relayVia || '',
       status: 'connected',
       error: '',
       statusInfo,
@@ -265,7 +287,8 @@
       throw error;
     }
 
-    if (entry.saved) backend.saved = true;
+    // A relayed Backend keeps no secret in this browser, so there is nothing to ask about saving.
+    if (entry.saved || backend.relayHostId) backend.saved = true;
     if (confirmSave && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) {
       backend.saved = true;
     }
@@ -361,7 +384,7 @@
       const name = document.createElement('b'); name.textContent = backend.name || backend.base;
       const detail = document.createElement('small');
       const statusText = backend.status === 'connected' ? (backend.reconnecting ? '已连接 · 重连中' : `已连接 · ${backend.serverInfo}`) : backend.status === 'error' ? `连接失败 · ${backend.error || ''}` : '未连接';
-      detail.textContent = `${backend.base} · ${statusText}`;
+      detail.textContent = [backend.base, relayName(backend), statusText].filter(Boolean).join(' · ');
       info.append(name, detail);
       const actions = document.createElement('div'); actions.className = 'backend-row-actions';
       const toggle = document.createElement('button'); toggle.type = 'button'; toggle.textContent = backend.status === 'connected' ? '断开' : '连接';
@@ -385,10 +408,14 @@
       edit.onclick = () => openPair(backend);
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger-action'; remove.textContent = '删除';
       remove.onclick = async () => {
-        if (!confirm(`删除 backend「${backend.name}」？只影响这个页面，不会停止该机器上的服务。`)) return;
-        const agentIds = backend.agents.map(agent => agent.agentId);
-        deactivateBackendState(backend, 'off');
-        backendRegistry.remove(backend);
+        const relayed = state.backends.filter(item => item.relayVia === backend.id);
+        const question = backend.relayHostId ? `删除 backend「${backend.name}」？中继记录也会从「${backendOf(backend.relayVia)?.name || '中继节点'}」上删除。`
+          : relayed.length ? `删除 backend「${backend.name}」？通过它中继的 ${relayed.length} 个 backend 也会一并删除。`
+          : `删除 backend「${backend.name}」？只影响这个页面，不会停止该机器上的服务。`;
+        if (!confirm(question)) return;
+        if (backend.relayHostId) await requestBackend(backend.relayVia, `/api/v1/hosts/${encodeURIComponent(backend.relayHostId)}`, {method:'DELETE'}).catch(() => {});
+        const agentIds = [backend, ...relayed].flatMap(item => item.agents.map(agent => agent.agentId));
+        for (const item of [backend, ...relayed]) { deactivateBackendState(item, 'off'); backendRegistry.remove(item); }
         persistConnections();
         for (const agentId of agentIds) sessionKeyboard.unbind(agentId);
         if (state.backendFilter === backend.id) {
@@ -743,7 +770,7 @@
     try{
       const term=await ensureTerminalEmulator();if(attempt!==state.terminalConnectAttempt||state.selectedKind!=='terminal'||state.terminal?.terminalId!==terminalId)return;term.reset();term.clear();$('terminalStatus').textContent=`${terminal.cwd} · 正在连接…`;
       const terminalBackend=backendOf(terminal.backendId);if(!terminalBackend||terminalBackend.status!=='connected')throw Error(`Backend「${terminal.backendName||terminal.backendId}」未连接`);
-      const ws=new WebSocket(terminalBackend.base.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(terminal.remoteId)}/ws`,['access-token.'+terminalBackend.token]);state.terminalWs=ws;
+      const terminalWire=wireOf(terminalBackend);const ws=new WebSocket(terminalWire.prefix.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(terminal.remoteId)}/ws`,['access-token.'+terminalWire.token]);state.terminalWs=ws;
       ws.onopen=()=>{if(ws!==state.terminalWs)return;requestAnimationFrame(()=>{try{state.fitAddon.fit();ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));term.focus();}catch{}});};
       ws.onmessage=event=>{if(ws!==state.terminalWs)return;try{const message=JSON.parse(event.data);if(message.type==='snapshot'){term.reset();if(message.data)term.write(message.data);terminal.status=message.record.status;updateTerminalHeader();renderAgentList();}else if(message.type==='output')term.write(message.data);else if(message.type==='exit'){terminal.status='exited';terminal.exitCode=message.exitCode;updateTerminalHeader();renderAgentList();void refreshAgents();}else if(message.type==='error')toast(message.message);}catch(error){console.error(error);}};
       ws.onerror=()=>{};ws.onclose=()=>{if(ws===state.terminalWs&&terminal.status==='running')$('terminalStatus').textContent=`${terminal.cwd} · 连接已断开`;};
@@ -1125,7 +1152,8 @@
   function connectSocket(backend) {
     if (!backend || backend.status !== 'connected') return;
     clearTimeout(backend.reconnectTimer); backend.manuallyClosed = true; const previous = backend.ws; backend.ws = null; previous?.close(); backend.manuallyClosed = false;
-    const ws = new WebSocket(backend.base.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + backend.token]); backend.ws = ws;
+    const wire = wireOf(backend);
+    const ws = new WebSocket(wire.prefix.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + wire.token]); backend.ws = ws;
     ws.onopen = () => { if (ws !== backend.ws) return; backend.reconnectAttempt = 0; backend.reconnecting = false; updateHeaderStatus(); for (const agent of backend.agents) subscribeAgent(backend, agent); ws.send(JSON.stringify({type:'subscribe_all', fromNow:true})); };
     ws.onmessage = event => { if (ws !== backend.ws) return; try { const message = JSON.parse(event.data); if (typeof message.agentId === 'string') message.agentId = resourceKey(backend.id, message.agentId); message.backendId = backend.id; handleAgentEvent(message); } catch (error) { console.error(error); } };
     ws.onclose = () => { if (backend.ws !== ws || backend.manuallyClosed) return; backend.reconnecting = true; updateHeaderStatus(); const delays=[1000,2000,4000,8000,15000,30000], delay=delays[Math.min(backend.reconnectAttempt++, delays.length-1)]; backend.reconnectTimer = setTimeout(() => connectSocket(backend), delay); };
@@ -1357,6 +1385,7 @@
   }
 
   $('pairCancel').onclick=()=>$('pairDialog').close();
+  $('pairRelayVia').onchange=()=>{$('pairToken').required=!$('pairRelayVia').value;};
   $('modalCancel').onclick=()=>$('modal').close('cancel');
   $('pairForm').onsubmit = async event => {
     event.preventDefault();
@@ -1370,7 +1399,15 @@
       }
       const editingId = $('pairDialog').dataset.backendId;
       const existing = backendOf(editingId) || backendRegistry.findByBase(base);
-      const entry = {id:existing?.id || createBackendId(), name, base, token, saved:existing?.saved || false};
+      const relayVia = $('pairRelayVia').value;
+      let entry = {id:existing?.id || createBackendId(), name, base, token, saved:existing?.saved || false};
+      if (relayVia) {
+        // The relay stores the target address and pairing code; this browser only keeps the host id.
+        const host = existing?.relayHostId && existing.relayVia === relayVia
+          ? await requestBackend(relayVia, `/api/v1/hosts/${encodeURIComponent(existing.relayHostId)}`, {method:'PATCH', body:JSON.stringify({name, base, ...(token ? {token} : {})})})
+          : await postBackend(relayVia, '/api/v1/hosts', {name, base, token});
+        entry = {...entry, token:'', relayHostId:host.id, relayVia};
+      }
       await connectBackend(entry, {confirmSave:true});
       $('pairDialog').close();
     } catch (error) {
@@ -1407,9 +1444,11 @@
   // Backends whose pairing code was explicitly saved reconnect on their own;
   // the pairing dialog is only for first-time or failed connections.
   void (async () => {
-    const saved = state.backends.filter(backend => backend.saved && backend.token);
+    const saved = state.backends.filter(backend => backend.saved && (backend.token || backend.relayHostId));
     if (!saved.length) { openPair(state.backends[0] || null); return; }
-    const results = await Promise.allSettled(saved.map(backend => connectBackend(backend, {confirmSave:false})));
+    // Relayed Backends need their relay connected first, so they go in a second round.
+    const results = await Promise.allSettled(saved.filter(backend => !backend.relayHostId).map(backend => connectBackend(backend, {confirmSave:false})));
+    results.push(...await Promise.allSettled(saved.filter(backend => backend.relayHostId).map(backend => connectBackend(backend, {confirmSave:false}))));
     if (!hasConnection()) {
       const error = results.find(result => result.status === 'rejected')?.reason;
       if (error) toast(`自动连接失败：${error.message}`);
