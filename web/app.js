@@ -341,18 +341,16 @@
   function renderBackendFilter() {
     const select = $('backendFilter');
     if (!select) return;
-    const connected = connectedBackends();
-    select.replaceChildren(...connected.map(backend => {
+    // Every saved Backend is listed, not only the connected ones: this also runs before the automatic
+    // connections start, where dropping the filter of a still disconnected Backend would discard the
+    // stored choice on every reload. Removing a Backend clears the filter where it is removed.
+    select.replaceChildren(...state.backends.map(backend => {
       const option = document.createElement('option'); option.value = backend.id; option.textContent = backend.name || backend.base; return option;
     }));
     const all = document.createElement('option'); all.value = ''; all.textContent = '全部 Backend';
     select.prepend(all);
-    if (!connected.some(backend => backend.id === state.backendFilter)) {
-      state.backendFilter = '';
-      localStorage.removeItem('rpBackendFilter');
-    }
     select.value = state.backendFilter;
-    select.hidden = connected.length < 2;
+    select.hidden = state.backends.length < 2;
   }
   function renderBackendList() {
     const list = $('backendList');
