@@ -10,7 +10,10 @@
       name: String(entry.name || ''),
       base: String(entry.base || '').replace(/\/$/, ''),
       token: String(entry.token || ''),
-      saved: Boolean(entry.saved ?? entry.token),
+      // A relayed Backend is reached through `relayVia`, which stores its address and pairing code.
+      relayHostId: String(entry.relayHostId || ''),
+      relayVia: String(entry.relayVia || ''),
+      saved: Boolean(entry.saved ?? entry.token ?? entry.relayHostId),
       status: 'off',
       error: '',
       serverInfo: '',
@@ -88,6 +91,19 @@
   }
 
   const normalizeBase = value => String(value || '').replace(/\/$/, '');
+  /** Stored shape of one connection. Relay fields are only written for connections that use a relay. */
+  const storedEntry = item => ({id:item.id, name:item.name, base:item.base, token:item.token,
+    ...(item.relayHostId ? {relayHostId:item.relayHostId, relayVia:item.relayVia} : {})});
+
+  /**
+   * Where the browser actually sends traffic for a Backend. A direct one is reached at its own address
+   * with its own pairing code; a relayed one goes through the Backend that stores it, so the target's
+   * address and code stay on that server and never reach this browser.
+   */
+  function backendWire(backend, via) {
+    if (!backend.relayHostId) return {prefix:backend.base, token:backend.token};
+    return {prefix:`${via?.base || ''}/api/v1/hosts/${backend.relayHostId}`, token:via?.token || ''};
+  }
 
   function storedConnections(storage) {
     const stored = storage.getItem(CONNECTIONS_KEY);
@@ -97,7 +113,8 @@
       if (!Array.isArray(entries)) return null;
       return entries
         .filter(entry => entry && typeof entry.id === 'string' && typeof entry.base === 'string')
-        .map(entry => ({id:entry.id, name:String(entry.name || ''), base:normalizeBase(entry.base), token:String(entry.token || '')}));
+        .map(entry => storedEntry({id:entry.id, name:String(entry.name || ''), base:normalizeBase(entry.base), token:String(entry.token || ''),
+          relayHostId:String(entry.relayHostId || ''), relayVia:String(entry.relayVia || '')}));
     } catch {
       return null;
     }
@@ -136,7 +153,7 @@
     if (!entry.name) entry.name = value;
     entry.token = remember ? String(token || '') : '';
     const next = existing ? items : [...items, entry];
-    storage[CONNECTIONS_KEY] = JSON.stringify(next.map(item => ({id:item.id, name:item.name, base:item.base, token:item.token})));
+    storage[CONNECTIONS_KEY] = JSON.stringify(next.map(storedEntry));
     // The list is authoritative from here on, so the migrated single-backend copy of the code must not
     // survive: keeping it would leave a pairing code behind that the user just asked to forget.
     delete storage.rpToken;
@@ -144,7 +161,7 @@
   }
 
   function loadStoredBackends(storage, origin) {
-    return savedConnections(storage, origin).map(entry => createBackend({...entry, saved:Boolean(entry.token)}));
+    return savedConnections(storage, origin).map(entry => createBackend({...entry, saved:Boolean(entry.token || entry.relayHostId)}));
   }
 
   class BackendRegistry {
@@ -181,12 +198,7 @@
     }
 
     persist() {
-      this.storage[CONNECTIONS_KEY] = JSON.stringify(this.items.map(backend => ({
-        id: backend.id,
-        name: backend.name,
-        base: backend.base,
-        token: backend.saved ? backend.token : '',
-      })));
+      this.storage[CONNECTIONS_KEY] = JSON.stringify(this.items.map(backend => storedEntry({...backend, token:backend.saved ? backend.token : ''})));
       // The list is authoritative now, so the migrated single-backend copy of the code must not survive.
       delete this.storage.rpToken;
     }
@@ -232,5 +244,6 @@
     normalizePath,
     isInsidePath,
     matchWorkspace,
+    backendWire,
   };
 })();
