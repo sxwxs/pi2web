@@ -7,6 +7,8 @@ export type CollabRouterDeps={
   resolveCwd:(workspaceId:string,relativeCwd:string)=>Promise<string>,
   /** True when the caller presented the Remote Pi pairing code, which means "a human is acting". */
   verifyHuman:(token:string)=>Promise<boolean>,
+  /** Set by `--no-auth`: no pairing code exists, so a tokenless caller is the human. */
+  noAuth:boolean,
   /**
    * A collaboration seat must name a dedicated collaboration Agent (the Pi profile that owns the inline
    * collaboration extension). An Agent that does not exist is not one: nothing could wake it, so the seat would
@@ -29,7 +31,7 @@ export class CollabRouter {
   async handle(input:{method:string,url:URL,parts:string[],token:string,body:()=>Promise<unknown>}):Promise<CollabRouteResult|undefined>{
     const {method,url,parts,token}=input;
     if(parts[0]!=='api'||parts[1]!=='v1'||parts[2]!=='collab')return undefined;
-    const isHuman=token?await this.deps.verifyHuman(token):false;
+    const isHuman=token?await this.deps.verifyHuman(token):this.deps.noAuth;
     let participant:Participant|undefined;
     if(!isHuman){
       try{participant=this.hub.authenticate(token)}

@@ -15,6 +15,7 @@
       error: '',
       serverInfo: '',
       statusInfo: null,
+      authRequired: true,
       voiceEnabled: false,
       voiceSttEnabled: false,
       agents: [],
