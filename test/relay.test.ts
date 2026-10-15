@@ -101,7 +101,10 @@ describe('backend relay', () => {
     expect((await trimmed.json()).data.base).toBe('http://10.0.0.5:11318/edge');
     expect((await register({name:'creds', base:'http://user:pw@10.0.0.6:11318'})).status).toBe(400);
     // A code with a space cannot be sent as a subprotocol, so it is refused here, not at connect time.
-    expect((await register({name:'spaced', base:'http://10.0.0.7:11318', token:'has a space'})).status).toBe(400);
+    const spaced = await register({name:'spaced', base:'http://10.0.0.7:11318', token:'has a space'});
+    expect(spaced.status).toBe(400);
+    // The only way out for a code an older version allowed has to be in the message that refuses it.
+    expect((await spaced.json()).error.message).toContain('--rotate-access-token');
     expect((await register({name:'short', base:'http://10.0.0.7:11318', token:'short'})).status).toBe(400);
   });
 
