@@ -39,6 +39,7 @@ function setup() {
     window:{SessionKeyboardController:function(options:unknown) { return Object.assign(sessionKeyboard, options); }},
     updateKeyboardUi:vi.fn(), renderAgentList:vi.fn(), renderKeyboardBindings:vi.fn(), selectAgent, navigateMobile,
     setAgentStatus, discardStreams:vi.fn(), updateMessageHistoryControl:vi.fn(), renderQueueBar:vi.fn(),
+    loadAgentContexts:vi.fn(), finalizeAgentStreams:vi.fn(), notifyComplete:vi.fn(),
   }, {filename:'web/app.js'});
   return {handleAgentEvent, $, messages, postAgent, addCard, renderMessages, state, onKey, setAgentStatus, selectAgent, navigateMobile};
 }
@@ -100,6 +101,25 @@ describe('extension dialog recovery', () => {
     expect(controls.children[0].textContent).toBe('已结束');
     expect(ui.addCard).toHaveBeenCalledOnce();
     expect(ui.renderMessages).not.toHaveBeenCalled();
+  });
+
+  it('uses the status sent with an event and falls back to lifecycle events for older backends', () => {
+    const ui = setup();
+    const event = (sequence:number, event:Record<string, unknown>, status?:string) =>
+      ui.handleAgentEvent({type:'agent_event', agentId:'agent-a', sequence, status, event});
+    event(1, {type:'message_update'}, 'waiting_for_user');
+    expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'waiting_for_user');
+    // Backends that do not send a status still report what they are doing.
+    event(2, {type:'agent_start'});
+    expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'streaming');
+    event(3, {type:'agent_end', willRetry:true});
+    expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'streaming');
+    event(4, {type:'agent_settled'});
+    expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'idle');
+    // Events of neither kind leave the status alone.
+    ui.setAgentStatus.mockClear();
+    event(5, {type:'message_update'});
+    expect(ui.setAgentStatus).not.toHaveBeenCalled();
   });
 
   it('pressing the already selected Session key preserves a dialog draft without reloading', () => {

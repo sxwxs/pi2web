@@ -708,7 +708,10 @@
     else if (agent) await selectAgent(agent, false);
   }
   function setAgentStatus(agentId,status) {
-    const agent=state.agents.find(x=>x.agentId===agentId);if(!agent){void refreshAgents();return null;}agent.status=status;if(state.agent?.agentId===agentId)state.agent.status=status;sessionKeyboard.updateAgent(agent);renderAgentList();updateAgentHeader();return agent;
+    const agent=state.agents.find(x=>x.agentId===agentId);if(!agent){void refreshAgents();return null;}
+    // Every event reports the status, so an unchanged one must not rebuild the list for each delta.
+    if(agent.status===status)return agent;
+    agent.status=status;if(state.agent?.agentId===agentId)state.agent.status=status;sessionKeyboard.updateAgent(agent);renderAgentList();updateAgentHeader();return agent;
   }
   function updateAgentHeader(agent = state.agent) {
     if (!agent) return;
@@ -1148,8 +1151,10 @@
     sessionKeyboard.handleAgentEvent(message.agentId, ev);
     let eventAgent=state.agents.find(x=>x.agentId===message.agentId);
     if(eventAgent&&Number(message.timestamp)>0)eventAgent.lastActiveAt=new Date(Number(message.timestamp)*1000).toISOString();
-    // The server sends the authoritative status with every event, including dialog waits.
-    if (message.status) eventAgent=setAgentStatus(message.agentId, message.status)||eventAgent;
+    // The server sends the authoritative status with every event, including dialog waits. Backends
+    // older than this field still report their lifecycle events, so those stand in for it.
+    const liveStatus=message.status||(ev.type==='agent_start'||ev.type==='auto_retry_start'?'streaming':ev.type==='agent_end'?(ev.willRetry?'streaming':'idle'):ev.type==='agent_settled'?'idle':null);
+    if (liveStatus) eventAgent=setAgentStatus(message.agentId, liveStatus)||eventAgent;
     if (ev.type === 'queue_update') { setAgentQueue(message.agentId, ev); return; }
     if (ev.type === 'agent_unloaded') {
       setAgentStatus(message.agentId, 'unloaded');
