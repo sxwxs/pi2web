@@ -12,13 +12,14 @@
     "subscribed": {"type":"object","required":["type","agentId","protocolVersion"],"properties":{"type":{"const":"subscribed"},"agentId":{"type":"string"},"protocolVersion":{"const":1},"currentSequence":{"type":"integer","minimum":0}}},
     "commandResult": {"type":"object","required":["type","success"],"properties":{"type":{"const":"command_result"},"requestId":{"type":"string"},"success":{"type":"boolean"},"error":{"type":"object"},"disposition":{"enum":["handled","queued"],"description":"For steer and follow-up: whether the running turn took the message or it waits in the queue. Omitted by older servers."},"queue":{"$ref":"#/$defs/queue"}}},
     "queue": {"type":"object","required":["steering","followUp"],"description":"Messages waiting for the running turn.","properties":{"steering":{"type":"array","items":{"type":"string"}},"followUp":{"type":"array","items":{"type":"string"}}}},
-    "agentEvent": {"type":"object","required":["type","agentId","eventId","sequence","event"],"properties":{"type":{"const":"agent_event"},"agentId":{"type":"string"},"eventId":{"type":"string"},"sequence":{"type":"integer","minimum":1},"timestamp":{"type":"integer","minimum":0},"event":{"type":"object","required":["type"]}}},
+    "agentEvent": {"type":"object","required":["type","agentId","eventId","sequence","event"],"properties":{"type":{"const":"agent_event"},"agentId":{"type":"string"},"eventId":{"type":"string"},"sequence":{"type":"integer","minimum":1},"timestamp":{"type":"integer","minimum":0},"status":{"$ref":"#/$defs/agentStatus","description":"Agent status after this event. Omitted by older servers."},"event":{"type":"object","required":["type"]}}},
+    "agentStatus": {"enum":["unloaded","starting","idle","streaming","waiting_for_user","error","stopping","stopped"]},
     "agentSnapshot": {"type":"object","required":["type","agentId","lastSequence","state","messages"],"properties":{"type":{"const":"agent_snapshot"},"agentId":{"type":"string"},"lastSequence":{"type":"integer","minimum":0},"state":{"$ref":"#/$defs/agentState"},"messages":{"type":"array"}}},
     "agentStateUpdate": {"type":"object","required":["type","agentId","sequence","state"],"description":"Current state after initial replay/snapshot and before live events, also sent for fromNow or empty replay. Does not replace transcript messages.","properties":{"type":{"const":"agent_state"},"agentId":{"type":"string"},"sequence":{"type":"integer","minimum":0},"state":{"$ref":"#/$defs/agentState"}}},
     "agentState": {
       "type":"object","required":["status","agentId","sessionId","cwd"],
       "properties":{
-        "status":{"enum":["unloaded","starting","idle","streaming","waiting_for_user","error","stopping","stopped"]},
+        "status":{"$ref":"#/$defs/agentStatus"},
         "agentId":{"type":"string"},
         "sessionId":{"type":"string"},
         "sessionFile":{"type":"string"},

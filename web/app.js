@@ -925,10 +925,13 @@
     state.toolCards.delete(key);
     return card;
   }
-  /** Nested calls are appended to their caller's body so a codemode script reads as one unit. */
+  /**
+   * Nested calls live next to their caller's body, not inside it: the body is replaced whenever the
+   * caller streams output or finishes.
+   */
   function nestedContainer(card) {
-    let box=card.body.querySelector('.nested-tools');
-    if(!box){box=document.createElement('div');box.className='nested-tools';card.body.append(box);}
+    let box=card.details.querySelector('.nested-tools');
+    if(!box){box=document.createElement('div');box.className='nested-tools';card.details.append(box);}
     return box;
   }
   /** Pi 0.99+ reports the recorded execution time of a finished tool call. */
@@ -1145,6 +1148,8 @@
     sessionKeyboard.handleAgentEvent(message.agentId, ev);
     let eventAgent=state.agents.find(x=>x.agentId===message.agentId);
     if(eventAgent&&Number(message.timestamp)>0)eventAgent.lastActiveAt=new Date(Number(message.timestamp)*1000).toISOString();
+    // The server sends the authoritative status with every event, including dialog waits.
+    if (message.status) eventAgent=setAgentStatus(message.agentId, message.status)||eventAgent;
     if (ev.type === 'queue_update') { setAgentQueue(message.agentId, ev); return; }
     if (ev.type === 'agent_unloaded') {
       setAgentStatus(message.agentId, 'unloaded');
@@ -1152,11 +1157,9 @@
       restoreExtensionRequests(message.agentId, {dialogRequests:[]});
       return;
     }
-    if (ev.type === 'agent_start' || ev.type === 'auto_retry_start') eventAgent=setAgentStatus(message.agentId,'streaming')||eventAgent;
-    else if (ev.type === 'agent_end') {
-      const final=!ev.willRetry;eventAgent=setAgentStatus(message.agentId,final?'idle':'streaming')||eventAgent;
-      if(final){if(selected)finalizeAgentStreams();notifyComplete(eventAgent||{agentId:message.agentId},message.timestamp);if(eventAgent)void loadAgentContexts([eventAgent]);}
-    } else if (ev.type === 'agent_settled') { eventAgent=setAgentStatus(message.agentId,'idle')||eventAgent;if(eventAgent)void loadAgentContexts([eventAgent]); }
+    if (ev.type === 'agent_end') {
+      if(!ev.willRetry){if(selected)finalizeAgentStreams();notifyComplete(eventAgent||{agentId:message.agentId},message.timestamp);if(eventAgent)void loadAgentContexts([eventAgent]);}
+    } else if (ev.type === 'agent_settled') { if(eventAgent)void loadAgentContexts([eventAgent]); }
     else if (ev.type === 'session_info_changed') { if(eventAgent)eventAgent.sessionName=ev.name||undefined;if(selected)state.agent.sessionName=ev.name||undefined;renderAgentList();if(selected)updateAgentHeader(); }
     if (!selected) return;
     if (ev.type === 'agent_start') { $('messages').querySelector('.empty')?.remove(); }
@@ -1493,9 +1496,12 @@
   $('queueClear').onclick=async()=>{
     if(!state.agent)return;const agentId=state.agent.agentId;
     try{
+      // The server's queue_update event clears the banner; applying an empty queue here would hide a
+      // message queued in the meantime.
       const cleared=await requestAgent(agentId,'/queue',{method:'DELETE'});
-      setAgentQueue(agentId,null);
       const restored=[...(cleared.steering||[]),...(cleared.followUp||[])].join('\n');
+      // The composer is shared, so restoring into another Agent's input would send the text there.
+      if(restored&&state.agent?.agentId!==agentId)return toast('队列已清空，但已切换 Agent，内容未放回输入框');
       if(restored){const input=$('input');input.value=input.value.trim()?`${restored}\n${input.value}`:restored;input.focus();}
       toast(restored?'队列已清空，内容已放回输入框':'队列已清空');
     }catch(error){toast(`清空队列失败：${error.message}`);}

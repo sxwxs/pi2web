@@ -115,13 +115,13 @@ export class RemotePiServer {
      send({type:'subscribed_collab',protocolVersion:1});return;
     }
     if(m.type==='subscribe_all'){
-     subscriptions.get('*')?.();const forward=(agentId:string,e:any)=>!subscriptions.has(agentId)&&send({type:'agent_event',agentId,eventId:e.id,sequence:e.sequence,timestamp:e.timestamp,event:e.event});
+     subscriptions.get('*')?.();const forward=(agentId:string,e:any)=>!subscriptions.has(agentId)&&send({type:'agent_event',agentId,eventId:e.id,sequence:e.sequence,timestamp:e.timestamp,status:e.status,event:e.event});
      subscriptions.set('*',this.agents.subscribeAll(forward));send({type:'subscribed_all',protocolVersion:1});return;
     }
     if(m.type==='subscribe'){
      const agentId=m.agentId,fromNow=m.fromNow===true;
      subscriptions.get(agentId)?.();
-     const forward=(e:any)=>send({type:'agent_event',agentId,eventId:e.id,sequence:e.sequence,timestamp:e.timestamp,event:e.event});
+     const forward=(e:any)=>send({type:'agent_event',agentId,eventId:e.id,sequence:e.sequence,timestamp:e.timestamp,status:e.status,event:e.event});
      let ready=false,active=true;
      const unsubscribe=this.agents.subscribe(agentId,e=>{if(ready)forward(e)});
      const stop=()=>{active=false;ready=false;unsubscribe()};
