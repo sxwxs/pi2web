@@ -90,18 +90,20 @@ export class MailNotifier{
   private clearTimer(){if(this.timer){clearTimeout(this.timer);this.timer=undefined}}
   private async sendBatch(items:PendingNotification[]){
     const includeResponse=this.settings.includeResponse,includeSessionDetails=this.settings.includeSessionDetails,count=items.length;
-    const allAborted=items.every(item=>item.aborted),verb=allAborted?'已中断':'已完成';
+    const aborted=items.filter(item=>item.aborted).length;
+    // A mixed batch is neither completed nor interrupted, so it says how many of each.
+    const verb=aborted===count?'已中断':aborted?`已结束（${aborted} 个被中断）`:'已完成';
     let subject=`[Remote Pi] ${count>1?`${count} 个 Agent 任务`:'Agent 任务'}${verb}`;
     if(count===1&&includeSessionDetails){const label=oneLine(items[0].context.sessionName||'',80);if(label)subject=`[Remote Pi] ${label}${verb}`}
     let text:string;
-    if(!includeResponse&&!includeSessionDetails)text=count>1?`${count} 个 Agent 任务${verb}。`:allAborted?'有 Agent 任务被中断。':'有 Agent 任务完成。';
+    if(!includeResponse&&!includeSessionDetails)text=count>1?`${count} 个 Agent 任务${verb}。`:aborted?'有 Agent 任务被中断。':'有 Agent 任务完成。';
     else text=items.map((item,index)=>{
       const lines=count>1?[`任务 ${index+1}${item.aborted?'（已中断）':''}`]:item.aborted?['任务已中断']:[];
       if(includeSessionDetails){lines.push(`Session：${item.context.sessionName?.trim()||'未命名'}`);if(item.context.cwd)lines.push(`路径：${item.context.cwd}`)}
       if(includeResponse){if(lines.length)lines.push('');lines.push('Agent 回复：',clip(item.finalOutput.trim()||'（没有可用的最终文本回复）',24_000))}
       return lines.join('\n');
     }).join('\n\n--------------------\n\n');
-    await this.sendMail(subject,text,{task_count:count,aborted_count:items.filter(item=>item.aborted).length});
+    await this.sendMail(subject,text,{task_count:count,aborted_count:aborted});
   }
   private async sendMail(subject:string,text:string,metadata:Record<string,unknown>={}){
     const payload:Record<string,unknown>={

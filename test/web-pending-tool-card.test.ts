@@ -94,6 +94,9 @@ describe('in-flight tool calls in the transcript', () => {
     ui.upsertToolCard({type:'tool_execution_start', toolCallId:'call_parent', toolName:'codemode', args:{}}, 1);
     ui.upsertToolCard({type:'tool_execution_start', toolCallId:'call_child', toolName:'read', args:{path:'a.ts'}, parentToolCallId:'call_parent'}, 2);
     ui.upsertToolCard({type:'tool_execution_end', toolCallId:'call_child', toolName:'read', result:{content:[{type:'text', text:'file body'}]}, parentToolCallId:'call_parent'}, 3);
+    // The caller's own output and result replace its body, which must not take the nested calls with it.
+    ui.upsertToolCard({type:'tool_execution_update', toolCallId:'call_parent', toolName:'codemode', partialResult:{content:[{type:'text', text:'running'}]}}, 4);
+    ui.upsertToolCard({type:'tool_execution_end', toolCallId:'call_parent', toolName:'codemode', result:{content:[{type:'text', text:'done'}]}}, 5);
     const cards = toolCards(ui.messages);
     expect(cards).toHaveLength(1); // The nested call does not become its own activity entry.
     const nested = cards[0].querySelector('.nested-tools')!.children;

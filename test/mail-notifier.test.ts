@@ -41,6 +41,17 @@ describe('MailNotifier',()=>{
     expect(payloads).toHaveLength(1);expect(payloads[0].subject).toBe('[Remote Pi] 2 个 Agent 任务已完成');expect(payloads[0].text).toContain('first response');expect(payloads[0].text).toContain('second response');
   });
 
+  it('says how many runs of a mixed batch were interrupted',async()=>{
+    let payload:any;const fetcher:typeof fetch=async(_input,init)=>{payload=JSON.parse(String(init?.body));return ok()};
+    const notifier=new MailNotifier({endpoint:'https://mail.example.com/api/v1/messages',apiKey:'key',recipient:'owner@example.com'},fetcher);
+    notifier.updateSettings({aggregationDelaySeconds:3600});
+    notifier.handleAgentEvent('agent-1',{type:'message_end',message:'done'});notifier.handleAgentEvent('agent-1',{type:'agent_settled'});
+    notifier.handleAgentEvent('agent-2',{type:'message_end',message:'partial'});notifier.handleAgentEvent('agent-2',{type:'agent_settled',aborted:true});
+    await notifier.close();
+    expect(payload.subject).toBe('[Remote Pi] 2 个 Agent 任务已结束（1 个被中断）');
+    expect(payload.metadata.aborted_count).toBe(1);
+  });
+
   it('sends only a generic completion notice when both detail options are off',async()=>{
     let payload:any;const fetcher:typeof fetch=async(_input,init)=>{payload=JSON.parse(String(init?.body));return ok()};
     const notifier=new MailNotifier({endpoint:'https://mail.example.com/api/v1/messages',apiKey:'key',recipient:'owner@example.com'},fetcher);

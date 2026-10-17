@@ -76,6 +76,13 @@ describe('MCP server overview',()=>{
     expect(listMcpServers(cwd).servers.find(server=>server.name==='files')?.enabled).toBe(true);
   });
 
+  it('refuses to overwrite a config file it cannot parse',async()=>{
+    const cwd=await mkdtemp(path.join(tmpdir(),'remote-pi-mcp-'));
+    await writeFile(path.join(agentDir,'mcp.json'),'{ not json');
+    expect(()=>setMcpServerEnabled(cwd,'docs',false)).toThrow();
+    expect(await readFile(path.join(agentDir,'mcp.json'),'utf8')).toBe('{ not json');
+  });
+
   it('rejects an unknown server',async()=>{
     const cwd=await mkdtemp(path.join(tmpdir(),'remote-pi-mcp-'));
     expect(()=>setMcpServerEnabled(cwd,'missing',false)).toThrow(/not found/);

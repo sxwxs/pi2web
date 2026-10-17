@@ -87,9 +87,10 @@ export function listMcpServers(cwd:string):McpOverview{
 
 /** Write one server's `enabled` flag into `file`, keeping the rest of the file as it is. */
 function writeEnabled(file:string,name:string,enabled:boolean,explicit=false){
-  let document:Record<string,any>={};
-  try{document=JSON.parse(readFileSync(file,'utf8'))||{}}catch{/* A missing or empty file starts a new one. */}
-  if(typeof document!=='object'||Array.isArray(document))document={};
+  // Only a missing file starts a new one: a file that cannot be read or parsed must not be overwritten.
+  let text:string|undefined;
+  try{text=readFileSync(file,'utf8')}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+  const document:Record<string,any>=text?.trim()?JSON.parse(text):{};
   const servers=document.mcpServers&&typeof document.mcpServers==='object'?document.mcpServers:(document.mcpServers={});
   const current=servers[name]&&typeof servers[name]==='object'?servers[name]:(servers[name]={});
   // `enabled: true` is the default, so it is dropped where the server itself is defined. A project

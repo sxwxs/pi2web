@@ -79,7 +79,8 @@ export class AgentManager {
  }
  private publish(entry:AgentEntry,event:AgentEvent){
   const record=entry.record;record.lastActiveAt=new Date().toISOString();
-  const item={id:randomUUID(),sequence:entry.nextSequence++,timestamp:Math.floor(Date.now()/1000),event};
+  // Every event carries the authoritative status, so clients never have to derive it from event types.
+  const item={id:randomUUID(),sequence:entry.nextSequence++,timestamp:Math.floor(Date.now()/1000),status:record.status,event};
   entry.events.push(item);if(entry.events.length>1000)entry.events.shift();
   for(const listener of this.listeners.get(record.agentId)??[])listener(item);
   for(const listener of this.globalListeners)listener(record.agentId,item);
@@ -121,7 +122,8 @@ export class AgentManager {
  }
  async remove(id:string){await this.dispose(id);this.agents.delete(id);this.listeners.delete(id)}
  async archive(id:string){const current=this.get(id).record;if(['starting','streaming','waiting_for_user','stopping'].includes(current.status))throw Object.assign(new Error('Active Agent cannot be archived'),{code:'AGENT_ACTIVE'});const record={...current,status:'unloaded' as const};await this.remove(id);return record}
- async state(id:string){const state=await (await this.ensureLoaded(id)).getState();return {...state,sessionName:state.sessionName?.trim()||this.get(id).record.sessionName}} async messages(id:string){return (await this.ensureLoaded(id)).getMessages()}
+ // The record status, not the backend's, is authoritative: it also knows about pending dialogs.
+ async state(id:string){const state=await (await this.ensureLoaded(id)).getState(),record=this.get(id).record;return {...state,status:record.status,sessionName:state.sessionName?.trim()||record.sessionName}} async messages(id:string){return (await this.ensureLoaded(id)).getMessages()}
  async messagePage(id:string,limit=25,before?:number){return this.paginateMessages(await (await this.ensureLoaded(id)).getMessages(),limit,before)}
  private paginateMessages(messages:unknown[],limit:number,before?:number){const safeLimit=Math.min(200,Math.max(1,Math.trunc(Number(limit)||25))),total=messages.length,end=Math.min(total,Math.max(0,before===undefined?total:Math.trunc(Number(before)||0))),start=Math.max(0,end-safeLimit);return {items:messages.slice(start,end),total,start,end,limit:safeLimit,hasMore:start>0}}
  async capabilities(id:string){return (await this.ensureLoaded(id)).getCapabilities()} async session(id:string){const info=await (await this.ensureLoaded(id)).getSession(),name=typeof info.sessionName==='string'&&info.sessionName.trim()?info.sessionName:this.get(id).record.sessionName;return {...info,sessionName:name}} async sessionInfo(id:string){const info=await (await this.ensureLoaded(id)).getSessionInfo(),name=typeof info.sessionName==='string'&&info.sessionName.trim()?info.sessionName:this.get(id).record.sessionName;return {...info,sessionName:name}}

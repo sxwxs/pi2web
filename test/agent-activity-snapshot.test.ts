@@ -114,6 +114,22 @@ describe('authoritative activity snapshots', () => {
     expect(agents.snapshotState(agent.agentId).activity).toEqual(idle);
   });
 
+  it('sends the current status with every event and with REST state', async () => {
+    const {agents, agent, publish, connect} = await setup();
+    const client = await connect();
+    client.send({type:'subscribe', agentId:agent.agentId, fromNow:true});
+    await client.wait(message => message.type === 'agent_state');
+    publish({type:'agent_start'});
+    expect(await client.wait(message => message.event?.type === 'agent_start')).toMatchObject({status:'streaming'});
+    // A dialog blocks the run, which live clients must see without deriving it from the event type.
+    publish(dialogRequest);
+    expect(await client.wait(message => message.event?.type === 'extension_ui_request')).toMatchObject({status:'waiting_for_user'});
+    expect((await agents.state(agent.agentId)).status).toBe('waiting_for_user');
+    publish({type:'extension_ui_response', requestId:'dialog-1'});
+    expect(await client.wait(message => message.event?.type === 'extension_ui_response')).toMatchObject({status:'streaming'});
+    expect((await agents.state(agent.agentId)).status).toBe('streaming');
+  });
+
   it.each([undefined, 25])('captures status, IDs and cursor together before reading messages (limit %s)', async limit => {
     const {agents, agent, publish, blockMessages} = await setup();
     publish({type:'agent_start'});
