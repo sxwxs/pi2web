@@ -73,8 +73,9 @@ const startWork = (publish:(event:AgentEvent) => void) => {
   publish({type:'bash_execution_start', id:'bash-1', command:'sleep 30'});
   publish(dialogRequest);
 };
-const active = {bashIds:['bash-1'], dialogIds:['dialog-1'], dialogRequests:[dialogRequest]};
-const idle = {bashIds:[], dialogIds:[], dialogRequests:[]};
+const emptyQueue = {steering:[], followUp:[]};
+const active = {bashIds:['bash-1'], dialogIds:['dialog-1'], dialogRequests:[dialogRequest], queue:emptyQueue};
+const idle = {bashIds:[], dialogIds:[], dialogRequests:[], queue:emptyQueue};
 
 describe('WebSocket state schema', () => {
   it.each(['agent_snapshot', 'agent_state'])('requires core state fields but accepts older servers without activity: %s', type => {
@@ -101,7 +102,8 @@ describe('authoritative activity snapshots', () => {
     publish({type:'agent_end'});
     publish({type:'agent_settled'});
     expect((await backend.getState()).status).toBe('idle');
-    expect(agents.snapshotState(agent.agentId)).toMatchObject({status:'idle', activity:{bashIds:['bash-1','bash-2'], dialogIds:['dialog-1','dialog-2']}});
+    // A pending dialog blocks the run, which is reported as waiting_for_user rather than idle.
+    expect(agents.snapshotState(agent.agentId)).toMatchObject({status:'waiting_for_user', activity:{bashIds:['bash-1','bash-2'], dialogIds:['dialog-1','dialog-2']}});
     expect(agents.get(agent.agentId).record).not.toHaveProperty('activity');
     publish({type:'bash_execution_end', id:'bash-2'});
     publish({type:'extension_ui_response', requestId:'dialog-2'});
@@ -110,6 +112,22 @@ describe('authoritative activity snapshots', () => {
     publish({type:'bash_execution_end', id:'bash-1'});
     publish({type:'extension_ui_response', requestId:'dialog-1'});
     expect(agents.snapshotState(agent.agentId).activity).toEqual(idle);
+  });
+
+  it('sends the current status with every event and with REST state', async () => {
+    const {agents, agent, publish, connect} = await setup();
+    const client = await connect();
+    client.send({type:'subscribe', agentId:agent.agentId, fromNow:true});
+    await client.wait(message => message.type === 'agent_state');
+    publish({type:'agent_start'});
+    expect(await client.wait(message => message.event?.type === 'agent_start')).toMatchObject({status:'streaming'});
+    // A dialog blocks the run, which live clients must see without deriving it from the event type.
+    publish(dialogRequest);
+    expect(await client.wait(message => message.event?.type === 'extension_ui_request')).toMatchObject({status:'waiting_for_user'});
+    expect((await agents.state(agent.agentId)).status).toBe('waiting_for_user');
+    publish({type:'extension_ui_response', requestId:'dialog-1'});
+    expect(await client.wait(message => message.event?.type === 'extension_ui_response')).toMatchObject({status:'streaming'});
+    expect((await agents.state(agent.agentId)).status).toBe('streaming');
   });
 
   it.each([undefined, 25])('captures status, IDs and cursor together before reading messages (limit %s)', async limit => {
@@ -125,7 +143,7 @@ describe('authoritative activity snapshots', () => {
     gate.resolve([]);
     const snapshot = await pending;
     expect(snapshot.lastSequence).toBe(cursor);
-    expect(snapshot.state).toMatchObject({status:'streaming', activity:active});
+    expect(snapshot.state).toMatchObject({status:'waiting_for_user', activity:active});
     expect(agents.events(agent.agentId, cursor).map(event => event.sequence)).toEqual([cursor+1,cursor+2,cursor+3]);
     expect(agents.snapshotState(agent.agentId)).toMatchObject({status:'idle', activity:idle});
     expect(snapshot.state.activity).toEqual(active); // Later events did not mutate the captured arrays.
@@ -180,7 +198,7 @@ describe('WebSocket snapshot ordering', () => {
     const subscribed = await client.wait(message => message.type === 'subscribed');
     expect(subscribed.currentSequence).toBe(2);
     const baseline = await client.wait(message => message.type === 'agent_state');
-    expect(baseline).toMatchObject({sequence:2, state:{status:'idle', activity:active}});
+    expect(baseline).toMatchObject({sequence:2, state:{status:'waiting_for_user', activity:active}});
     expect(backend.getMessages).not.toHaveBeenCalled();
     publish({type:'bash_execution_end', id:'bash-1'});
     const end = await client.wait(message => message.type === 'agent_event');
@@ -195,7 +213,7 @@ describe('WebSocket snapshot ordering', () => {
     const client = await connect();
     client.send({type:'subscribe', agentId:agent.agentId, lastSequence:2});
     const baseline = await client.wait(message => message.type === 'agent_state');
-    expect(baseline).toMatchObject({sequence:2, state:{status:'idle', activity:active}});
+    expect(baseline).toMatchObject({sequence:2, state:{status:'waiting_for_user', activity:active}});
     expect(client.messages.map(message => message.type)).toEqual(['subscribed','agent_state']);
     expect(backend.getMessages).not.toHaveBeenCalled();
   });
@@ -214,10 +232,10 @@ describe('WebSocket snapshot ordering', () => {
     const baseline = await client.wait(message => message.type === 'agent_state');
     expect(baseline).toMatchObject({sequence:cursor+3, state:{activity:{bashIds:['bash-2'], dialogIds:[]}}});
     const snapshot = client.messages.find(message => message.type === 'agent_snapshot');
-    expect(snapshot).toMatchObject({lastSequence:cursor, state:{status:'idle', activity:active}});
+    expect(snapshot).toMatchObject({lastSequence:cursor, state:{status:'waiting_for_user', activity:active}});
     expect(client.messages.map(message => message.type)).toEqual(['subscribed','agent_snapshot','agent_event','agent_event','agent_event','agent_state']);
     expect(client.messages.filter(message => message.type === 'agent_event').map(message => message.sequence)).toEqual([cursor+1,cursor+2,cursor+3]);
-    expect(agents.snapshotState(agent.agentId).activity).toEqual({bashIds:['bash-2'], dialogIds:[], dialogRequests:[]});
+    expect(agents.snapshotState(agent.agentId).activity).toEqual({bashIds:['bash-2'], dialogIds:[], dialogRequests:[], queue:emptyQueue});
   });
 
   it('recovers pending dialog payloads even after their request events leave the replay cache', async () => {

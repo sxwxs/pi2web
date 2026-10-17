@@ -156,7 +156,8 @@ export class VoiceManager{
     if(event.type==='agent_start'){if(typeof event.message==='string')this.recordUserPrompt(agentId,event.message);this.cancel(agentId);return}
     if(event.type==='agent_settled'){
       const finalOutput=this.lastAssistant.get(agentId),userPrompt=this.lastPrompt.get(agentId)??'';this.lastAssistant.delete(agentId);this.lastPrompt.delete(agentId);
-      if(finalOutput)void this.announce(agentId,{userPrompt,finalOutput,...context});
+      // A run the user cancelled has no result worth speaking; Pi 0.99+ reports that as `aborted`.
+      if(finalOutput&&event.aborted!==true)void this.announce(agentId,{userPrompt,finalOutput,...context});
     }
   }
   cancel(agentId:string){this.generations.set(agentId,(this.generations.get(agentId)??0)+1);const controller=this.active.get(agentId);if(controller){controller.abort();this.active.delete(agentId);this.emit(agentId,{type:'voice_cancelled'})}}
