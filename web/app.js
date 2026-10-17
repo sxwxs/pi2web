@@ -915,6 +915,15 @@
     state.toolCards.delete(key);
     return card;
   }
+  /** A tool call that has no toolResult yet: the only visible sign that a long tool is still running. */
+  function addPendingToolCard(call, timestamp, target) {
+    const name=call.name||'Tool',args=call.arguments&&Object.keys(call.arguments).length?JSON.stringify(call.arguments,null,2):'';
+    const card=addCard(`⏳ ${name} · 执行中`,args,'tool',false,timestamp,target,false);
+    card.toolName=name;card.args=args;
+    // Keyed like upsertToolCard so the live tool_execution_update/end event finishes this very card.
+    if(call.id)state.toolCards.set(`tool:${call.id}`,card);
+    return card;
+  }
   /** Session bash emits start, optional output deltas, and one completion event. */
   function updateBashCard(ev, timestamp) {
     const key=`bash:${ev.id||'default'}`;let card=state.toolCards.get(key);
@@ -928,8 +937,11 @@
     renderCardBody(card.body,card.content);card.summaryTime.textContent=eventTime(timestamp);
     if(card.group)updateActivityGroup(card.group,card.summaryText.textContent,timestamp);
   }
-  function renderMessages(messages, target = $('messages'), showEmpty = true) {
+  // `pending` is only safe for the newest page: an older page can end mid tool call whose result
+  // lives in the next page, and that call is not actually running.
+  function renderMessages(messages, target = $('messages'), showEmpty = true, pending = false) {
     if (!messages?.length) { if(showEmpty&&target===$('messages'))$('messages').innerHTML = '<div class="empty">尚无消息</div>'; return; }
+    const resolved = pending ? new Set(messages.filter(m=>m?.role==='toolResult'&&m.toolCallId).map(m=>m.toolCallId)) : null;
     for (const message of messages) {
       const role=message.role||'event',timestamp=message.timestamp;
       if(role==='bashExecution'){
@@ -939,7 +951,9 @@
         for (const part of message.content) {
           if (part.type === 'text' && part.text) addCard(null,part.text,'assistant',false,timestamp,target,false);
           else if (part.type === 'thinking' && (part.thinking||part.text)) addCard('Thinking',part.thinking||part.text,'thinking',false,timestamp,target,false);
-          // Completed historical tools are represented by their toolResult message below.
+          // Completed historical tools are represented by their toolResult message below; only a tool
+          // call still waiting for its result needs a card of its own.
+          else if (part.type === 'toolCall' && resolved && !resolved.has(part.id)) addPendingToolCard(part,timestamp,target);
         }
         const error=assistantError(message);if(error)addCard('LLM Error',error,'error',true,timestamp,target,false);
       } else if(role==='toolResult'){
@@ -957,13 +971,14 @@
   }
   async function loadAllMessages(agentId,button) {
     button.disabled=true;button.textContent='正在加载全部对话…';
-    try { const messages=await requestAgent(agentId,'/messages');if(state.agent?.agentId!==agentId)return;const box=$('messages');box.replaceChildren();renderMessages(messages);state.messagePageStart=0;state.messageTotal=messages.length;updateMessageHistoryControl(); }
+    try { const messages=await requestAgent(agentId,'/messages');if(state.agent?.agentId!==agentId)return;const box=$('messages');box.replaceChildren();state.toolCards.clear();renderMessages(messages,box,true,true);state.messagePageStart=0;state.messageTotal=messages.length;updateMessageHistoryControl(); }
     finally { button.disabled=false;button.textContent='加载全部对话'; }
   }
   async function loadMessagePage(agentId,before,reset) {
     const query=new URLSearchParams({limit:String(state.messagePageSize)});if(before!==undefined)query.set('before',String(before));
     const page=await requestAgent(agentId,`/messages?${query}`);if(state.agent?.agentId!==agentId)return;
-    const box=$('messages'),oldHeight=box.scrollHeight,oldTop=box.scrollTop,fragment=document.createDocumentFragment();renderMessages(page.items,fragment,false);
+    const box=$('messages'),oldHeight=box.scrollHeight,oldTop=box.scrollTop,fragment=document.createDocumentFragment();
+    if(reset)state.toolCards.clear();renderMessages(page.items,fragment,false,!!reset);
     if(reset){box.replaceChildren(fragment);state.messageTotal=page.total;}else{box.querySelector('#messageHistoryControls')?.remove();box.prepend(fragment);}
     state.messagePageStart=page.start;state.messageTotal=page.total;updateMessageHistoryControl();
     if(reset)box.scrollTop=box.scrollHeight;else box.scrollTop=oldTop+(box.scrollHeight-oldHeight);
@@ -1074,7 +1089,7 @@
         setAgentStatus(message.agentId, message.state.status);
       }
       if (state.agent?.agentId === message.agentId) {
-        discardStreams(); $('messages').replaceChildren(); renderMessages(message.messages);
+        discardStreams(); $('messages').replaceChildren(); renderMessages(message.messages,$('messages'),true,true);
         state.messagePageStart = message.messagePage?.start || 0;
         state.messageTotal = message.messagePage?.total ?? message.messages?.length ?? 0;
         updateMessageHistoryControl();
@@ -1397,7 +1412,7 @@
   $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;closeCommandPicker();const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();
     // `!cmd` runs inside the Agent session (output is recorded in the Session); `!!cmd` keeps the output out of the model context.
     if(text.startsWith('!')){const excludeFromContext=text.startsWith('!!'),command=text.slice(excludeFromContext?2:1).trim();if(!command)return toast('请输入要执行的命令');addCard(null,text,'user');$('input').value='';
-      try{await postAgent(agentId,'/bash',{command,excludeFromContext});if(state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.toolCards.clear();}}catch(e){toast(`命令失败：${e.message}`);}return;}
+      try{await postAgent(agentId,'/bash',{command,excludeFromContext});if(state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);}}catch(e){toast(`命令失败：${e.message}`);}return;}
     addCard(null,text,'user');$('input').value='';try{await postAgent(agentId,`/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
   $('input').onkeydown=event=>{if(!$('commandPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setCommandSelection(state.commandIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||(event.key==='Enter'&&!event.ctrlKey&&!event.metaKey)){event.preventDefault();chooseCommand(state.commandFiltered[state.commandIndex]);return;}if(event.key==='Escape'){event.preventDefault();closeCommandPicker();return;}}if(!$('mentionPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setMentionSelection(state.mentionIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||event.key==='Enter'){event.preventDefault();chooseMention(state.mentionFiltered[state.mentionIndex],event.key==='Enter');return;}if(event.key==='Escape'){event.preventDefault();closeMention();return;}}if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();}};$('input').oninput=()=>{const command=commandContext();if(command){if(!$('mentionPicker').hidden)closeMention();void openCommandPicker(command.query);return;}if(!$('commandPicker').hidden)closeCommandPicker();const context=mentionContext();if(!context){if(!$('mentionPicker').hidden)closeMention();return;}const fresh=$('mentionPicker').hidden||state.mentionStart!==context.start;state.mentionStart=context.start;state.mentionEnd=context.replacementEnd;if(fresh){state.mentionPrefix='';void openMention(state.treePath,context.query);return;}const filter=state.mentionPrefix&&context.query.startsWith(state.mentionPrefix)?context.query.slice(state.mentionPrefix.length):context.query;renderMentionItems(filter);};
   $('commandClose').onclick=closeCommandPicker;
