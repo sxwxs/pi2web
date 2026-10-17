@@ -13,7 +13,10 @@ class Element {
     toggle:(name:string, on?:boolean) => { const has = this.className.split(' ').includes(name); if (on ?? !has) { if (!has) this.className = `${this.className} ${name}`.trim(); } else this.className = this.className.split(' ').filter(x => x !== name).join(' '); },
     contains:(name:string) => this.className.split(' ').includes(name),
   };
-  append(...children:Element[]) { this.children.push(...children); }
+  parent:Element|null = null;
+  append(...children:Element[]) { for (const child of children) child.parent = this; this.children.push(...children); }
+  /** Minimal ChildNode.before(): used to put the tool duration in front of the timestamp. */
+  before(...nodes:Element[]) { const parent = this.parent; if (!parent) return; const at = parent.children.indexOf(this); for (const node of nodes) node.parent = parent; parent.children.splice(at < 0 ? parent.children.length : at, 0, ...nodes); }
   get lastElementChild() { return this.children[this.children.length - 1]; }
   get childElementCount() { return this.children.length; }
   descendants():Element[] { return this.children.flatMap(child => [child, ...child.descendants()]); }
@@ -77,6 +80,26 @@ describe('in-flight tool calls in the transcript', () => {
     expect(cards).toHaveLength(1);
     expect(cards[0].querySelector('.summary-text')!.textContent).toBe('✓ bash');
     expect(ui.state.toolCards.size).toBe(0);
+  });
+
+  it('shows the recorded execution time of a finished call', () => {
+    const ui = setup();
+    ui.upsertToolCard({type:'tool_execution_start', toolCallId:'toolu_1', toolName:'bash', args:call.arguments}, 1);
+    ui.upsertToolCard({type:'tool_execution_end', toolCallId:'toolu_1', toolName:'bash', result:{content:[]}, durationMs:12_400}, 2);
+    expect(toolCards(ui.messages)[0].querySelector('.tool-duration')!.textContent).toBe('12.4 s');
+  });
+
+  it('nests calls a tool made itself inside their caller', () => {
+    const ui = setup();
+    ui.upsertToolCard({type:'tool_execution_start', toolCallId:'call_parent', toolName:'codemode', args:{}}, 1);
+    ui.upsertToolCard({type:'tool_execution_start', toolCallId:'call_child', toolName:'read', args:{path:'a.ts'}, parentToolCallId:'call_parent'}, 2);
+    ui.upsertToolCard({type:'tool_execution_end', toolCallId:'call_child', toolName:'read', result:{content:[{type:'text', text:'file body'}]}, parentToolCallId:'call_parent'}, 3);
+    const cards = toolCards(ui.messages);
+    expect(cards).toHaveLength(1); // The nested call does not become its own activity entry.
+    const nested = cards[0].querySelector('.nested-tools')!.children;
+    expect(nested).toHaveLength(1);
+    expect(nested[0].querySelector('.summary-text')!.textContent).toBe('✓ read');
+    expect(nested[0].querySelector('.msg-content')!.textContent).toContain('file body');
   });
 
   it('does not claim a tool is running when an older page just ends mid call', () => {

@@ -19,7 +19,7 @@ export type MailNotificationSettings={
 };
 export type MailNotificationContext={sessionName?:string;workspaceLabel?:string;cwd?:string};
 type Fetcher=typeof fetch;
-type PendingNotification={agentId:string;finalOutput:string;context:MailNotificationContext};
+type PendingNotification={agentId:string;finalOutput:string;context:MailNotificationContext;aborted:boolean};
 
 const defaultSettings:MailNotificationSettings={enabled:true,aggregationDelaySeconds:0,includeResponse:true,includeSessionDetails:true,collabEscalations:true};
 const clip=(value:string,max:number)=>value.length<=max?value:`${value.slice(0,max)}\n\n[内容过长，已截断]`;
@@ -54,7 +54,8 @@ export class MailNotifier{
     if(event.type!=='agent_settled'||!this.activeRuns.delete(agentId))return;
     const finalOutput=this.lastAssistant.get(agentId)??'';this.lastAssistant.delete(agentId);
     if(!this.settings.enabled)return;
-    this.queue.push({agentId,finalOutput,context});
+    // Pi 0.99+ reports whether the run was cancelled; a cancelled run is not a completed task.
+    this.queue.push({agentId,finalOutput,context,aborted:event.aborted===true});
     if(!this.timer)this.scheduleFlush();
   }
   /**
@@ -89,17 +90,18 @@ export class MailNotifier{
   private clearTimer(){if(this.timer){clearTimeout(this.timer);this.timer=undefined}}
   private async sendBatch(items:PendingNotification[]){
     const includeResponse=this.settings.includeResponse,includeSessionDetails=this.settings.includeSessionDetails,count=items.length;
-    let subject=`[Remote Pi] ${count>1?`${count} 个 Agent 任务`:'Agent 任务'}已完成`;
-    if(count===1&&includeSessionDetails){const label=oneLine(items[0].context.sessionName||'',80);if(label)subject=`[Remote Pi] ${label}已完成`}
+    const allAborted=items.every(item=>item.aborted),verb=allAborted?'已中断':'已完成';
+    let subject=`[Remote Pi] ${count>1?`${count} 个 Agent 任务`:'Agent 任务'}${verb}`;
+    if(count===1&&includeSessionDetails){const label=oneLine(items[0].context.sessionName||'',80);if(label)subject=`[Remote Pi] ${label}${verb}`}
     let text:string;
-    if(!includeResponse&&!includeSessionDetails)text=count>1?`${count} 个 Agent 任务已完成。`:'有 Agent 任务完成。';
+    if(!includeResponse&&!includeSessionDetails)text=count>1?`${count} 个 Agent 任务${verb}。`:allAborted?'有 Agent 任务被中断。':'有 Agent 任务完成。';
     else text=items.map((item,index)=>{
-      const lines=count>1?[`任务 ${index+1}`]:[];
+      const lines=count>1?[`任务 ${index+1}${item.aborted?'（已中断）':''}`]:item.aborted?['任务已中断']:[];
       if(includeSessionDetails){lines.push(`Session：${item.context.sessionName?.trim()||'未命名'}`);if(item.context.cwd)lines.push(`路径：${item.context.cwd}`)}
       if(includeResponse){if(lines.length)lines.push('');lines.push('Agent 回复：',clip(item.finalOutput.trim()||'（没有可用的最终文本回复）',24_000))}
       return lines.join('\n');
     }).join('\n\n--------------------\n\n');
-    await this.sendMail(subject,text,{task_count:count});
+    await this.sendMail(subject,text,{task_count:count,aborted_count:items.filter(item=>item.aborted).length});
   }
   private async sendMail(subject:string,text:string,metadata:Record<string,unknown>={}){
     const payload:Record<string,unknown>={

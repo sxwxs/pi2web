@@ -22,9 +22,12 @@ class Element {
 
 function setup() {
   const messages = new Element(); messages.id = 'messages';
+  // The composer's queue banner lives outside the transcript in the page; the harness only needs the nodes.
+  const queueBar = Object.assign(new Element(), {id:'queueBar', hidden:true}), queueText = Object.assign(new Element(), {id:'queueText'});
+  messages.append(queueBar, queueText);
   const $ = (id:string) => [messages, ...messages.descendants()].find(element => element.id === id);
   const agent = {agentId:'agent-a', status:'idle'};
-  const state = {agent, agents:[agent], selectedKind:'agent'};
+  const state = {agent, agents:[agent], selectedKind:'agent', queues:new Map()};
   const postAgent = vi.fn(async () => {});
   const addCard = vi.fn(() => { const body = new Element(); messages.append(body); return {body}; });
   const renderMessages = vi.fn(() => messages.append(new Element()));
@@ -35,7 +38,7 @@ function setup() {
     document:{createElement:() => new Element(), createTextNode:(text:string) => Object.assign(new Element(), {textContent:text})},
     window:{SessionKeyboardController:function(options:unknown) { return Object.assign(sessionKeyboard, options); }},
     updateKeyboardUi:vi.fn(), renderAgentList:vi.fn(), renderKeyboardBindings:vi.fn(), selectAgent, navigateMobile,
-    setAgentStatus, discardStreams:vi.fn(), updateMessageHistoryControl:vi.fn(),
+    setAgentStatus, discardStreams:vi.fn(), updateMessageHistoryControl:vi.fn(), renderQueueBar:vi.fn(),
   }, {filename:'web/app.js'});
   return {handleAgentEvent, $, messages, postAgent, addCard, renderMessages, state, onKey, setAgentStatus, selectAgent, navigateMobile};
 }

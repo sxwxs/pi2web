@@ -4,7 +4,7 @@ Remote Pi 在开发机上运行 Pi Agent，并通过受 Bearer 配对码保护�
 
 ## 作为 npm 全局命令安装
 
-要求 Node.js 22.19.0 或更高版本（由 `@earendil-works/pi-coding-agent` 0.84.x 决定）：
+要求 Node.js 22.19.0 或更高版本（由 `@earendil-works/pi-coding-agent` 1.1.x 决定）：
 
 ```bash
 npm install -g pi2web
@@ -63,7 +63,7 @@ pi2web --host 0.0.0.0 --no-auth --allow-insecure-no-auth
 
 ## Agent 完成邮件通知（MailDispatch）
 
-如果启动时同时配置 MailDispatch 消息 API endpoint、API key 环境变量和通知邮箱，Pi 发出 `agent_settled`（不会再自动重试、自动 compact 或执行排队的 follow-up）后，Remote Pi 可以提交事务邮件。MailDispatch 返回 `202` 后邮件进入其持久队列；实际投递由 MailDispatch worker 完成。
+如果启动时同时配置 MailDispatch 消息 API endpoint、API key 环境变量和通知邮箱，Pi 发出 `agent_settled`（不会再自动重试、自动 compact 或执行排队的 follow-up）后，Remote Pi 可以提交事务邮件。被用户取消的运行（`agent_settled` 带 `aborted`）会写成"已中断"而不是"已完成"，语音播报则直接跳过。MailDispatch 返回 `202` 后邮件进入其持久队列；实际投递由 MailDispatch worker 完成。
 
 ```bash
 export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
@@ -205,7 +205,10 @@ Web 端能力：
 - 创建/恢复 Session、Agent 列表、停止与 abort；Agent 右键 Archive。
 - Prompt、steer、follow-up 和流式对话。
 - 对话区只保留用户输入、Agent 输出、Thinking、Extension 对话框和错误；Tool call、Session bash 输出、Retry、Summarization retry 等过程事件自动折叠成一张"活动"卡片，卡片标题实时显示最新一项的名称和时间，展开后逐条查看，再点击单条查看内容。
-- 同一次 Tool call 的 start / update / end 合并为一张卡片（参数 + 输出 + 结果）。
+- 同一次 Tool call 的 start / update / end 合并为一张卡片（参数 + 输出 + 结果），结束后显示 Pi 记录的执行耗时。
+- Tool 自己发起的调用（codemode 脚本、MCP 批量调用）带 `parentToolCallId`，会嵌套显示在发起它的那张卡片里。
+- steer / follow-up 发送后会提示消息是被当前回合直接接收还是进入队列；有排队消息时输入框上方显示队列条，可一键清空并把内容放回输入框。
+- 工具栏 `MCP` 按钮列出当前 Agent 读取到的 MCP 服务器（来源、传输方式、exposure），可启用/停用；修改写入 `mcp.json`，在 Agent 下次加载时生效。
 - 输入 `/` 浏览并补全当前目录可用的 prompt template 和 skill（由 Pi session 自行展开）。
 - 输入 `!命令` 在 Agent Session 内执行 Shell 并把输出写入上下文，`!!命令` 只执行不写入上下文。
 - Session 命名、Tree Navigate、Undo/Fork、Compact。
@@ -316,7 +319,9 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET/POST /api/v1/terminals`
 - `GET/DELETE /api/v1/terminals/:id`
 - Terminal WebSocket `/api/v1/terminals/:id/ws` 支持输入、窗口 resize、输出快照和退出事件。
-- Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork`、`archive`、`extension-response`、`commands`、`bash` 和 `bash-abort` 接口。
+- Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork`、`archive`、`extension-response`、`commands`、`bash` 和 `bash-abort` 接口。`steer` 与 `follow-up` 的响应带 `disposition`（`handled` 表示当前回合已接收，`queued` 表示排队等待）。
+- `GET /api/v1/agents/:id/queue` 返回排队中的 steer / follow-up 消息，`DELETE` 清空并返回被清掉的消息，便于客户端放回输入框；队列变化通过 `queue_update` 事件推送。WebSocket 的 `clear-queue` 命令等价。
+- `GET /api/v1/agents/:id/mcp` 返回该 Agent cwd 下的 MCP 服务器配置（全局 `mcp.json` 与受信任项目的 `.pi/mcp.json`），`POST` 用 `{name, enabled}` 启用或停用。只有项目被 Pi 显式信任时才会写入项目级覆盖，否则写全局文件。修改在 Agent 下次加载时生效。
 - `GET /api/v1/agents/:id/commands` 返回该 Agent cwd 下可用的 prompt template 和 skill（`{name, description, argumentHint, source}`）。`prompt` 接口本身会展开 `/命令`、skill 和 prompt template。
 - `POST /api/v1/agents/:id/bash` 在 Agent Session 内执行命令（`{command, excludeFromContext}`），输出通过 `bash_execution_update` 事件流式推送并记录到 Session；`POST /api/v1/agents/:id/bash-abort` 取消。
 - WebSocket `/api/v1/ws` 支持 sequence、replay、snapshot、`fromNow` 和 Agent command；`subscribe_collab` 推送协作事件。
