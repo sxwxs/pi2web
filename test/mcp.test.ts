@@ -76,6 +76,14 @@ describe('MCP server overview',()=>{
     expect(listMcpServers(cwd).servers.find(server=>server.name==='files')?.enabled).toBe(true);
   });
 
+  it('keeps the valid servers of a config with a malformed entry',async()=>{
+    const cwd=await mkdtemp(path.join(tmpdir(),'remote-pi-mcp-'));
+    await writeFile(path.join(agentDir,'mcp.json'),JSON.stringify({mcpServers:{broken:null,docs:{url:'https://example.com/mcp'}}}));
+    const overview=listMcpServers(cwd);
+    expect(overview.servers.map(server=>server.name)).toEqual(['docs']);
+    expect(overview.errors).toHaveLength(1);
+  });
+
   it('refuses to overwrite a config file it cannot parse',async()=>{
     const cwd=await mkdtemp(path.join(tmpdir(),'remote-pi-mcp-'));
     await writeFile(path.join(agentDir,'mcp.json'),'{ not json');

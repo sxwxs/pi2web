@@ -988,7 +988,7 @@
         const error=assistantError(message);if(error)addCard('LLM Error',error,'error',true,timestamp,target,false);
       } else if(role==='toolResult'){
         const failed=!!message.isError,content=textContent(message.content)||(failed?'执行失败':'执行完成');
-        const card=addCard(`${failed?'✗':'✓'} ${message.toolName||'Tool'}`,content,'tool',false,timestamp,target,false);card.details.classList.toggle('tool-error',failed);
+        const card=addCard(`${failed?'✗':'✓'} ${message.toolName||'Tool'}`,content,'tool',false,timestamp,target,false);card.details.classList.toggle('tool-error',failed);setToolDuration(card,message.durationMs);
       } else { const content=textContent(message.content);if(content)addCard(['user','assistant'].includes(role)?null:role,content,role==='user'?'user':role==='assistant'?'assistant':'system',false,timestamp,target,false); }
     }
     if(target===$('messages'))$('messages').scrollTop=$('messages').scrollHeight;

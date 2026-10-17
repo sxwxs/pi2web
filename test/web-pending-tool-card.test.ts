@@ -89,6 +89,12 @@ describe('in-flight tool calls in the transcript', () => {
     expect(toolCards(ui.messages)[0].querySelector('.tool-duration')!.textContent).toBe('12.4 s');
   });
 
+  it('keeps the duration of a completed call restored from history', () => {
+    const ui = setup();
+    ui.renderMessages([assistant, {...result, durationMs:900}], ui.messages, true, true);
+    expect(toolCards(ui.messages)[0].querySelector('.tool-duration')!.textContent).toBe('900 ms');
+  });
+
   it('nests calls a tool made itself inside their caller', () => {
     const ui = setup();
     ui.upsertToolCard({type:'tool_execution_start', toolCallId:'call_parent', toolName:'codemode', args:{}}, 1);

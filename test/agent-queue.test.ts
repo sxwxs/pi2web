@@ -39,6 +39,9 @@ describe('queued steering and follow-up messages',()=>{
   // Clearing returns the messages so a client can restore them to its composer.
   expect((await (await fetch(base+`/api/v1/agents/${agent.agentId}/queue`,{method:'DELETE',headers})).json()).data).toEqual(queued);
   expect(agents.snapshotState(agent.agentId).activity.queue).toEqual({steering:[],followUp:[]});
+  // A message queued while the clear runs stays queued: the cache follows queue_update, not the reply.
+  await post(`/api/v1/agents/${agent.agentId}/steer`,{message:'after clear'});
+  expect(agents.snapshotState(agent.agentId).activity.queue).toEqual({steering:['after clear'],followUp:[]});
   backends[0].release();
   await running;
  });
