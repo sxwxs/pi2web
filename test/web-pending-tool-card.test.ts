@@ -59,6 +59,17 @@ describe('in-flight tool calls in the transcript', () => {
     expect(ui.state.toolCards.size).toBe(0);
   });
 
+  it('reuses the restored card when the start event is replayed after rendering', () => {
+    const ui = setup();
+    ui.renderMessages([assistant], ui.messages, true, true);
+    ui.upsertToolCard({type:'tool_execution_start', toolCallId:'toolu_1', toolName:'bash', args:call.arguments}, 2);
+    ui.upsertToolCard({type:'tool_execution_end', toolCallId:'toolu_1', toolName:'bash', result:{content:[{type:'text', text:'1671 files'}]}}, 3);
+    const cards = toolCards(ui.messages);
+    expect(cards).toHaveLength(1);
+    expect(cards[0].querySelector('.summary-text')!.textContent).toBe('✓ bash');
+    expect(ui.state.toolCards.size).toBe(0);
+  });
+
   it('keeps completed calls represented only by their result card', () => {
     const ui = setup();
     ui.renderMessages([assistant, result], ui.messages, true, true);

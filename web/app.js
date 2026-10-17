@@ -895,6 +895,9 @@
     const key=`tool:${ev.toolCallId||ev.toolName||'tool'}`,existing=state.toolCards.get(key);
     const args=ev.args&&Object.keys(ev.args).length?JSON.stringify(ev.args,null,2):'';
     if (ev.type==='tool_execution_start') {
+      // A replayed start can follow a restored pending card for the same call; keep that card so
+      // the end event finishes it rather than a duplicate.
+      if(existing){existing.summaryTime.textContent=eventTime(timestamp);return existing;}
       const card=addCard(`🔧 ${ev.toolName||'Tool'}`,args,'tool',false,timestamp);card.toolName=ev.toolName||'Tool';card.args=args;state.toolCards.set(key,card);return card;
     }
     const card=existing||addCard(`🔧 ${ev.toolName||'Tool'}`,args,'tool',false,timestamp);
