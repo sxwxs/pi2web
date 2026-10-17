@@ -39,7 +39,13 @@ function readConfig(file:string,errors:string[]):Record<string,Record<string,unk
   try{
     const value=JSON.parse(text)?.mcpServers;
     if(!value||typeof value!=='object')return {};
-    return value as Record<string,Record<string,unknown>>;
+    // One malformed entry must not hide the servers next to it.
+    const servers:Record<string,Record<string,unknown>>={};
+    for(const [name,config] of Object.entries(value as Record<string,unknown>)){
+      if(config&&typeof config==='object'&&!Array.isArray(config))servers[name]=config as Record<string,unknown>;
+      else errors.push(`${file}: “${name}” is not a server configuration`);
+    }
+    return servers;
   }catch(error){errors.push(`${file}: ${(error as Error).message}`);return {}}
 }
 

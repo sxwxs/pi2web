@@ -93,9 +93,11 @@ export class AgentManager {
  private async ensureLoaded(id:string){const entry=this.get(id);if(entry.backend)return entry.backend;if(entry.record.status==='stopped')throw Object.assign(new Error('Agent is not running'),{code:'AGENT_NOT_RUNNING'});if(entry.loading)return entry.loading;entry.record.status='starting';entry.loading=(async()=>{try{const backend=await this.factory(id,entry.record.cwd,entry.record.sessionFile,entry.record.profile);const state=await backend.getState();entry.record={...entry.record,...state,sessionName:state.sessionName?.trim()||entry.record.sessionName,status:state.status==='stopped'?'idle':state.status};this.connect(entry,backend);return backend}catch(error){entry.record.status='error';throw error}finally{entry.loading=undefined}})();return entry.loading}
  async command(id:string,kind:'prompt'|'steer'|'follow-up'|'abort',message=''){const entry=this.get(id);if(kind==='abort'&&!entry.backend)return;if(entry.record.status==='stopped')throw Object.assign(new Error('Agent is not running'),{code:'AGENT_NOT_RUNNING'});const backend=await this.ensureLoaded(id);if(kind==='abort')return backend.abort();return backend[kind==='follow-up'?'followUp':kind](message)}
  /** Queued steering and follow-up messages waiting for the running turn. */
- async queue(id:string){const entry=this.get(id);if(!entry.backend)return {steering:[...entry.queue.steering],followUp:[...entry.queue.followUp]};const queue=await entry.backend.getQueue();entry.queue=queue;return queue}
+ // Both read through to the backend and leave the cache to `queue_update`, which stays correct when a
+ // message is queued while these run.
+ async queue(id:string){const entry=this.get(id);return entry.backend?entry.backend.getQueue():{steering:[...entry.queue.steering],followUp:[...entry.queue.followUp]}}
  /** Drop queued messages and return them so the caller can restore them to its composer. */
- async clearQueue(id:string){const entry=this.get(id);if(!entry.backend)return emptyQueue();const cleared=await entry.backend.clearQueue();entry.queue=emptyQueue();return cleared}
+ async clearQueue(id:string){const entry=this.get(id);return entry.backend?entry.backend.clearQueue():emptyQueue()}
  events(id:string,last=0){return this.get(id).events.filter(e=>e.sequence>last)}
  currentSequence(id:string){return this.get(id).nextSequence-1}
  snapshotState(id:string):AgentSnapshotState{
