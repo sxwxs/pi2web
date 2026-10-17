@@ -10,3 +10,4 @@ venv/
 .idea/
 **/build/
 local.properties
+.pi/

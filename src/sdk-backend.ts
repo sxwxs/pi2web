@@ -1,8 +1,11 @@
 import {createAgentSession,DefaultResourceLoader,getAgentDir,SessionManager,type AgentSession,type ExtensionUIContext} from '@earendil-works/pi-coding-agent';
 import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
-import type {AgentBackend,AgentEvent,AgentProfile,AgentState} from './agents.js';
+import type {AgentBackend,AgentEvent,AgentProfile,AgentQueue,AgentState,QueuedInputDisposition} from './agents.js';
 import {createCollabExtension,type CollabToolBridge} from './collab/pi-extension.js';
+
+/** Older Pi builds resolved steer()/followUp() with undefined; treat anything but an explicit `handled` as queued. */
+const normalizeDisposition=(value:unknown):QueuedInputDisposition=>value==='handled'?'handled':'queued';
 
 /** Real in-process Pi SDK backend with session/model/extension controls exposed to remote clients. */
 export class SdkBackend implements AgentBackend {
@@ -25,8 +28,13 @@ export class SdkBackend implements AgentBackend {
   // Slash commands, skills and prompt templates are expanded by prompt() itself (expandPromptTemplates defaults to true),
   // so `/name args` typed in the web composer behaves exactly like the Pi TUI.
   prompt(message:string){return this.session.prompt(message)}
-  steer(message:string){return this.session.steer(message)}
-  followUp(message:string){return this.session.followUp(message)}
+  // Since pi 0.99 steer()/followUp() report whether the message reached the running turn (`handled`)
+  // or waits for it (`queued`); the web composer shows that difference instead of guessing.
+  async steer(message:string):Promise<QueuedInputDisposition>{return normalizeDisposition(await this.session.steer(message))}
+  async followUp(message:string):Promise<QueuedInputDisposition>{return normalizeDisposition(await this.session.followUp(message))}
+  async getQueue():Promise<AgentQueue>{return {steering:[...this.session.getSteeringMessages()],followUp:[...this.session.getFollowUpMessages()]}}
+  /** Drop queued steering and follow-up messages and hand them back so a client can restore them to its composer. */
+  async clearQueue():Promise<AgentQueue>{const cleared=this.session.clearQueue();return {steering:[...cleared.steering],followUp:[...cleared.followUp]}}
   abort(){return this.session.abort()}
   async getState():Promise<AgentState>{return {agentId:this.agentId,sessionId:this.session.sessionId,sessionFile:this.session.sessionFile,sessionName:this.session.sessionName,cwd:this.cwd,status:this.disposed?'stopped':this.session.isStreaming?'streaming':'idle'}}
   async getMessages():Promise<unknown[]>{return [...this.session.state.messages]}

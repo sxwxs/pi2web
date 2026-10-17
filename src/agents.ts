@@ -5,18 +5,27 @@ import type { WorkspaceStore } from './workspaces.js';
 import { createSdkBackend } from './sdk-backend.js';
 export type AgentState={status:'unloaded'|'starting'|'idle'|'streaming'|'waiting_for_user'|'error'|'stopping'|'stopped',agentId:string,sessionId:string,sessionFile?:string,sessionName?:string,cwd:string};
 export type AgentEvent={type:string,[key:string]:unknown};
-export type AgentActivity={bashIds:string[],dialogIds:string[],dialogRequests:AgentEvent[]};
+/** Whether a steered or follow-up message reached the running turn or is waiting for it. */
+export type QueuedInputDisposition='handled'|'queued';
+export type AgentQueue={steering:string[],followUp:string[]};
+export type AgentActivity={bashIds:string[],dialogIds:string[],dialogRequests:AgentEvent[],queue:AgentQueue};
 export type AgentSnapshotState=AgentState&{activity:AgentActivity};
 export type SlashCommandSummary={name:string,description?:string,argumentHint?:string,source:'prompt'|'skill'};
 export type BashRunResult={id:string,output:string,exitCode:number|undefined,cancelled:boolean,truncated:boolean};
-export interface AgentBackend {prompt(message:string):Promise<void>;steer(message:string):Promise<void>;followUp(message:string):Promise<void>;abort():Promise<void>;getState():Promise<AgentState>;getMessages():Promise<unknown[]>;getCapabilities():Promise<Record<string,unknown>>;getSession():Promise<Record<string,unknown>>;getSessionInfo():Promise<Record<string,unknown>>;compact(instructions?:string):Promise<unknown>;setModel(provider:string,modelId:string):Promise<void>;setThinkingLevel(level:string):Promise<void>;setSessionName(name:string):Promise<void>;navigate(entryId:string):Promise<unknown>;fork(entryId:string):Promise<{sessionFile?:string,selectedText?:string}>;extensionResponse(requestId:string,value:unknown):Promise<void>;listCommands():Promise<SlashCommandSummary[]>;runBash(command:string,excludeFromContext?:boolean):Promise<BashRunResult>;abortBash():void;subscribe(listener:(e:AgentEvent)=>void):()=>void;dispose():Promise<void>}
+export interface AgentBackend {prompt(message:string):Promise<void>;steer(message:string):Promise<QueuedInputDisposition>;followUp(message:string):Promise<QueuedInputDisposition>;getQueue():Promise<AgentQueue>;clearQueue():Promise<AgentQueue>;abort():Promise<void>;getState():Promise<AgentState>;getMessages():Promise<unknown[]>;getCapabilities():Promise<Record<string,unknown>>;getSession():Promise<Record<string,unknown>>;getSessionInfo():Promise<Record<string,unknown>>;compact(instructions?:string):Promise<unknown>;setModel(provider:string,modelId:string):Promise<void>;setThinkingLevel(level:string):Promise<void>;setSessionName(name:string):Promise<void>;navigate(entryId:string):Promise<unknown>;fork(entryId:string):Promise<{sessionFile?:string,selectedText?:string}>;extensionResponse(requestId:string,value:unknown):Promise<void>;listCommands():Promise<SlashCommandSummary[]>;runBash(command:string,excludeFromContext?:boolean):Promise<BashRunResult>;abortBash():void;subscribe(listener:(e:AgentEvent)=>void):()=>void;dispose():Promise<void>}
 /** Deterministic backend used by the server and tests. The SDK adapter can implement the same contract. */
 export class MockBackend implements AgentBackend {
- private emitter=new EventEmitter(); private state:AgentState; private messages:unknown[]=[]; private timer?:ReturnType<typeof setTimeout>;
+ private emitter=new EventEmitter(); private state:AgentState; private messages:unknown[]=[]; private timer?:ReturnType<typeof setTimeout>; private queue:AgentQueue={steering:[],followUp:[]};
  constructor(agentId:string,cwd:string,sessionId:string=randomUUID()){this.state={agentId,sessionId,cwd,status:'idle'}}
  private emit(e:AgentEvent){this.emitter.emit('event',e)}
- async prompt(message:string){if(this.state.status==='streaming')throw Object.assign(new Error('Agent is busy'),{code:'AGENT_BUSY'});this.state.status='streaming';this.emit({type:'agent_start',message});await new Promise<void>(r=>{this.timer=setTimeout(r,0)});this.messages.push({role:'user',content:message});this.emit({type:'message_start',role:'assistant'});this.emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:`Mock response: ${message}`}});this.emit({type:'message_end',message:`Mock response: ${message}`});this.state.status='idle';this.emit({type:'agent_end'});}
- async steer(message:string){this.emit({type:'steer',message})} async followUp(message:string){this.emit({type:'follow_up',message})}
+ /** The body of a turn. Tests override it to keep a run streaming while they inspect queued input. */
+ protected runTurn(){return new Promise<void>(r=>{this.timer=setTimeout(r,0)})}
+ async prompt(message:string){if(this.state.status==='streaming')throw Object.assign(new Error('Agent is busy'),{code:'AGENT_BUSY'});this.state.status='streaming';this.emit({type:'agent_start',message});await this.runTurn();this.messages.push({role:'user',content:message});this.emit({type:'message_start',role:'assistant'});this.emit({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:`Mock response: ${message}`}});this.emit({type:'message_end',message:`Mock response: ${message}`});this.state.status='idle';this.emit({type:'agent_end'});}
+ async steer(message:string):Promise<QueuedInputDisposition>{const queued=this.state.status==='streaming';if(queued)this.queue.steering.push(message);this.emit({type:'steer',message});if(queued)this.emitQueue();return queued?'queued':'handled'}
+ async followUp(message:string):Promise<QueuedInputDisposition>{const queued=this.state.status==='streaming';if(queued)this.queue.followUp.push(message);this.emit({type:'follow_up',message});if(queued)this.emitQueue();return queued?'queued':'handled'}
+ async getQueue(){return {steering:[...this.queue.steering],followUp:[...this.queue.followUp]}}
+ async clearQueue(){const cleared=await this.getQueue();this.queue={steering:[],followUp:[]};this.emitQueue();return cleared}
+ private emitQueue(){this.emit({type:'queue_update',steering:[...this.queue.steering],followUp:[...this.queue.followUp]})}
  async abort(){if(this.state.status==='streaming'){if(this.timer)clearTimeout(this.timer);this.state.status='idle';this.emit({type:'agent_end',aborted:true})}}
  async getState(){return {...this.state}} async getMessages(){return [...this.messages]}
  async getCapabilities(){return {model:null,models:[],thinkingLevel:'off',thinkingLevels:['off'],supportsThinking:false}}
@@ -32,7 +41,11 @@ export class MockBackend implements AgentBackend {
 export type AgentProfile='default'|'collab';
 export type AgentRecord=AgentState&{workspaceId:string,profile:AgentProfile,createdAt:string,lastActiveAt:string};
 type StoredEvent={id:string,sequence:number,timestamp:number,event:AgentEvent};
-type AgentEntry={record:AgentRecord,backend?:AgentBackend,loading?:Promise<AgentBackend>,events:StoredEvent[],nextSequence:number,bashIds:Set<string>,dialogRequests:Map<string,AgentEvent>};
+type AgentEntry={record:AgentRecord,backend?:AgentBackend,loading?:Promise<AgentBackend>,events:StoredEvent[],nextSequence:number,bashIds:Set<string>,dialogRequests:Map<string,AgentEvent>,queue:AgentQueue,streaming?:boolean};
+const toStringList=(value:unknown):string[]=>Array.isArray(value)?value.filter((x):x is string=>typeof x==='string'):[];
+const emptyQueue=():AgentQueue=>({steering:[],followUp:[]});
+/** A pending dialog blocks the run until a human answers it, which is a different wait than streaming. */
+const runStatus=(entry:AgentEntry,streaming:boolean):AgentState['status']=>entry.dialogRequests.size?'waiting_for_user':streaming?'streaming':'idle';
 export class AgentManager {
  private agents=new Map<string,AgentEntry>(); private listeners=new Map<string,Set<(e:StoredEvent)=>void>>(); private globalListeners=new Set<(agentId:string,e:StoredEvent)=>void>();
  constructor(private workspaces:WorkspaceStore,private factory:(id:string,cwd:string,sessionFile?:string,profile?:AgentProfile)=>AgentBackend|Promise<AgentBackend>=createSdkBackend){}
@@ -45,9 +58,10 @@ export class AgentManager {
   backend.subscribe(event=>{
    if(entry.backend!==backend)return;
    const record=entry.record,type=event.type;
-   if(type==='agent_start'||type==='auto_retry_start')record.status='streaming';
-   else if(type==='agent_end')record.status=event.willRetry===true?'streaming':'idle';
-   else if(type==='agent_settled')record.status='idle';
+   if(type==='agent_start'||type==='auto_retry_start')entry.streaming=true;
+   else if(type==='agent_end')entry.streaming=event.willRetry===true;
+   else if(type==='agent_settled')entry.streaming=false;
+   if(type==='queue_update')entry.queue={steering:toStringList(event.steering),followUp:toStringList(event.followUp)};
    // Standalone shell runs and dialogs outlive LLM turns. Track them with the
    // event cursor; keep dialog payloads so reconnecting clients can rebuild controls.
    if(typeof event.id==='string'){
@@ -58,6 +72,7 @@ export class AgentManager {
     if(type==='extension_ui_request')entry.dialogRequests.set(event.requestId,event);
     else if(type==='extension_ui_response')entry.dialogRequests.delete(event.requestId);
    }
+   record.status=runStatus(entry,entry.streaming===true);
    if(type==='session_info_changed')record.sessionName=typeof event.name==='string'&&event.name.trim()?event.name.trim():undefined;
    this.publish(entry,event);
   });
@@ -69,18 +84,22 @@ export class AgentManager {
   for(const listener of this.listeners.get(record.agentId)??[])listener(item);
   for(const listener of this.globalListeners)listener(record.agentId,item);
  }
- private attach(id:string,record:AgentRecord,backend:AgentBackend){const entry:AgentEntry={record,backend,events:[],nextSequence:1,bashIds:new Set(),dialogRequests:new Map()};this.connect(entry,backend);this.agents.set(id,entry)}
- async restore(records:AgentRecord[]){for(const saved of records){try{const ws=this.workspaces.get(saved.workspaceId);if(!ws)continue;const cwd=await this.workspaces.resolve(ws,pathRelative(ws.rootPath,saved.cwd));const sessionModified=saved.sessionFile?await import('node:fs/promises').then(fs=>fs.stat(saved.sessionFile!).then(value=>value.mtime.toISOString()).catch(()=>undefined)):undefined;const record={...saved,profile:saved.profile??'default',cwd,status:'unloaded' as const,lastActiveAt:sessionModified&&sessionModified>saved.lastActiveAt?sessionModified:saved.lastActiveAt};this.agents.set(saved.agentId,{record,events:[],nextSequence:1,bashIds:new Set(),dialogRequests:new Map()})}catch{/* Keep server startup resilient to deleted workspaces. */}}}
+ private attach(id:string,record:AgentRecord,backend:AgentBackend){const entry:AgentEntry={record,backend,events:[],nextSequence:1,bashIds:new Set(),dialogRequests:new Map(),queue:emptyQueue()};this.connect(entry,backend);this.agents.set(id,entry)}
+ async restore(records:AgentRecord[]){for(const saved of records){try{const ws=this.workspaces.get(saved.workspaceId);if(!ws)continue;const cwd=await this.workspaces.resolve(ws,pathRelative(ws.rootPath,saved.cwd));const sessionModified=saved.sessionFile?await import('node:fs/promises').then(fs=>fs.stat(saved.sessionFile!).then(value=>value.mtime.toISOString()).catch(()=>undefined)):undefined;const record={...saved,profile:saved.profile??'default',cwd,status:'unloaded' as const,lastActiveAt:sessionModified&&sessionModified>saved.lastActiveAt?sessionModified:saved.lastActiveAt};this.agents.set(saved.agentId,{record,events:[],nextSequence:1,bashIds:new Set(),dialogRequests:new Map(),queue:emptyQueue()})}catch{/* Keep server startup resilient to deleted workspaces. */}}}
  get(id:string){const x=this.agents.get(id);if(!x)throw Object.assign(new Error('Agent not found'),{code:'AGENT_NOT_FOUND'});return x}
  list(){return [...this.agents.values()].map(x=>({...x.record}))}
  isLoaded(id:string){return !!this.get(id).backend}
  private async ensureLoaded(id:string){const entry=this.get(id);if(entry.backend)return entry.backend;if(entry.record.status==='stopped')throw Object.assign(new Error('Agent is not running'),{code:'AGENT_NOT_RUNNING'});if(entry.loading)return entry.loading;entry.record.status='starting';entry.loading=(async()=>{try{const backend=await this.factory(id,entry.record.cwd,entry.record.sessionFile,entry.record.profile);const state=await backend.getState();entry.record={...entry.record,...state,sessionName:state.sessionName?.trim()||entry.record.sessionName,status:state.status==='stopped'?'idle':state.status};this.connect(entry,backend);return backend}catch(error){entry.record.status='error';throw error}finally{entry.loading=undefined}})();return entry.loading}
  async command(id:string,kind:'prompt'|'steer'|'follow-up'|'abort',message=''){const entry=this.get(id);if(kind==='abort'&&!entry.backend)return;if(entry.record.status==='stopped')throw Object.assign(new Error('Agent is not running'),{code:'AGENT_NOT_RUNNING'});const backend=await this.ensureLoaded(id);if(kind==='abort')return backend.abort();return backend[kind==='follow-up'?'followUp':kind](message)}
+ /** Queued steering and follow-up messages waiting for the running turn. */
+ async queue(id:string){const entry=this.get(id);if(!entry.backend)return {steering:[...entry.queue.steering],followUp:[...entry.queue.followUp]};const queue=await entry.backend.getQueue();entry.queue=queue;return queue}
+ /** Drop queued messages and return them so the caller can restore them to its composer. */
+ async clearQueue(id:string){const entry=this.get(id);if(!entry.backend)return emptyQueue();const cleared=await entry.backend.clearQueue();entry.queue=emptyQueue();return cleared}
  events(id:string,last=0){return this.get(id).events.filter(e=>e.sequence>last)}
  currentSequence(id:string){return this.get(id).nextSequence-1}
  snapshotState(id:string):AgentSnapshotState{
   const a=this.get(id);
-  return {...a.record,activity:{bashIds:[...a.bashIds],dialogIds:[...a.dialogRequests.keys()],dialogRequests:[...a.dialogRequests.values()]}};
+  return {...a.record,activity:{bashIds:[...a.bashIds],dialogIds:[...a.dialogRequests.keys()],dialogRequests:[...a.dialogRequests.values()],queue:{steering:[...a.queue.steering],followUp:[...a.queue.followUp]}}};
  }
  async snapshot(id:string,messageLimit?:number){
   // Capture state and its cursor before yielding. Events emitted while messages
@@ -96,8 +115,8 @@ export class AgentManager {
  subscribeAll(listener:(agentId:string,e:StoredEvent)=>void){this.globalListeners.add(listener);return()=>this.globalListeners.delete(listener)}
  async dispose(id:string){
   const a=this.get(id);if(a.loading)await a.loading.catch(()=>{});
-  await a.backend?.dispose();a.backend=undefined;a.record.status='unloaded';
-  a.bashIds.clear();a.dialogRequests.clear();
+  await a.backend?.dispose();a.backend=undefined;a.record.status='unloaded';a.streaming=false;
+  a.bashIds.clear();a.dialogRequests.clear();a.queue=emptyQueue();
   this.publish(a,{type:'agent_unloaded'});
  }
  async remove(id:string){await this.dispose(id);this.agents.delete(id);this.listeners.delete(id)}

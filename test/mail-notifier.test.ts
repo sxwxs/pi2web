@@ -19,6 +19,18 @@ describe('MailNotifier',()=>{
     expect(payload.text).toContain('Session：登录修复');expect(payload.text).toContain('路径：/workspace/remote-pi');expect(payload.text).toContain('已修复，测试通过。');
   });
 
+  it('says a cancelled run was interrupted instead of completed',async()=>{
+    let payload:any;const fetcher:typeof fetch=async(_input,init)=>{payload=JSON.parse(String(init?.body));return ok()};
+    const notifier=new MailNotifier({endpoint:'https://mail.example.com/api/v1/messages',apiKey:'key',recipient:'owner@example.com'},fetcher);
+    notifier.handleAgentEvent('agent-1',{type:'message_end',message:'部分结果'});
+    // Pi 0.99+ reports cancelled runs as aborted; they are not completed tasks.
+    notifier.handleAgentEvent('agent-1',{type:'agent_settled',aborted:true},{sessionName:'登录修复'});
+    await notifier.close();
+    expect(payload.subject).toBe('[Remote Pi] 登录修复已中断');
+    expect(payload.text).toContain('任务已中断');
+    expect(payload.metadata.aborted_count).toBe(1);
+  });
+
   it('aggregates tasks completed during the configured delay',async()=>{
     const payloads:any[]=[];const fetcher:typeof fetch=async(_input,init)=>{payloads.push(JSON.parse(String(init?.body)));return ok()};
     const notifier=new MailNotifier({endpoint:'https://mail.example.com/api/v1/messages',apiKey:'key',recipient:'owner@example.com'},fetcher);
