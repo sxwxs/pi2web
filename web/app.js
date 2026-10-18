@@ -1533,8 +1533,10 @@
     $('pairSubmit').disabled = true;
     // A record this submission created and that no Backend owns yet: if the connection never comes
     // up, it has to go, or the target's pairing code stays on the relay with nothing pointing at it.
-    // The Backend being edited and the route it already had are kept for the same reason.
-    let createdHost = null, existing = null, previous = null;
+    // The Backend being edited, what it was reached with, and the entry this submission builds are
+    // kept for the same reason: connectBackend commits the new route onto the live Backend before the
+    // whole connection is known to work, so a failure has to be able to put it back.
+    let createdHost = null, existing = null, previous = null, snapshot = null, entry = null;
     try {
       const base = $('pairBase').value.trim().replace(/\/$/, '');
       const token = $('pairToken').value;
@@ -1547,7 +1549,8 @@
       // Where this Backend was reached before. Its record holds the target's pairing code, so it may
       // only be dropped once the new route has proved it works.
       previous = existing?.relayHostId ? {via:existing.relayVia, hostId:existing.relayHostId} : null;
-      let entry = {id:existing?.id || createBackendId(), name, base, token, saved:existing?.saved || false};
+      snapshot = existing ? {name:existing.name, base:existing.base, token:existing.token, saved:existing.saved, relayHostId:existing.relayHostId, relayVia:existing.relayVia} : null;
+      entry = {id:existing?.id || createBackendId(), name, base, token, saved:existing?.saved || false};
       // A Backend others are relayed through is the address they are reached at: moving it, or putting
       // it behind a relay itself, takes that address away and leaves their records on a server nothing
       // in this browser points at any more.
@@ -1565,6 +1568,9 @@
         // so an address spelled differently than the one already registered edits it instead of
         // adding a second entry that would delete the first one's record along with itself.
         const owner = state.backends.find(item => item.relayHostId === host.id && item.id !== entry.id);
+        // Moving a Backend onto a target another one already holds would leave two entries on one
+        // record, and deleting the route of either would take the other's with it.
+        if (owner && existing) throw Error(`这个目标已经是 backend「${owner.name}」，请直接改它，或先把它删掉`);
         entry = {...entry, id:owner?.id || entry.id, token:'', relayHostId:host.id, relayVia};
       } else if (previous) {
         // Back to a direct connection: the code just typed needs the usual consent, which a relayed
@@ -1588,10 +1594,14 @@
       if (createdHost) {
         const failed = await deleteRelayRecords([createdHost]);
         if (failed.length) message += `；中继「${backendOf(createdHost.relayVia)?.name || createdHost.relayVia}」上刚建的记录 ${createdHost.relayHostId} 没能删掉（${failed[0].error.message}），用同一地址重新添加一次会复用它，之后删掉该 backend 就能一并清掉`;
-        // The entry keeps the route it was saved with, so the record it still owns stays reachable.
-        if (existing && previous) Object.assign(existing, {relayVia:previous.via, relayHostId:previous.hostId});
       }
+      // An edit goes back to the address and code it was reached with, so the record it still owns
+      // stays reachable; it stays in the error state it ended in, one click from reconnecting. An
+      // addition that never connected was never saved either, so it leaves no entry behind.
+      if (snapshot) Object.assign(existing, snapshot);
+      else if (entry && backendOf(entry.id)) backendRegistry.remove(backendOf(entry.id));
       updateHeaderStatus();
+      renderBackendList();
       toast(message);
     } finally {
       $('pairSubmit').disabled = false;
