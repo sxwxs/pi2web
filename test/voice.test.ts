@@ -28,6 +28,16 @@ describe('voice manager',()=>{
     const manager=new VoiceManager({speechBaseUrl:'http://speech',ttsModel:'tts',ttsVoice:'voice',summaryBaseUrl:'http://llm',summaryModel:'summary'});
     expect(manager.capabilities()).toEqual({tts:true,stt:false});
   });
+  it('stays silent when the run was cancelled',async()=>{
+    let called=false;
+    const manager=new VoiceManager({speechBaseUrl:'http://speech',ttsModel:'tts',ttsVoice:'voice',summaryBaseUrl:'http://llm',summaryModel:'summary'},async()=>{called=true;throw new Error('must not speak')});
+    manager.handleAgentEvent('agent-1',{type:'message_end',message:{role:'assistant',content:[{type:'text',text:'部分结果'}]}});
+    // Pi 0.99+ marks cancelled runs as aborted; their partial output is not worth announcing.
+    manager.handleAgentEvent('agent-1',{type:'agent_settled',aborted:true});
+    await new Promise(resolve=>setTimeout(resolve,20));
+    expect(called).toBe(false);
+    manager.close();
+  });
   it('sends the user prompt and final Pi output, names an unnamed session, and speaks the JSON summary',async()=>{
     const spoken:string[]=[],names:string[]=[];let summaryRequest:any;
     const fetcher:typeof fetch=async(input,init)=>{
