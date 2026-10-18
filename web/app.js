@@ -1531,6 +1531,9 @@
   $('pairForm').onsubmit = async event => {
     event.preventDefault();
     $('pairSubmit').disabled = true;
+    // A record this submission created and that no Backend owns yet: if the connection never comes
+    // up, it has to go, or the target's pairing code stays on the relay with nothing pointing at it.
+    let createdHost = null;
     try {
       const base = $('pairBase').value.trim().replace(/\/$/, '');
       const token = $('pairToken').value;
@@ -1547,10 +1550,11 @@
       if (relayVia) {
         const children = existing ? relayChildren(state.backends, existing.id) : [];
         if (children.length) throw Error(`「${existing.name}」正在为 ${children.length} 个 backend 中继，不能再把它自己改成中继连接`);
-        // The relay stores the target pairing code; this browser only keeps the host id.
-        const host = previous && previous.via === relayVia
-          ? await requestBackend(relayVia, `/api/v1/hosts/${encodeURIComponent(previous.hostId)}`, {method:'PATCH', body:JSON.stringify({name, base, ...(token ? {token} : {})})})
-          : await postBackend(relayVia, '/api/v1/hosts', {name, base, token});
+        // The relay stores the target pairing code; this browser only keeps the host id. The same
+        // address returns the record it already has, a different one gets its own: an edit that moves
+        // a Backend to another machine never writes that machine's address over the old record.
+        const host = await postBackend(relayVia, '/api/v1/hosts', {name, base, token});
+        if (host.created) createdHost = {name, base, relayVia, relayHostId:host.id};
         entry = {...entry, token:'', relayHostId:host.id, relayVia};
       } else if (previous) {
         // Back to a direct connection: the code just typed needs the usual consent, which a relayed
@@ -1559,6 +1563,7 @@
         entry = {...entry, saved:false, relayHostId:'', relayVia:''};
       }
       await connectBackend(entry, {confirmSave:true});
+      createdHost = null;
       // Only now is the old record unreachable from this browser, and only now may it be deleted.
       if (previous && previous.hostId !== entry.relayHostId) {
         const failed = await deleteRelayRecords([{...existing, relayVia:previous.via, relayHostId:previous.hostId}]);
@@ -1566,6 +1571,10 @@
       }
       $('pairDialog').close();
     } catch (error) {
+      // Nothing here owns the record this submission created, so it is taken back rather than left
+      // holding a pairing code. A reused record belongs to whoever registered it first, and one a
+      // half-connected Backend did end up pointing at stays with it, to be deleted along with it.
+      if (createdHost && !state.backends.some(backend => backend.relayHostId === createdHost.relayHostId)) await deleteRelayRecords([createdHost]);
       updateHeaderStatus();
       toast(error.message);
     } finally {

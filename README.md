@@ -71,12 +71,13 @@ pi2web --host 0.0.0.0 --no-auth --allow-insecure-no-auth
 
 - 它要等所属的中继 backend 连上之后才能连，刷新页面时也是先连直连的、再连中继的；
 - 中继那台断开时，通过它中继的 backend 一起断开；
-- 在另一个浏览器里用同一个目标地址再添加一次，会复用服务器上已有的那条中继记录，不会重复创建；
+- 在另一个浏览器里用同一个目标地址再添加一次，会复用服务器上已有的那条中继记录，不会重复创建；如果连接没能建立，刚创建的那条记录会被删回去（复用到的不删，它还属于先注册的那个浏览器）；
+- 中继记录不做原地修改：改名字只是浏览器本地的事；改地址会在中继上新建一条记录，连通之后才删掉旧的，所以改失败不会弄坏原来能用的那条；因为配对码只在中继上，**换地址时需要重新填新机器的配对码**（留空就是“这台不要求配对码”）；地址不变时重新输入的配对码会覆盖记录里的旧码；
 - 在配置里删掉一个中继 backend，会同时删掉中继服务器上的那条记录（含目标配对码）；删掉一台中继 backend 时，它名下所有中继记录会先删干净再移除本地条目。其中一条删不掉不会影响其余几条继续删，失败的会逐条列出来由你决定是否仍然移除；选择不移除就保留原样，等中继恢复后再删一次即可——中继上已经不存在的记录算删除成功，不会卡住重试。
 - 协作看板（`/collab.html`）直连 backend，不走中继，因此不会列出中继 backend。
 - 目标机用 `--no-auth` 起的话，配对码留空即可；但 `--no-auth` 只响应 loopback 请求，所以这种目标只能由**同一台机器上**的另一个 pi2web 中继（比如 `http://127.0.0.1:11319`）。
 
-对应的接口：`GET/POST /api/v1/hosts`、`PATCH/DELETE /api/v1/hosts/:id`（`token` 只写不读，列表里只返回 `hasToken`），以及 `/api/v1/hosts/:id/<目标路径>` 的转发（HTTP 和 WebSocket 都走这个前缀）。
+对应的接口：`GET/POST /api/v1/hosts`、`DELETE /api/v1/hosts/:id`（`token` 只写不读，列表里只返回 `hasToken`；POST 按地址去重，响应里的 `created` 说明这次是新建还是复用），以及 `/api/v1/hosts/:id/<目标路径>` 的转发（HTTP 和 WebSocket 都走这个前缀）。转发不设超时：一次 compact 或转录本来就可能跑几分钟，浏览器自己断开（包括服务器关闭时）才是停止等待的信号。
 
 ## Agent 完成邮件通知（MailDispatch）
 
@@ -329,7 +330,7 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET/POST /api/v1/workspaces`
 - `GET /api/v1/workspaces/:id/tree|file|stat`
 - `GET /api/v1/sessions`
-- `GET/POST /api/v1/hosts`、`PATCH/DELETE /api/v1/hosts/:id`（中继目标）、`/api/v1/hosts/:id/*`（转发到目标，含 WebSocket）
+- `GET/POST /api/v1/hosts`、`DELETE /api/v1/hosts/:id`（中继目标）、`/api/v1/hosts/:id/*`（转发到目标，含 WebSocket）
 - `GET/POST /api/v1/agents`（创建时可带 `profile`：`default`（默认）或 `collab`；`collab` 会加载协作工具，供协作看板占座使用）
 - `GET/DELETE /api/v1/agents/:id`
 - `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/recheck`（**仅人**，重开时轮换每个座位的 token 并在响应 `participantTokens` 里返回一次）、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/issue-votes`、`/merge-votes`、`/issue-discussions`、`/review-consensus`、`/review-rounds`（**仅人**）、`/retry-waiting`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）

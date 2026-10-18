@@ -91,7 +91,11 @@ this.server.on('upgrade',(req,socket,head)=>{void this.upgrade(req,socket,head).
   if(this.collabMailAt.size>500)for(const [key,at] of this.collabMailAt)if(now-at>this.collabMailCooldownMs)this.collabMailAt.delete(key);
   return true;
  }
- async stop(){if(this.collabStallTimer)clearInterval(this.collabStallTimer);this.collabStallTimer=undefined;this.unsubscribeCollab?.();this.unsubscribeCollab=undefined;await this.collabDispatcher.stop();this.collab.shutdown();this.unsubscribeMetadata?.();this.unsubscribeMetadata=undefined;this.voice?.close();this.sessionNamer?.close();await this.mailNotifier?.close();await Promise.allSettled([...this.sessionIndexJobs.values(),...this.agentIndexJobs.values()]);this.metadata.flush();for(const c of this.clients)c.close();for(const s of this.pendingRelays)s.destroy();for(const a of this.agents.list())await this.agents.dispose(a.agentId).catch(()=>{});this.terminals.closeAll();this.wss.close();await new Promise<void>(r=>this.server.close(()=>r()));this.metadata.close()}
+ async stop(){if(this.collabStallTimer)clearInterval(this.collabStallTimer);this.collabStallTimer=undefined;this.unsubscribeCollab?.();this.unsubscribeCollab=undefined;await this.collabDispatcher.stop();this.collab.shutdown();this.unsubscribeMetadata?.();this.unsubscribeMetadata=undefined;this.voice?.close();this.sessionNamer?.close();await this.mailNotifier?.close();await Promise.allSettled([...this.sessionIndexJobs.values(),...this.agentIndexJobs.values()]);this.metadata.flush();for(const c of this.clients)c.close();for(const s of this.pendingRelays)s.destroy();for(const a of this.agents.list())await this.agents.dispose(a.agentId).catch(()=>{});this.terminals.closeAll();this.wss.close();
+  // Everything above was asked to close on its own terms; what is left is a socket nobody owns any
+  // more, including a browser waiting on a relayed request whose target went silent. Destroying it
+  // ends that wait instead of letting server.close() sit on it.
+  this.server.closeAllConnections();await new Promise<void>(r=>this.server.close(()=>r()));this.metadata.close()}
  private async upgrade(req:http.IncomingMessage,socket:import('node:stream').Duplex,head:Buffer){const protocol=req.headers['sec-websocket-protocol'];const wsToken=Array.isArray(protocol)?protocol.find(x=>x.startsWith('access-token.'))?.slice(13):protocol?.split(',').map(x=>x.trim()).find(x=>x.startsWith('access-token.'))?.slice(13);const pathname=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`).pathname,relayMatch=pathname.match(/^\/api\/v1\/hosts\/([^/]+)(\/.+)$/),isSocket=pathname==='/api/v1/ws'||/^\/api\/v1\/terminals\/[^/]+\/ws$/.test(pathname)||!!relayMatch;if(!isSocket){socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();return}if(this.noAuth&&!this.allowInsecureNoAuth&&!this.localRequest(req)){socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');socket.destroy();return}const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){socket.write(`HTTP/1.1 429 Too Many Requests\r\nRetry-After: ${Math.ceil(retryAfter/1000)}\r\n\r\n`);socket.destroy();return}if(!(await this.authorized(req.headers.authorization))&&!(wsToken&&await this.auth.verify(wsToken))){this.recordLoginFailure(key);socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();return}this.loginFailures.delete(key);if(relayMatch){const host=this.relayHosts().find(item=>item.id===relayMatch[1]);if(!host){socket.write('HTTP/1.1 404 Not Found\r\n\r\n');socket.destroy();return}return this.relayUpgrade(req,socket,head,host,relayMatch[2])}this.wss.handleUpgrade(req,socket,head,ws=>this.wss.emit('connection',ws,req))}
  private clientKey(req:http.IncomingMessage){return req.socket.remoteAddress??'unknown'}
  /** Rate limits pairing attempts per source address. Reverse proxies and tunnels share one bucket by design. */
@@ -179,17 +183,23 @@ this.server.on('upgrade',(req,socket,head)=>{void this.upgrade(req,socket,head).
  /** Forwards one browser request to a saved target, authenticating it with the target's own pairing code. */
  private async relayRequest(req:http.IncomingMessage,res:http.ServerResponse,host:RelayHost,restPath:string){
   const method=(req.method??'GET').toUpperCase();
+  // Nobody left to hand the answer to is the only deadline worth having: a relayed compact or
+  // transcription may legitimately run for minutes, so a clock here would cut working sessions.
+  // Shutdown destroys the browser's socket, which arrives as the same signal.
+  const controller=new AbortController();let clientGone=false;
+  res.on('close',()=>{if(res.writableEnded)return;clientGone=true;controller.abort()});
   try{
    const body=['GET','HEAD'].includes(method)?undefined:await this.binaryBody(req);
    const headers:Record<string,string>={};
    if(host.token)headers.authorization=`Bearer ${host.token}`;
    for(const name of ['content-type','x-audio-filename']){const value=req.headers[name];if(typeof value==='string')headers[name]=value}
-   const response=await fetch(`${host.base}${restPath}`,{method,headers,body:body?.length?body:undefined});
+   const response=await fetch(`${host.base}${restPath}`,{method,headers,body:body?.length?body:undefined,signal:controller.signal});
    const payload=Buffer.from(await response.arrayBuffer());
    res.statusCode=response.status;
    for(const name of ['content-type','retry-after']){const value=response.headers.get(name);if(value)res.setHeader(name,value)}
    res.end(payload);
   }catch(error){
+   if(clientGone)return;
    console.error(`[relay] ${method} ${host.name}${restPath} failed: ${(error as Error).message}`);
    json(res,502,{error:{code:'RELAY_FAILED',message:(error as Error).message}});
   }
@@ -227,7 +237,7 @@ this.server.on('upgrade',(req,socket,head)=>{void this.upgrade(req,socket,head).
  /** Reads a JSON body as bytes so the size limit applies while streaming and multi-byte characters are never split across chunks. */
  private async body(req:http.IncomingMessage,maxBytes=2*1024*1024){const raw=await this.binaryBody(req,maxBytes);return raw.length?JSON.parse(raw.toString('utf8')):{}}
  private async binaryBody(req:http.IncomingMessage,maxBytes=25*1024*1024){const chunks:Buffer[]=[];let size=0;for await(const value of req){const chunk=Buffer.isBuffer(value)?value:Buffer.from(value);size+=chunk.length;if(size>maxBytes)throw Object.assign(new Error('Request too large'),{code:'REQUEST_TOO_LARGE'});chunks.push(chunk)}return Buffer.concat(chunks)}
- private async handle(req:http.IncomingMessage,res:http.ServerResponse){const requestId=randomUUID();res.setHeader('x-request-id',requestId);if(this.noAuth){if(!this.allowInsecureNoAuth&&!this.localRequest(req))return json(res,403,{error:{code:'FORBIDDEN',message:'Without authentication only loopback requests are served',requestId}});if(req.headers.origin)res.setHeader('access-control-allow-origin',String(req.headers.origin))}else res.setHeader('access-control-allow-origin','*');res.setHeader('access-control-allow-headers','Authorization,Content-Type,X-Audio-Filename');res.setHeader('access-control-allow-methods','GET,POST,PATCH,DELETE,OPTIONS');try{if(req.method==='OPTIONS'){res.statusCode=204;return res.end()}const u=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`);if(req.method==='GET'&&await this.serveWeb(u.pathname,req,res))return;if(req.method==='GET'&&u.pathname==='/health')return json(res,200,{data:{status:'ok',authRequired:!this.noAuth}});const parts=u.pathname.split('/').filter(Boolean);if(req.method==='POST'&&u.pathname==='/api/v1/auth/login'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed pairing attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const b=await this.body(req);if(await this.auth.verify(String(b.token??''))){this.loginFailures.delete(key);return json(res,200,{data:{authenticated:true}})}const lockedFor=this.recordLoginFailure(key);if(lockedFor>0)res.setHeader('retry-after',String(Math.ceil(lockedFor/1000)));return json(res,401,{error:{code:'UNAUTHORIZED',message:'Invalid token',requestId}})}if(parts[0]==='api'&&parts[1]==='v1'&&parts[2]==='collab'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const header=String(req.headers.authorization??''),token=header.startsWith('Bearer ')?header.slice(7):'';const result=await this.collabRouter.handle({method:req.method??'GET',url:u,parts,token,body:()=>this.body(req)});if(!result)return json(res,404,{error:{code:'NOT_FOUND',message:'Not found',requestId}});if(result.authFailed)this.recordLoginFailure(key);else this.loginFailures.delete(key);return json(res,result.status,result.payload)}if(!(await this.authorized(req.headers.authorization)))return json(res,401,{error:{code:'UNAUTHORIZED',message:'Authentication required',requestId}});
+ private async handle(req:http.IncomingMessage,res:http.ServerResponse){const requestId=randomUUID();res.setHeader('x-request-id',requestId);if(this.noAuth){if(!this.allowInsecureNoAuth&&!this.localRequest(req))return json(res,403,{error:{code:'FORBIDDEN',message:'Without authentication only loopback requests are served',requestId}});if(req.headers.origin)res.setHeader('access-control-allow-origin',String(req.headers.origin))}else res.setHeader('access-control-allow-origin','*');res.setHeader('access-control-allow-headers','Authorization,Content-Type,X-Audio-Filename');res.setHeader('access-control-allow-methods','GET,POST,DELETE,OPTIONS');try{if(req.method==='OPTIONS'){res.statusCode=204;return res.end()}const u=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`);if(req.method==='GET'&&await this.serveWeb(u.pathname,req,res))return;if(req.method==='GET'&&u.pathname==='/health')return json(res,200,{data:{status:'ok',authRequired:!this.noAuth}});const parts=u.pathname.split('/').filter(Boolean);if(req.method==='POST'&&u.pathname==='/api/v1/auth/login'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed pairing attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const b=await this.body(req);if(await this.auth.verify(String(b.token??''))){this.loginFailures.delete(key);return json(res,200,{data:{authenticated:true}})}const lockedFor=this.recordLoginFailure(key);if(lockedFor>0)res.setHeader('retry-after',String(Math.ceil(lockedFor/1000)));return json(res,401,{error:{code:'UNAUTHORIZED',message:'Invalid token',requestId}})}if(parts[0]==='api'&&parts[1]==='v1'&&parts[2]==='collab'){const key=this.clientKey(req),retryAfter=this.loginRetryAfterMs(key);if(retryAfter>0){res.setHeader('retry-after',String(Math.ceil(retryAfter/1000)));return json(res,429,{error:{code:'TOO_MANY_ATTEMPTS',message:`Too many failed attempts. Retry in ${Math.ceil(retryAfter/1000)} seconds`,requestId}})}const header=String(req.headers.authorization??''),token=header.startsWith('Bearer ')?header.slice(7):'';const result=await this.collabRouter.handle({method:req.method??'GET',url:u,parts,token,body:()=>this.body(req)});if(!result)return json(res,404,{error:{code:'NOT_FOUND',message:'Not found',requestId}});if(result.authFailed)this.recordLoginFailure(key);else this.loginFailures.delete(key);return json(res,result.status,result.payload)}if(!(await this.authorized(req.headers.authorization)))return json(res,401,{error:{code:'UNAUTHORIZED',message:'Authentication required',requestId}});
 if(parts[2]==='hosts'){
  // Every branch reads the stored list *after* awaiting its request body: a snapshot taken before that
  // can already be stale, and two concurrent registrations would then overwrite each other.
@@ -241,20 +251,15 @@ if(parts[2]==='hosts'){
   const hosts=this.relayHosts(),existing=hosts.find(host=>host.base===base);
   const host:RelayHost=existing?{...existing,name,token:token||existing.token}:{id:`host-${randomUUID()}`,name,base,token:token||undefined,createdAt:new Date().toISOString()};
   this.metadata.setSetting('relayHosts',existing?hosts.map(item=>item.id===host.id?host:item):[...hosts,host]);
-  return json(res,existing?200:201,{data:this.safeRelayHost(host)});
+  // Whether this call created the record decides who may delete it again: a reused one belongs to
+  // whoever registered it first, and a browser that gives up must not take it from them.
+  return json(res,existing?200:201,{data:{...this.safeRelayHost(host),created:!existing}});
  }
  if(parts.length===4){
   if(req.method==='DELETE'){const hosts=this.relayHosts();if(!hosts.some(host=>host.id===parts[3]))return json(res,404,{error:{code:'HOST_NOT_FOUND',message:'Relay host not found',requestId}});this.metadata.setSetting('relayHosts',hosts.filter(host=>host.id!==parts[3]));return json(res,200,{data:{deleted:true}})}
-  if(req.method==='PATCH'){
-   const b=await this.body(req),hosts=this.relayHosts(),index=hosts.findIndex(host=>host.id===parts[3]);
-   if(index<0)return json(res,404,{error:{code:'HOST_NOT_FOUND',message:'Relay host not found',requestId}});
-   const host={...hosts[index]};
-   if(typeof b.name==='string'&&b.name.trim())host.name=b.name.trim();
-   if(typeof b.base==='string'){const base=this.relayBase(b.base);if(!base)return json(res,400,{error:{code:'INVALID_REQUEST',message:'base must be an http(s) URL',requestId}});host.base=base}
-   if(typeof b.token==='string'){const token=b.token.trim();if(token&&!isAccessTokenShape(token))return json(res,400,{error:{code:'INVALID_REQUEST',message:RELAY_TOKEN_REQUIRED,requestId}});host.token=token||undefined}
-   this.metadata.setSetting('relayHosts',hosts.map((item,position)=>position===index?host:item));
-   return json(res,200,{data:this.safeRelayHost(host)});
-  }
+  // A record is never edited in place. Changing a target's address or code is a POST, which reuses
+  // the record when the address is unchanged and creates one when it is not, so an edit that turns
+  // out not to work cannot leave a working record broken for the browsers sharing it.
   return json(res,404,{error:{code:'HOST_NOT_FOUND',message:'Relay host not found',requestId}});
  }
  if(parts.length>=5){
