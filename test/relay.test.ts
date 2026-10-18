@@ -1,4 +1,4 @@
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import http from 'node:http';
 import {mkdtemp} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -85,13 +85,36 @@ describe('backend relay', () => {
   it('returns the existing host when the same target is added again', async () => {
     const {base, headers, host, status} = await start();
     expect(status).toBe(201);
+    expect(host.created).toBe(true);
     const again = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'lab from phone', base:target!.base})});
     expect(again.status).toBe(200);
     const second = (await again.json()).data;
-    expect(second).toMatchObject({id:host.id, name:'lab from phone', hasToken:true});
+    // Reused, so the code it was registered with stays and the browser that got it here may not
+    // delete it again as its own.
+    expect(second).toMatchObject({id:host.id, name:'lab from phone', hasToken:true, created:false});
 
     const listed = await (await fetch(`${base}/api/v1/hosts`, {headers})).json();
     expect(listed.data).toHaveLength(1);
+
+    // Editing is the same call: another address is another machine, so it gets its own record and
+    // its own code instead of inheriting the one stored for the old address.
+    const moved = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'lab', base:'http://10.0.0.5:11318'})});
+    expect(moved.status).toBe(201);
+    const elsewhere = (await moved.json()).data;
+    expect(elsewhere).toMatchObject({created:true, hasToken:false});
+    expect(elsewhere.id).not.toBe(host.id);
+    // The record the Backend is still reachable through is untouched by that failed-or-not edit.
+    expect((await fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`, {headers})).status).toBe(200);
+    expect(target!.requests.at(-1)).toMatchObject({authorization:`Bearer ${TARGET_TOKEN}`});
+  });
+
+  it('has no way to edit a record in place', async () => {
+    const {base, headers, host} = await start();
+    // The one call that could have pointed a stored pairing code at another address is gone.
+    const patched = await fetch(`${base}/api/v1/hosts/${host.id}`, {method:'PATCH', headers, body:JSON.stringify({base:'http://10.0.0.5:11318'})});
+    expect(patched.status).toBe(404);
+    const listed = await (await fetch(`${base}/api/v1/hosts`, {headers})).json();
+    expect(listed.data).toEqual([expect.objectContaining({id:host.id, base:target!.base})]);
   });
 
   it('stores a prefix a path can be appended to, and only a pairing code it could have issued', async () => {
@@ -211,6 +234,44 @@ describe('backend relay', () => {
     await server!.stop();
     server = undefined;
     await closed;
+  });
+
+  it('stops waiting for a silent target when the browser leaves, and does not hold the shutdown', async () => {
+    const {base, headers, token} = await start();
+    // Answers the TCP connect and then never sends a response line.
+    const pending:net.Socket[] = [];
+    const silent = net.createServer(socket => { pending.push(socket) });
+    await new Promise<void>(resolve => silent.listen(0, '127.0.0.1', resolve));
+    const port = (silent.address() as {port:number}).port;
+    const created = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'silent', base:`http://127.0.0.1:${port}`})});
+    const host = (await created.json()).data;
+
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const giveUp = new AbortController();
+    const relayed = fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`, {headers, signal:giveUp.signal});
+    relayed.catch(() => {});
+    await new Promise<void>(resolve => setTimeout(resolve, 200));
+    // The browser walks away; the relay gives up on the target instead of holding the forward open,
+    // and says nothing about it: an answer nobody is waiting for is not a failure.
+    giveUp.abort();
+    await expect(relayed).rejects.toThrow();
+    await new Promise<void>(resolve => setTimeout(resolve, 100));
+    expect(logged).not.toHaveBeenCalled();
+
+    // A second request is still in flight when the server goes down, and may not hold it open.
+    const stuck = fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`, {headers});
+    stuck.catch(() => {});
+    await new Promise<void>(resolve => setTimeout(resolve, 200));
+    const started = Date.now();
+    await server!.stop();
+    server = undefined;
+    expect(Date.now() - started).toBeLessThan(2000);
+    await expect(stuck).rejects.toThrow();
+    logged.mockRestore();
+
+    for (const socket of pending) socket.destroy();
+    await new Promise<void>(resolve => silent.close(() => resolve()));
+    expect(token).toBeTruthy();
   });
 
   it('reports an unreachable target instead of hanging', async () => {
