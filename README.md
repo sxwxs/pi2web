@@ -4,7 +4,7 @@ Remote Pi 在开发机上运行 Pi Agent，并通过受 Bearer 配对码保护�
 
 ## 作为 npm 全局命令安装
 
-要求 Node.js 22.19.0 或更高版本（由 `@earendil-works/pi-coding-agent` 0.84.x 决定）：
+要求 Node.js 22.19.0 或更高版本（由 `@earendil-works/pi-coding-agent` 1.1.x 决定）：
 
 ```bash
 npm install -g pi2web
@@ -23,17 +23,26 @@ pi2web --data-dir ~/.pi/remote-pi
 pi2web --rotate-access-token   # 旧配对码立即失效，输出新配对码
 pi2web --set-access-token <token>          # 手动设置配对码（16–128 位 URL-safe 字符）
 pi2web --set-access-token-env MY_TOKEN_ENV # 从环境变量读取配对码，推荐方式
-pi2web --no-auth                           # 关闭配对码认证，仅限本机监听
+pi2web --no-auth                           # 关闭配对码认证，默认仅限本机监听
+pi2web --host 0.0.0.0 --no-auth --allow-insecure-no-auth # 危险：允许无认证的远程访问
 pi2web --help
 ```
 
 服务器会同时提供 API、WebSocket 和 Web UI，无需另起静态文件服务器。请勿直接暴露到公网；远程访问建议使用 SSH tunnel、Tailscale、devtunnel 或配置 HTTPS 的可信反向代理。
 
-配对失败有速率限制：同一来源地址在 60 秒窗口内累计 10 次失败后会被锁定，锁定时间从 60 秒起按次翻倍，最长 15 分钟，HTTP 返回 `429` 与 `Retry-After`，WebSocket 升级同样受限；一次成功配对立即清除该地址的计数。注意限流按 TCP 来源地址统计，通过 devtunnel、Cloudflare Tunnel 或反向代理访问时所有客户端共用同一个计数桶。Remote Pi 不校验 `Origin` / `Host`，因此可以直接配合内网穿透使用。
+配对失败有速率限制：同一来源地址在 60 秒窗口内累计 10 次失败后会被锁定，锁定时间从 60 秒起按次翻倍，最长 15 分钟，HTTP 返回 `429` 与 `Retry-After`，WebSocket 升级同样受限；一次成功配对立即清除该地址的计数。注意限流按 TCP 来源地址统计，通过 devtunnel、Cloudflare Tunnel 或反向代理访问时所有客户端共用同一个计数桶。配对码模式下 Remote Pi 不校验 `Origin` / `Host`，因此可以直接配合内网穿透使用。
 
-完全受信任的本地环境（只在本机使用，或通过 SSH tunnel / Tailscale 访问）可以用 `--no-auth` 关掉配对码认证：Web UI 连接时配对码留空即可，也不会再询问是否保存配对码。该选项只允许绑定 `127.0.0.1`、`::1` 或 `localhost`，遇到 `0.0.0.0` 等对外地址会直接拒绝启动，避免把无认证的 Agent 控制接口暴露到网络；请勿在不受信任的网络环境中使用。
+完全受信任的本地环境（只在本机使用，或通过 SSH tunnel / Tailscale 访问）可以用 `--no-auth` 关掉配对码认证：Web UI 连接时配对码留空即可，也不会再询问是否保存配对码。该选项默认只允许绑定 `127.0.0.1`、`::1` 或 `localhost`，遇到 `0.0.0.0` 等对外地址会直接拒绝启动，避免把无认证的 Agent 控制接口暴露到网络；请勿在不受信任的网络环境中使用。
 
-没有配对码时，浏览器就是最后一道边界，所以 `--no-auth` 下服务端只响应 `Host` 为 loopback、且 `Origin`（如果带）同为 loopback 的请求，HTTP 和 WebSocket 都一样，其余一律 `403`，也不再返回 `Access-Control-Allow-Origin: *`，以免任意网页读取你的工作区或驱动 Agent。SSH tunnel（访问 `localhost:端口`）不受影响；改写 `Host` 的本机反向代理会被拒绝，请改用配对码模式。
+没有配对码时，浏览器就是最后一道边界，所以单独使用 `--no-auth` 时服务端只响应 `Host` 为 loopback、且 `Origin`（如果带）同为 loopback 的请求，HTTP 和 WebSocket 都一样，其余一律 `403`，也不再返回 `Access-Control-Allow-Origin: *`，以免任意网页读取你的工作区或驱动 Agent。SSH tunnel（访问 `localhost:端口`）不受影响；改写 `Host` 的本机反向代理会被拒绝，请改用配对码模式。
+
+如果确实需要在 `0.0.0.0`、私有 IP 或反向代理后使用无认证模式，必须同时传入例外参数：
+
+```bash
+pi2web --host 0.0.0.0 --no-auth --allow-insecure-no-auth
+```
+
+`--allow-insecure-no-auth` 必须与 `--no-auth` 一起使用；它同时放开监听地址以及 HTTP/WebSocket 的 loopback `Host` / `Origin` 限制，允许远程 Web UI 连接，配对码仍留空。启动时会输出风险警告。**任何能访问该服务的人或网页都可能读取工作区、控制 Agent 和终端**；仅用于已有防火墙、访问控制或可信代理保护的环境，不要直接暴露到公网。不加例外参数时，原有的本机限制保持不变。
 
 配对码默认随机生成；也可以用 `--set-access-token <token>` 或 `--set-access-token-env <环境变量名>` 手动指定。自定义值必须由 16–128 个 URL-safe 字符组成（字母、数字、`.`、`_`、`~`、`-`），这样它能安全用于 HTTP 和 WebSocket 认证。环境变量方式不会把配对码暴露在进程列表中，推荐优先使用。手动设置的配对码同样只保存 sha256 hash，后续可用 `--rotate-access-token` 换回随机码。
 
@@ -71,7 +80,7 @@ pi2web --help
 
 ## Agent 完成邮件通知（MailDispatch）
 
-如果启动时同时配置 MailDispatch 消息 API endpoint、API key 环境变量和通知邮箱，Pi 发出 `agent_settled`（不会再自动重试、自动 compact 或执行排队的 follow-up）后，Remote Pi 可以提交事务邮件。MailDispatch 返回 `202` 后邮件进入其持久队列；实际投递由 MailDispatch worker 完成。
+如果启动时同时配置 MailDispatch 消息 API endpoint、API key 环境变量和通知邮箱，Pi 发出 `agent_settled`（不会再自动重试、自动 compact 或执行排队的 follow-up）后，Remote Pi 可以提交事务邮件。被用户取消的运行（`agent_settled` 带 `aborted`）会写成"已中断"而不是"已完成"，语音播报则直接跳过。MailDispatch 返回 `202` 后邮件进入其持久队列；实际投递由 MailDispatch worker 完成。
 
 ```bash
 export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
@@ -213,7 +222,10 @@ Web 端能力：
 - 创建/恢复 Session、Agent 列表、停止与 abort；Agent 右键 Archive。
 - Prompt、steer、follow-up 和流式对话。
 - 对话区只保留用户输入、Agent 输出、Thinking、Extension 对话框和错误；Tool call、Session bash 输出、Retry、Summarization retry 等过程事件自动折叠成一张"活动"卡片，卡片标题实时显示最新一项的名称和时间，展开后逐条查看，再点击单条查看内容。
-- 同一次 Tool call 的 start / update / end 合并为一张卡片（参数 + 输出 + 结果）。
+- 同一次 Tool call 的 start / update / end 合并为一张卡片（参数 + 输出 + 结果），结束后显示 Pi 记录的执行耗时。
+- Tool 自己发起的调用（codemode 脚本、MCP 批量调用）带 `parentToolCallId`，会嵌套显示在发起它的那张卡片里。
+- steer / follow-up 发送后会提示消息是被当前回合直接接收还是进入队列；有排队消息时输入框上方显示队列条，可一键清空并把内容放回输入框。
+- 工具栏 `MCP` 按钮列出当前 Agent 读取到的 MCP 服务器（来源、传输方式、exposure），可启用/停用；修改写入 `mcp.json`，在 Agent 下次加载时生效。
 - 输入 `/` 浏览并补全当前目录可用的 prompt template 和 skill（由 Pi session 自行展开）。
 - 输入 `!命令` 在 Agent Session 内执行 Shell 并把输出写入上下文，`!!命令` 只执行不写入上下文。
 - Session 命名、Tree Navigate、Undo/Fork、Compact。
@@ -325,7 +337,9 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET/POST /api/v1/terminals`
 - `GET/DELETE /api/v1/terminals/:id`
 - Terminal WebSocket `/api/v1/terminals/:id/ws` 支持输入、窗口 resize、输出快照和退出事件。
-- Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork`、`archive`、`extension-response`、`commands`、`bash` 和 `bash-abort` 接口。
+- Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork`、`archive`、`extension-response`、`commands`、`bash` 和 `bash-abort` 接口。`steer` 与 `follow-up` 的响应带 `disposition`（`handled` 表示当前回合已接收，`queued` 表示排队等待）。
+- `GET /api/v1/agents/:id/queue` 返回排队中的 steer / follow-up 消息，`DELETE` 清空并返回被清掉的消息，便于客户端放回输入框；队列变化通过 `queue_update` 事件推送。WebSocket 的 `clear-queue` 命令等价。
+- `GET /api/v1/agents/:id/mcp` 返回该 Agent cwd 下的 MCP 服务器配置（全局 `mcp.json` 与受信任项目的 `.pi/mcp.json`），`POST` 用 `{name, enabled}` 启用或停用。只有项目被 Pi 显式信任时才会写入项目级覆盖，否则写全局文件。修改在 Agent 下次加载时生效。
 - `GET /api/v1/agents/:id/commands` 返回该 Agent cwd 下可用的 prompt template 和 skill（`{name, description, argumentHint, source}`）。`prompt` 接口本身会展开 `/命令`、skill 和 prompt template。
 - `POST /api/v1/agents/:id/bash` 在 Agent Session 内执行命令（`{command, excludeFromContext}`），输出通过 `bash_execution_update` 事件流式推送并记录到 Session；`POST /api/v1/agents/:id/bash-abort` 取消。
 - WebSocket `/api/v1/ws` 支持 sequence、replay、snapshot、`fromNow` 和 Agent command；`subscribe_collab` 推送协作事件。

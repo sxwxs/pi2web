@@ -16,7 +16,7 @@
     streams: new Map(), contextTarget: null,
     mentionPath: '.', mentionStart: null, mentionEnd: null, mentionPrefix: '', mentionOptions: [], mentionFiltered: [], mentionIndex: 0, mentionRequest: 0,
     extensionStatus: new Map(), widgets: new Map(), contexts: new Map(), mobileView: 'home',
-    toolCards: new Map(), commands: [], commandsAgentId: null, commandFiltered: [], commandIndex: 0, commandRequest: 0,
+    queues: new Map(), toolCards: new Map(), commands: [], commandsAgentId: null, commandFiltered: [], commandIndex: 0, commandRequest: 0,
     agentPageSize: Number(localStorage.rpAgentPageSize || 10), agentVisibleCount: Number(localStorage.rpAgentPageSize || 10), messagePageStart: 0, messageTotal: 0, messagePageSize: 25,
     voiceEnabled: false, voiceSttEnabled: false, voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true', voiceAudio: {context:null,nextTime:0,playbackId:null,backendId:null,sources:new Set(),decodeChain:Promise.resolve(),generation:0}, mediaRecorder:null, mediaChunks:[], mediaStream:null, mediaTimer:null, mediaAgentId:null,
     mailBackendId: null, mailRequest: 0, mailNotificationsAvailable:false,
@@ -751,7 +751,10 @@
     else if (agent) await selectAgent(agent, false);
   }
   function setAgentStatus(agentId,status) {
-    const agent=state.agents.find(x=>x.agentId===agentId);if(!agent){void refreshAgents();return null;}agent.status=status;if(state.agent?.agentId===agentId)state.agent.status=status;sessionKeyboard.updateAgent(agent);renderAgentList();updateAgentHeader();return agent;
+    const agent=state.agents.find(x=>x.agentId===agentId);if(!agent){void refreshAgents();return null;}
+    // Every event reports the status, so an unchanged one must not rebuild the list for each delta.
+    if(agent.status===status)return agent;
+    agent.status=status;if(state.agent?.agentId===agentId)state.agent.status=status;sessionKeyboard.updateAgent(agent);renderAgentList();updateAgentHeader();return agent;
   }
   function updateAgentHeader(agent = state.agent) {
     if (!agent) return;
@@ -869,7 +872,7 @@
     if (openView) navigateMobile('agent');
     void syncWorkspaceForSelection(agent);
     if (ownsPath(state.workspace, agent)) $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
-    $('messages').replaceChildren(); discardStreams();state.messagePageStart=0;state.messageTotal=0;closeCommandPicker();state.commands=[];state.commandsAgentId=null;
+    $('messages').replaceChildren(); discardStreams();state.messagePageStart=0;state.messageTotal=0;closeCommandPicker();state.commands=[];state.commandsAgentId=null;renderQueueBar();
     try { await loadMessagePage(agent.agentId,undefined,true); await loadSessionIdentity(); } catch (error) { addCard('加载消息失败', error.message, 'error', true); }
     renderAgentList();
     const backend=backendOf(agent.backendId);
@@ -921,13 +924,14 @@
     group.querySelector('.activity-count').textContent=`${count} 项`;
     const time=eventTime(timestamp);if(time)group.querySelector('.event-time').textContent=time;
   }
-  function addCard(title, content, kind = 'system', open = false, timestamp, target = $('messages'), autoScroll = true) {
+  // `grouped` is false for cards that already live inside another card, such as nested tool calls.
+  function addCard(title, content, kind = 'system', open = false, timestamp, target = $('messages'), autoScroll = true, grouped = true) {
     const derivedTitle=!title,details=document.createElement('details'); details.className = `msg ${kind}${derivedTitle?' derived-title':''}`; details.open = open;
     const summary=document.createElement('summary'),summaryText=document.createElement('span'),summaryLabel=document.createElement('span');summaryText.className='summary-text';summaryText.textContent=title||String(content).trim()||kind;summaryLabel.className='summary-label';summaryLabel.textContent=kind==='user'?'You':kind==='assistant'?'Assistant':kind;summary.append(summaryText,summaryLabel);
     const time=document.createElement('span'); time.className='event-time'; time.textContent=eventTime(timestamp); summary.append(time);
     const body = document.createElement('div'); body.className = 'msg-content';renderCardBody(body,content,kind==='assistant');
     details.append(summary, body);
-    const group=TRANSCRIPT_KINDS.has(kind)?null:activityGroup(target);
+    const group=!grouped||TRANSCRIPT_KINDS.has(kind)?null:activityGroup(target);
     (group?group.querySelector('.activity-items'):target).append(details);
     if(group)updateActivityGroup(group,title||kind,timestamp);
     if(autoScroll&&target===$('messages'))$('messages').scrollTop = $('messages').scrollHeight;
@@ -937,10 +941,18 @@
   function upsertToolCard(ev, timestamp) {
     const key=`tool:${ev.toolCallId||ev.toolName||'tool'}`,existing=state.toolCards.get(key);
     const args=ev.args&&Object.keys(ev.args).length?JSON.stringify(ev.args,null,2):'';
+    // Pi 0.99+ runs tools from other tools (codemode scripts, MCP batches). Such calls carry
+    // `parentToolCallId`; show them inside the caller instead of as separate activity entries.
+    const parent=ev.parentToolCallId?state.toolCards.get(`tool:${ev.parentToolCallId}`):null;
+    const newCard=()=>parent?addCard(`🔧 ${ev.toolName||'Tool'}`,args,'tool',false,timestamp,nestedContainer(parent),false,false)
+      :addCard(`🔧 ${ev.toolName||'Tool'}`,args,'tool',false,timestamp);
     if (ev.type==='tool_execution_start') {
-      const card=addCard(`🔧 ${ev.toolName||'Tool'}`,args,'tool',false,timestamp);card.toolName=ev.toolName||'Tool';card.args=args;state.toolCards.set(key,card);return card;
+      // A replayed start can follow a restored pending card for the same call; keep that card so
+      // the end event finishes it rather than a duplicate.
+      if(existing){existing.summaryTime.textContent=eventTime(timestamp);return existing;}
+      const card=newCard();card.toolName=ev.toolName||'Tool';card.args=args;state.toolCards.set(key,card);return card;
     }
-    const card=existing||addCard(`🔧 ${ev.toolName||'Tool'}`,args,'tool',false,timestamp);
+    const card=existing||newCard();
     if(!existing){card.toolName=ev.toolName||'Tool';card.args=args;state.toolCards.set(key,card);}
     if (ev.type==='tool_execution_update') {
       const partial=textContent(ev.partialResult?.content??ev.partialResult)||(ev.partialResult?JSON.stringify(ev.partialResult):'');
@@ -952,10 +964,37 @@
     const result=textContent(ev.result?.content??ev.result)||(ev.result&&!ev.result.content?JSON.stringify(ev.result,null,2):'')||(ev.isError?'执行失败':'执行完成');
     card.details.classList.toggle('tool-error',!!ev.isError);
     card.summaryText.textContent=`${ev.isError?'✗':'✓'} ${card.toolName}`;
+    setToolDuration(card,ev.durationMs);
     renderCardBody(card.body,`${card.args}\n\n— 结果 —\n${result}`);
     card.summaryTime.textContent=eventTime(timestamp);
     if(card.group)updateActivityGroup(card.group,card.summaryText.textContent,timestamp);
     state.toolCards.delete(key);
+    return card;
+  }
+  /**
+   * Nested calls live next to their caller's body, not inside it: the body is replaced whenever the
+   * caller streams output or finishes.
+   */
+  function nestedContainer(card) {
+    let box=card.details.querySelector('.nested-tools');
+    if(!box){box=document.createElement('div');box.className='nested-tools';card.details.append(box);}
+    return box;
+  }
+  /** Pi 0.99+ reports the recorded execution time of a finished tool call. */
+  function setToolDuration(card, durationMs) {
+    const value=Number(durationMs);
+    if(!Number.isFinite(value)||value<0)return;
+    const label=card.durationLabel||(card.durationLabel=Object.assign(document.createElement('span'),{className:'tool-duration'}));
+    label.textContent=value<1000?`${Math.round(value)} ms`:value<60000?`${(value/1000).toFixed(1)} s`:`${Math.floor(value/60000)} 分 ${Math.round(value%60000/1000)} 秒`;
+    card.summaryTime.before(label);
+  }
+  /** A tool call that has no toolResult yet: the only visible sign that a long tool is still running. */
+  function addPendingToolCard(call, timestamp, target) {
+    const name=call.name||'Tool',args=call.arguments&&Object.keys(call.arguments).length?JSON.stringify(call.arguments,null,2):'';
+    const card=addCard(`⏳ ${name} · 执行中`,args,'tool',false,timestamp,target,false);
+    card.toolName=name;card.args=args;
+    // Keyed like upsertToolCard so the live tool_execution_update/end event finishes this very card.
+    if(call.id)state.toolCards.set(`tool:${call.id}`,card);
     return card;
   }
   /** Session bash emits start, optional output deltas, and one completion event. */
@@ -971,8 +1010,11 @@
     renderCardBody(card.body,card.content);card.summaryTime.textContent=eventTime(timestamp);
     if(card.group)updateActivityGroup(card.group,card.summaryText.textContent,timestamp);
   }
-  function renderMessages(messages, target = $('messages'), showEmpty = true) {
+  // `pending` is only safe for the newest page: an older page can end mid tool call whose result
+  // lives in the next page, and that call is not actually running.
+  function renderMessages(messages, target = $('messages'), showEmpty = true, pending = false) {
     if (!messages?.length) { if(showEmpty&&target===$('messages'))$('messages').innerHTML = '<div class="empty">尚无消息</div>'; return; }
+    const resolved = pending ? new Set(messages.filter(m=>m?.role==='toolResult'&&m.toolCallId).map(m=>m.toolCallId)) : null;
     for (const message of messages) {
       const role=message.role||'event',timestamp=message.timestamp;
       if(role==='bashExecution'){
@@ -982,12 +1024,14 @@
         for (const part of message.content) {
           if (part.type === 'text' && part.text) addCard(null,part.text,'assistant',false,timestamp,target,false);
           else if (part.type === 'thinking' && (part.thinking||part.text)) addCard('Thinking',part.thinking||part.text,'thinking',false,timestamp,target,false);
-          // Completed historical tools are represented by their toolResult message below.
+          // Completed historical tools are represented by their toolResult message below; only a tool
+          // call still waiting for its result needs a card of its own.
+          else if (part.type === 'toolCall' && resolved && !resolved.has(part.id)) addPendingToolCard(part,timestamp,target);
         }
         const error=assistantError(message);if(error)addCard('LLM Error',error,'error',true,timestamp,target,false);
       } else if(role==='toolResult'){
         const failed=!!message.isError,content=textContent(message.content)||(failed?'执行失败':'执行完成');
-        const card=addCard(`${failed?'✗':'✓'} ${message.toolName||'Tool'}`,content,'tool',false,timestamp,target,false);card.details.classList.toggle('tool-error',failed);
+        const card=addCard(`${failed?'✗':'✓'} ${message.toolName||'Tool'}`,content,'tool',false,timestamp,target,false);card.details.classList.toggle('tool-error',failed);setToolDuration(card,message.durationMs);
       } else { const content=textContent(message.content);if(content)addCard(['user','assistant'].includes(role)?null:role,content,role==='user'?'user':role==='assistant'?'assistant':'system',false,timestamp,target,false); }
     }
     if(target===$('messages'))$('messages').scrollTop=$('messages').scrollHeight;
@@ -1000,13 +1044,14 @@
   }
   async function loadAllMessages(agentId,button) {
     button.disabled=true;button.textContent='正在加载全部对话…';
-    try { const messages=await requestAgent(agentId,'/messages');if(state.agent?.agentId!==agentId)return;const box=$('messages');box.replaceChildren();renderMessages(messages);state.messagePageStart=0;state.messageTotal=messages.length;updateMessageHistoryControl(); }
+    try { const messages=await requestAgent(agentId,'/messages');if(state.agent?.agentId!==agentId)return;const box=$('messages');box.replaceChildren();state.toolCards.clear();renderMessages(messages,box,true,true);state.messagePageStart=0;state.messageTotal=messages.length;updateMessageHistoryControl(); }
     finally { button.disabled=false;button.textContent='加载全部对话'; }
   }
   async function loadMessagePage(agentId,before,reset) {
     const query=new URLSearchParams({limit:String(state.messagePageSize)});if(before!==undefined)query.set('before',String(before));
     const page=await requestAgent(agentId,`/messages?${query}`);if(state.agent?.agentId!==agentId)return;
-    const box=$('messages'),oldHeight=box.scrollHeight,oldTop=box.scrollTop,fragment=document.createDocumentFragment();renderMessages(page.items,fragment,false);
+    const box=$('messages'),oldHeight=box.scrollHeight,oldTop=box.scrollTop,fragment=document.createDocumentFragment();
+    if(reset)state.toolCards.clear();renderMessages(page.items,fragment,false,!!reset);
     if(reset){box.replaceChildren(fragment);state.messageTotal=page.total;}else{box.querySelector('#messageHistoryControls')?.remove();box.prepend(fragment);}
     state.messagePageStart=page.start;state.messageTotal=page.total;updateMessageHistoryControl();
     if(reset)box.scrollTop=box.scrollHeight;else box.scrollTop=oldTop+(box.scrollHeight-oldHeight);
@@ -1039,6 +1084,22 @@
     else if (ev.kind === 'confirm') { for (const [label, value] of [['否',false],['是',true]]) { const b=document.createElement('button');b.textContent=label;b.onclick=()=>send(value);controls.append(b); } }
     else { const input = ev.kind === 'editor' ? document.createElement('textarea') : document.createElement('input'); input.value = ev.prefill || ''; input.placeholder = ev.placeholder || ''; const b = document.createElement('button'); b.textContent = '提交'; b.onclick = () => send(input.value); controls.append(input,b); }
     card.body.append(controls);
+  }
+  /** Steering and follow-up messages Pi has queued for the running turn. */
+  function setAgentQueue(agentId, queue) {
+    const value={steering:queue?.steering||[], followUp:queue?.followUp||[]};
+    if(value.steering.length||value.followUp.length)state.queues.set(agentId,value); else state.queues.delete(agentId);
+    if(state.selectedKind==='agent'&&state.agent?.agentId===agentId)renderQueueBar();
+  }
+  function renderQueueBar() {
+    const queue=state.agent?state.queues.get(state.agent.agentId):null,bar=$('queueBar');
+    if(!queue){bar.hidden=true;return;}
+    const parts=[];
+    if(queue.steering.length)parts.push(`Steer ${queue.steering.length}`);
+    if(queue.followUp.length)parts.push(`Follow-up ${queue.followUp.length}`);
+    const preview=[...queue.steering,...queue.followUp][0]||'';
+    $('queueText').textContent=`排队中：${parts.join(' · ')}${preview?` — ${preview.replace(/\s+/g,' ').slice(0,60)}`:''}`;
+    bar.hidden=false;
   }
   function restoreExtensionRequests(agentId, activity) {
     if (state.selectedKind !== 'agent' || state.agent?.agentId !== agentId || !activity?.dialogRequests) return;
@@ -1107,6 +1168,7 @@
       // replacing standalone operation IDs, without touching the transcript.
       sessionKeyboard.updateAgent({...message.state, agentId:message.agentId});
       setAgentStatus(message.agentId, message.state.status);
+      setAgentQueue(message.agentId, message.state.activity?.queue);
       restoreExtensionRequests(message.agentId, message.state.activity);
       return;
     }
@@ -1115,9 +1177,10 @@
       if (message.state) {
         sessionKeyboard.setAgentSnapshot({...message.state, agentId:message.agentId});
         setAgentStatus(message.agentId, message.state.status);
+        setAgentQueue(message.agentId, message.state.activity?.queue);
       }
       if (state.agent?.agentId === message.agentId) {
-        discardStreams(); $('messages').replaceChildren(); renderMessages(message.messages);
+        discardStreams(); $('messages').replaceChildren(); renderMessages(message.messages,$('messages'),true,true);
         state.messagePageStart = message.messagePage?.start || 0;
         state.messageTotal = message.messagePage?.total ?? message.messages?.length ?? 0;
         updateMessageHistoryControl();
@@ -1131,16 +1194,20 @@
     sessionKeyboard.handleAgentEvent(message.agentId, ev);
     let eventAgent=state.agents.find(x=>x.agentId===message.agentId);
     if(eventAgent&&Number(message.timestamp)>0)eventAgent.lastActiveAt=new Date(Number(message.timestamp)*1000).toISOString();
+    // The server sends the authoritative status with every event, including dialog waits. Backends
+    // older than this field still report their lifecycle events, so those stand in for it.
+    const liveStatus=message.status||(ev.type==='agent_start'||ev.type==='auto_retry_start'?'streaming':ev.type==='agent_end'?(ev.willRetry?'streaming':'idle'):ev.type==='agent_settled'?'idle':null);
+    if (liveStatus) eventAgent=setAgentStatus(message.agentId, liveStatus)||eventAgent;
+    if (ev.type === 'queue_update') { setAgentQueue(message.agentId, ev); return; }
     if (ev.type === 'agent_unloaded') {
       setAgentStatus(message.agentId, 'unloaded');
+      setAgentQueue(message.agentId, null);
       restoreExtensionRequests(message.agentId, {dialogRequests:[]});
       return;
     }
-    if (ev.type === 'agent_start' || ev.type === 'auto_retry_start') eventAgent=setAgentStatus(message.agentId,'streaming')||eventAgent;
-    else if (ev.type === 'agent_end') {
-      const final=!ev.willRetry;eventAgent=setAgentStatus(message.agentId,final?'idle':'streaming')||eventAgent;
-      if(final){if(selected)finalizeAgentStreams();notifyComplete(eventAgent||{agentId:message.agentId},message.timestamp);if(eventAgent)void loadAgentContexts([eventAgent]);}
-    } else if (ev.type === 'agent_settled') { eventAgent=setAgentStatus(message.agentId,'idle')||eventAgent;if(eventAgent)void loadAgentContexts([eventAgent]); }
+    if (ev.type === 'agent_end') {
+      if(!ev.willRetry){if(selected)finalizeAgentStreams();notifyComplete(eventAgent||{agentId:message.agentId},message.timestamp);if(eventAgent)void loadAgentContexts([eventAgent]);}
+    } else if (ev.type === 'agent_settled') { if(eventAgent)void loadAgentContexts([eventAgent]); }
     else if (ev.type === 'session_info_changed') { if(eventAgent)eventAgent.sessionName=ev.name||undefined;if(selected)state.agent.sessionName=ev.name||undefined;renderAgentList();if(selected)updateAgentHeader(); }
     if (!selected) return;
     if (ev.type === 'agent_start') { $('messages').querySelector('.empty')?.remove(); }
@@ -1407,6 +1474,35 @@
     if(result){if(result.model)await postAgent(state.agent.agentId,'/model',{provider:result.model[0],modelId:result.model[1]});if(result.thinking)await postAgent(state.agent.agentId,'/thinking',{level:result.thinking});toast('设置已更新');}
   }
 
+  /** MCP servers Pi reads from mcp.json. Toggling writes the config; a session picks it up when it loads. */
+  async function mcpControls() {
+    if(!state.agent)return toast('请选择 Agent');
+    const agentId=state.agent.agentId;
+    const render=(overview,list)=>{
+      list.replaceChildren();
+      if(!overview.servers.length){const empty=document.createElement('p');empty.className='muted';empty.textContent='没有配置 MCP 服务器。在 mcp.json 中添加后会显示在这里。';list.append(empty);}
+      for(const server of overview.servers){
+        const row=document.createElement('div');row.className=`mcp-row${server.enabled?'':' mcp-off'}`;
+        const info=document.createElement('div');info.className='mcp-info';
+        const name=document.createElement('b');name.textContent=server.name;
+        const detail=document.createElement('small');detail.className='muted';
+        detail.textContent=`${server.transport} · ${server.exposure} · ${server.scope==='project'?'项目':'全局'}${server.override?'（项目覆盖）':''}\n${server.description||server.target}`;
+        info.append(name,detail);
+        const toggle=document.createElement('button');toggle.type='button';toggle.textContent=server.enabled?'停用':'启用';
+        toggle.onclick=async()=>{
+          toggle.disabled=true;
+          try{render(await postAgent(agentId,'/mcp',{name:server.name,enabled:!server.enabled}),list);toast('已保存，重新加载 Agent 后生效');}
+          catch(error){toast(`修改失败：${error.message}`);toggle.disabled=false;}
+        };
+        row.append(info,toggle);list.append(row);
+      }
+      for(const error of overview.errors||[]){const line=document.createElement('p');line.className='mcp-error';line.textContent=error;list.append(line);}
+      if(!overview.projectTrusted){const note=document.createElement('p');note.className='muted';note.textContent='项目未被信任，因此忽略 .pi/mcp.json，修改会写入全局配置。';list.append(note);}
+    };
+    const overview=await requestAgent(agentId,'/mcp');
+    await modal('MCP 服务器',body=>{const list=document.createElement('div');list.className='mcp-list';render(overview,list);body.append(list);return null;},'关闭');
+  }
+
   $('pairCancel').onclick=()=>$('pairDialog').close();
   $('modalCancel').onclick=()=>$('modal').close('cancel');
   $('pairForm').onsubmit = async event => {
@@ -1460,13 +1556,28 @@
   $('menuStartAgent').onclick=()=>startAgent(state.contextTarget.relativePath);$('menuOpenTerminal').onclick=()=>openTerminal(state.contextTarget.relativePath);$('menuSetCwd').onclick=()=>{$('agentCwd').value=state.contextTarget.relativePath;$('contextMenu').hidden=true;};$('menuMention').onclick=()=>{insertMention(state.contextTarget.relativePath);$('contextMenu').hidden=true;};$('menuBindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void bindKeyboard({agentId:agent.agentId}).catch(error=>toast(error.message));};$('menuKeyboardColor').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent)void changeKeyboardColor(agent).catch(error=>toast(error.message));};$('menuUnbindKeyboard').onclick=()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(agent&&sessionKeyboard.unbind(agent.agentId))toast('已取消键盘按键绑定');};$('menuCloseTerminal').onclick=()=>{const terminal=agentContextTarget?.kind==='terminal'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal(terminal);};$('menuArchiveAgent').onclick=async()=>{const agent=agentContextTarget?.kind==='agent'?agentContextTarget.item:null;$('agentContextMenu').hidden=true;if(!agent||!confirm('Archive 这个 Agent？Pi Session 文件不会被修改。'))return;try{await postAgent(agent.agentId,'/archive');sessionKeyboard.unbind(agent.agentId);if(state.agent?.agentId===agent.agentId){state.agent=null;localStorage.removeItem('rpAgentId');$('agentTitle').textContent='请选择 Agent';$('agentStatus').textContent='';$('agentStateBadge').textContent='未选择';$('agentStateBadge').className='state-badge state-none';$('contextUsage').hidden=true;$('messages').innerHTML='<div class="empty">选择或创建 Agent 开始对话</div>'}await refreshAgents();toast('Agent 已 Archive')}catch(e){toast(e.message)}};document.addEventListener('click',e=>{if(!$('contextMenu').contains(e.target))$('contextMenu').hidden=true;if(!$('agentContextMenu').contains(e.target))$('agentContextMenu').hidden=true;});
   $('newAgent').onclick=createAgent;$('newTerminal').onclick=()=>openTerminal($('agentCwd').value.trim()||'.');$('abort').onclick=()=>{if(!state.agent)return;const id=state.agent.agentId;Promise.all([postAgent(id,'/abort'),postAgent(id,'/bash-abort')]).catch(e=>toast(e.message));};$('stop').onclick=async()=>{if(state.agent&&confirm('停止这个 Agent？之后再次使用时会按需启动。')){await requestAgent(state.agent.agentId,'',{method:'DELETE'});setAgentStatus(state.agent.agentId,'unloaded');}};
   $('sessionName').onclick=async()=>{if(!state.agent)return;const result=await modal('Session 名称',body=>{const n=field(body,'名称',state.agent.sessionName||'');return()=>n.value.trim();});if(result){const s=await postAgent(state.agent.agentId,'/session-name',{name:result});state.agent.sessionName=s.sessionName||result;updateAgentHeader();await refreshAgents();}};
+  $('mcp').onclick=()=>mcpControls().catch(e=>toast(e.message));
   $('sessionTree').onclick=()=>showSessionTree().catch(e=>toast(e.message));$('undo').onclick=()=>revert().catch(e=>toast(e.message));$('controls').onclick=()=>modelControls().catch(e=>toast(e.message));$('compact').onclick=async()=>{if(!state.agent)return;const instructions=await modal('Compact',body=>{const n=field(body,'可选指令');return()=>n.value;},'开始');if(instructions!==null){await postAgent(state.agent.agentId,'/compact',{instructions:instructions||undefined});toast('Compact 完成');}};
   $('prompt').onsubmit=async event=>{event.preventDefault();if(!state.agent)return toast('请先创建或选择 Agent');const text=$('input').value.trim();if(!text)return;closeCommandPicker();const mode=$('sendMode').value,agentId=state.agent.agentId,sequenceBefore=localStorage[`rpSeq:${agentId}`];$('messages').querySelector('.empty')?.remove();
     // `!cmd` runs inside the Agent session (output is recorded in the Session); `!!cmd` keeps the output out of the model context.
     if(text.startsWith('!')){const excludeFromContext=text.startsWith('!!'),command=text.slice(excludeFromContext?2:1).trim();if(!command)return toast('请输入要执行的命令');addCard(null,text,'user');$('input').value='';
-      try{await postAgent(agentId,'/bash',{command,excludeFromContext});if(state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.toolCards.clear();}}catch(e){toast(`命令失败：${e.message}`);}return;}
-    addCard(null,text,'user');$('input').value='';try{await postAgent(agentId,`/${mode}`,{message:text});if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
+      try{await postAgent(agentId,'/bash',{command,excludeFromContext});if(state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);}}catch(e){toast(`命令失败：${e.message}`);}return;}
+    addCard(null,text,'user');$('input').value='';try{const sent=await postAgent(agentId,`/${mode}`,{message:text});if(mode!=='prompt'&&sent?.disposition)toast(sent.disposition==='queued'?'已排队，等待当前回合':'已送达当前回合');if(mode==='prompt'&&state.agent?.agentId===agentId&&localStorage[`rpSeq:${agentId}`]===sequenceBefore){await loadMessagePage(agentId,undefined,true);state.streams.clear();}}catch(e){addCard('发送失败',e.message,'error',true);}};
   $('input').onkeydown=event=>{if(!$('commandPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setCommandSelection(state.commandIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||(event.key==='Enter'&&!event.ctrlKey&&!event.metaKey)){event.preventDefault();chooseCommand(state.commandFiltered[state.commandIndex]);return;}if(event.key==='Escape'){event.preventDefault();closeCommandPicker();return;}}if(!$('mentionPicker').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();setMentionSelection(state.mentionIndex+(event.key==='ArrowDown'?1:-1));return;}if(event.key==='Tab'||event.key==='Enter'){event.preventDefault();chooseMention(state.mentionFiltered[state.mentionIndex],event.key==='Enter');return;}if(event.key==='Escape'){event.preventDefault();closeMention();return;}}if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){$('prompt').requestSubmit();}};$('input').oninput=()=>{const command=commandContext();if(command){if(!$('mentionPicker').hidden)closeMention();void openCommandPicker(command.query);return;}if(!$('commandPicker').hidden)closeCommandPicker();const context=mentionContext();if(!context){if(!$('mentionPicker').hidden)closeMention();return;}const fresh=$('mentionPicker').hidden||state.mentionStart!==context.start;state.mentionStart=context.start;state.mentionEnd=context.replacementEnd;if(fresh){state.mentionPrefix='';void openMention(state.treePath,context.query);return;}const filter=state.mentionPrefix&&context.query.startsWith(state.mentionPrefix)?context.query.slice(state.mentionPrefix.length):context.query;renderMentionItems(filter);};
+  // Clearing hands the queued messages back, so nothing typed is lost when a run is redirected.
+  $('queueClear').onclick=async()=>{
+    if(!state.agent)return;const agentId=state.agent.agentId;
+    try{
+      // The server's queue_update event clears the banner; applying an empty queue here would hide a
+      // message queued in the meantime.
+      const cleared=await requestAgent(agentId,'/queue',{method:'DELETE'});
+      const restored=[...(cleared.steering||[]),...(cleared.followUp||[])].join('\n');
+      // The composer is shared, so restoring into another Agent's input would send the text there.
+      if(restored&&state.agent?.agentId!==agentId)return toast('队列已清空，但已切换 Agent，内容未放回输入框');
+      if(restored){const input=$('input');input.value=input.value.trim()?`${restored}\n${input.value}`:restored;input.focus();}
+      toast(restored?'队列已清空，内容已放回输入框':'队列已清空');
+    }catch(error){toast(`清空队列失败：${error.message}`);}
+  };
   $('commandClose').onclick=closeCommandPicker;
   $('mentionUp').onclick=()=>browseMention(parentPath(state.mentionPath));$('mentionClose').onclick=closeMention;
   $('workspaceBack').onclick=()=>mobileBack('home');$('fileBack').onclick=()=>mobileBack('workspace');$('agentBack').onclick=()=>mobileBack('home');$('terminalBack').onclick=()=>mobileBack('home');$('terminalClear').onclick=()=>state.terminalEmulator?.clear();$('terminalClose').onclick=()=>{if(state.terminal&&confirm('关闭这个 Terminal？正在运行的进程会被终止。'))void closeTerminal();};

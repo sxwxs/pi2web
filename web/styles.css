@@ -70,3 +70,19 @@
 .keyboard-slot-actions{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
 .keyboard-slot-actions button{padding:4px 6px;font-size:12px}
 @media(max-width:700px){.keyboard-slots{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Queued steering/follow-up messages waiting for the running turn. */
+#queueBar{display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:6px 10px;font-size:12px;color:#161c24;background:var(--blue);border-radius:6px}
+#queueBar span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#queueBar button{padding:3px 8px;font-size:12px;color:#161c24;background:#ffffffcc;border-color:#ffffff66}
+/* Tool calls a tool made itself (codemode scripts, MCP batches) stay inside their caller's card. */
+.nested-tools{margin-top:10px;padding-left:10px;border-left:2px solid var(--line)}
+.nested-tools .msg{margin:5px 0}
+.tool-duration{margin-left:8px;font-size:11px;color:var(--muted)}
+/* MCP server list: what Pi reads from mcp.json, with an enable/disable toggle. */
+.mcp-list{max-height:55vh;overflow:auto}
+.mcp-row{display:flex;align-items:center;gap:10px;margin:6px 0;padding:9px;background:var(--input);border-radius:6px}
+.mcp-row.mcp-off{opacity:.6}
+.mcp-info{flex:1;min-width:0}
+.mcp-info small{display:block;margin-top:3px;white-space:pre-wrap;word-break:break-word}
+.mcp-error{color:var(--red);white-space:pre-wrap;word-break:break-word}
