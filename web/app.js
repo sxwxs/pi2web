@@ -1533,7 +1533,8 @@
     $('pairSubmit').disabled = true;
     // A record this submission created and that no Backend owns yet: if the connection never comes
     // up, it has to go, or the target's pairing code stays on the relay with nothing pointing at it.
-    let createdHost = null;
+    // The Backend being edited and the route it already had are kept for the same reason.
+    let createdHost = null, existing = null, previous = null;
     try {
       const base = $('pairBase').value.trim().replace(/\/$/, '');
       const token = $('pairToken').value;
@@ -1542,20 +1543,29 @@
         try { name = new URL(base).hostname; } catch {}
       }
       const editingId = $('pairDialog').dataset.backendId, relayVia = $('pairRelayVia').value;
-      const existing = backendOf(editingId) || backendRegistry.findByBase(base, relayVia);
+      existing = backendOf(editingId) || backendRegistry.findByBase(base, relayVia);
       // Where this Backend was reached before. Its record holds the target's pairing code, so it may
       // only be dropped once the new route has proved it works.
-      const previous = existing?.relayHostId ? {via:existing.relayVia, hostId:existing.relayHostId} : null;
+      previous = existing?.relayHostId ? {via:existing.relayVia, hostId:existing.relayHostId} : null;
       let entry = {id:existing?.id || createBackendId(), name, base, token, saved:existing?.saved || false};
+      // A Backend others are relayed through is the address they are reached at: moving it, or putting
+      // it behind a relay itself, takes that address away and leaves their records on a server nothing
+      // in this browser points at any more.
+      const children = existing ? relayChildren(state.backends, existing.id) : [];
+      if (children.length && (relayVia || base !== existing.base)) {
+        throw Error(`「${existing.name}」正在为 ${children.length} 个 backend 中继，改地址或改成中继连接都会让它们失联；请先把它们删掉或改走别的中继`);
+      }
       if (relayVia) {
-        const children = existing ? relayChildren(state.backends, existing.id) : [];
-        if (children.length) throw Error(`「${existing.name}」正在为 ${children.length} 个 backend 中继，不能再把它自己改成中继连接`);
         // The relay stores the target pairing code; this browser only keeps the host id. The same
         // address returns the record it already has, a different one gets its own: an edit that moves
         // a Backend to another machine never writes that machine's address over the old record.
         const host = await postBackend(relayVia, '/api/v1/hosts', {name, base, token});
         if (host.created) createdHost = {name, base, relayVia, relayHostId:host.id};
-        entry = {...entry, token:'', relayHostId:host.id, relayVia};
+        // The relay decides which addresses are the same machine. One record is one Backend here too,
+        // so an address spelled differently than the one already registered edits it instead of
+        // adding a second entry that would delete the first one's record along with itself.
+        const owner = state.backends.find(item => item.relayHostId === host.id && item.id !== entry.id);
+        entry = {...entry, id:owner?.id || entry.id, token:'', relayHostId:host.id, relayVia};
       } else if (previous) {
         // Back to a direct connection: the code just typed needs the usual consent, which a relayed
         // Backend never had to give.
@@ -1571,12 +1581,18 @@
       }
       $('pairDialog').close();
     } catch (error) {
-      // Nothing here owns the record this submission created, so it is taken back rather than left
-      // holding a pairing code. A reused record belongs to whoever registered it first, and one a
-      // half-connected Backend did end up pointing at stays with it, to be deleted along with it.
-      if (createdHost && !state.backends.some(backend => backend.relayHostId === createdHost.relayHostId)) await deleteRelayRecords([createdHost]);
+      let message = error.message;
+      // Nothing owns the record this submission created: a half-connected Backend was never saved, so
+      // the route it holds dies with the page. Take it back rather than leave a pairing code behind,
+      // and say so when that fails, because then nothing in the UI can reach it any more.
+      if (createdHost) {
+        const failed = await deleteRelayRecords([createdHost]);
+        if (failed.length) message += `；中继「${backendOf(createdHost.relayVia)?.name || createdHost.relayVia}」上刚建的记录 ${createdHost.relayHostId} 没能删掉（${failed[0].error.message}），用同一地址重新添加一次会复用它，之后删掉该 backend 就能一并清掉`;
+        // The entry keeps the route it was saved with, so the record it still owns stays reachable.
+        if (existing && previous) Object.assign(existing, {relayVia:previous.via, relayHostId:previous.hostId});
+      }
       updateHeaderStatus();
-      toast(error.message);
+      toast(message);
     } finally {
       $('pairSubmit').disabled = false;
     }

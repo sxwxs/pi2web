@@ -10,7 +10,7 @@ import {RemotePiServer} from '../src/server.js';
 /** Shaped like a real pairing code, which is what the relay accepts for a target. */
 const TARGET_TOKEN = 'target-token-7VqK3nZt0aLpXb';
 
-type Target = {base:string, requests:{method:string, url:string, authorization?:string, body:string}[], close:() => Promise<void>};
+type Target = {base:string, requests:{method:string, url:string, authorization?:string, body:string}[], sockets:WebSocket[], close:() => Promise<void>};
 
 /**
  * Stands in for the pi2web instance the browser cannot reach: it only records what the relay forwards.
@@ -30,7 +30,9 @@ async function startTarget(token:string|null = TARGET_TOKEN):Promise<Target> {
     });
   });
   const sockets = new WebSocketServer({server, path:'/api/v1/ws'});
+  const accepted:WebSocket[] = [];
   sockets.on('connection', (socket, req) => {
+    accepted.push(socket);
     socket.send(JSON.stringify({protocol:req.headers['sec-websocket-protocol']}));
     socket.on('message', data => socket.send(String(data) === 'snapshot' ? 'B'.repeat(3 * 1024 * 1024) : `echo:${data}`));
   });
@@ -39,6 +41,7 @@ async function startTarget(token:string|null = TARGET_TOKEN):Promise<Target> {
   return {
     base:`http://127.0.0.1:${port}`,
     requests,
+    sockets:accepted,
     close:() => new Promise<void>(resolve => { sockets.close(); server.close(() => resolve()) }),
   };
 }
@@ -223,6 +226,23 @@ describe('backend relay', () => {
 
     for (const socket of pending) socket.destroy();
     await new Promise<void>(resolve => silent.close(() => resolve()));
+  });
+
+  it('drops the upstream when it rejects the browser handshake', async () => {
+    const {base, token, host} = await start();
+    const url = new URL(base);
+    const browser = net.connect(Number(url.port), url.hostname);
+    await new Promise<void>(resolve => browser.on('connect', () => resolve()));
+    // Everything a relayed upgrade needs except a usable key, which only this server can object to -
+    // by then it has already opened the connection to the target on the browser's behalf.
+    browser.write([`GET /api/v1/hosts/${host.id}/api/v1/ws HTTP/1.1`, `Host: ${url.host}`, 'Upgrade: websocket', 'Connection: Upgrade',
+      'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: not-a-valid-key', `Sec-WebSocket-Protocol: access-token.${token}`, '', ''].join('\r\n'));
+    expect(await new Promise<string>(resolve => browser.once('data', data => resolve(String(data))))).toContain('400');
+
+    await vi.waitFor(() => expect(target!.sockets).toHaveLength(1));
+    // Nobody will ever speak through it, and nothing tracks it: it has to go with the browser's socket.
+    await new Promise<void>(resolve => target!.sockets[0].on('close', () => resolve()));
+    browser.destroy();
   });
 
   it('closes relayed sockets on shutdown', async () => {

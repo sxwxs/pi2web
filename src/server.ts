@@ -214,11 +214,13 @@ this.server.on('upgrade',(req,socket,head)=>{void this.upgrade(req,socket,head).
   // noticed and the attempt is bounded by the handshake deadline instead. Shutdown destroys the socket
   // through this set, and the close handler below takes the pending upstream down with it.
   this.pendingRelays.add(socket);
-  let settled=false;
+  let settled=false,established:WebSocket|undefined;
   const done=()=>{settled=true;this.pendingRelays.delete(socket)};
   const fail=(status:number)=>{if(settled)return;done();socket.write(`HTTP/1.1 ${status} Relay Failed\r\nContent-Length: 0\r\n\r\n`);socket.destroy()};
-  socket.on('close',()=>{if(settled)return;done();upstream.terminate()});
-  upstream.on('open',()=>{done();this.wss.handleUpgrade(req,socket,head,client=>{
+  // The browser's socket owns the upstream until a client takes it over, and a handshake this server
+  // rejects never hands one over, so closing it takes the upstream down whether it opened or not.
+  socket.on('close',()=>{done();if(!established)upstream.terminate()});
+  upstream.on('open',()=>{done();this.wss.handleUpgrade(req,socket,head,client=>{established=client;
    // Relayed sockets must be known to stop(), or an open Agent or Terminal keeps shutdown waiting.
    this.clients.add(client);
    // Same rule as the direct connections: a peer that cannot keep up is closed instead of queued for.
