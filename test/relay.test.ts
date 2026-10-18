@@ -125,6 +125,11 @@ describe('backend relay', () => {
     expect((await fetch(`${base}/api/v1/hosts/${host.id}`, {method:'DELETE', headers})).status).toBe(200);
     expect((await (await fetch(`${base}/api/v1/hosts`, {headers})).json()).data).toEqual([]);
     expect((await fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`, {headers})).status).toBe(404);
+    // Deleting it again says "not there" in a way the browser can tell from "could not reach it", so a
+    // cascade that failed halfway can be retried without reporting the part that already succeeded.
+    const again = await fetch(`${base}/api/v1/hosts/${host.id}`, {method:'DELETE', headers});
+    expect(again.status).toBe(404);
+    expect((await again.json()).error.code).toBe('HOST_NOT_FOUND');
   });
 
   it('pipes websocket frames through to the target', async () => {

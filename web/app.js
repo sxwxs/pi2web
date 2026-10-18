@@ -70,7 +70,9 @@
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (response.status === 401) onUnauthorized?.();
-      throw Error(body.error?.message || `HTTP ${response.status}`);
+      // Status and code travel with the error: a caller cleaning up may need to tell "already gone"
+      // from "could not reach it", which the message alone does not say.
+      throw Object.assign(Error(body.error?.message || `HTTP ${response.status}`), {status:response.status, code:body.error?.code});
     }
     return body.data;
   }
@@ -92,6 +94,26 @@
     return requestBackend(backendId, `/api/v1/agents/${encodeURIComponent(remoteId)}${suffix}`, options);
   };
   const postAgent = (agentId, suffix = '', body = {}) => requestAgent(agentId, suffix, {method:'POST', body:JSON.stringify(body)});
+  /**
+   * Deletes the relay records of Backends that are about to be forgotten here. Every record holds a
+   * target's address and pairing code, so one that cannot be deleted is reported rather than leaked
+   * silently, and one failure does not stop the records after it from being deleted.
+   *
+   * A record the relay no longer has counts as deleted, so retrying a half-finished cascade can
+   * actually finish instead of failing on the part that already succeeded.
+   */
+  async function deleteRelayRecords(items) {
+    const failed = [];
+    for (const item of items) {
+      if (!item.relayHostId) continue;
+      try {
+        await requestBackend(item.relayVia, `/api/v1/hosts/${encodeURIComponent(item.relayHostId)}`, {method:'DELETE'});
+      } catch (error) {
+        if (error.status !== 404 && error.code !== 'HOST_NOT_FOUND') failed.push({backend:item, error});
+      }
+    }
+    return failed;
+  }
 
   function openPair(backend = null) {
     if ($('pairDialog').open) return;
@@ -431,10 +453,11 @@
         if (!confirm(question)) return;
         // Each relay record holds a target's address and pairing code, so it has to go before the relay
         // is forgotten here and becomes unreachable. The children's records live on the relay too.
-        try {
-          for (const item of removed) if (item.relayHostId) await requestBackend(item.relayVia, `/api/v1/hosts/${encodeURIComponent(item.relayHostId)}`, {method:'DELETE'});
-        } catch (error) {
-          if (!confirm(`中继记录删除失败：${error.message}\n\n仍然从这个浏览器移除吗？目标配对码会留在中继服务器上。`)) return;
+        const failed = await deleteRelayRecords(removed);
+        if (failed.length) {
+          const detail = failed.map(entry => `「${entry.backend.name || entry.backend.base}」：${entry.error.message}`).join('\n');
+          // Answering no keeps every entry, which is what makes the deletion retryable once the relay is back.
+          if (!confirm(`以下中继记录删除失败：\n${detail}\n\n仍然从这个浏览器移除吗？这些目标配对码会留在中继服务器上，只能到中继那台机器上手动清理。`)) return;
         }
         const agentIds = removed.flatMap(item => item.agents.map(agent => agent.agentId));
         for (const item of removed) { deactivateBackendState(item, 'off'); backendRegistry.remove(item); }
@@ -1538,8 +1561,8 @@
       await connectBackend(entry, {confirmSave:true});
       // Only now is the old record unreachable from this browser, and only now may it be deleted.
       if (previous && previous.hostId !== entry.relayHostId) {
-        await requestBackend(previous.via, `/api/v1/hosts/${encodeURIComponent(previous.hostId)}`, {method:'DELETE'})
-          .catch(error => toast(`旧中继记录未能删除：${error.message}`));
+        const failed = await deleteRelayRecords([{...existing, relayVia:previous.via, relayHostId:previous.hostId}]);
+        if (failed.length) toast(`旧中继记录未能删除：${failed[0].error.message}`);
       }
       $('pairDialog').close();
     } catch (error) {
