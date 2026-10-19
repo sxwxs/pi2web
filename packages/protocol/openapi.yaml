@@ -22,24 +22,8 @@ paths:
   /agents/{id}/{action}:
     get: {operationId: getAgentResource, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [state,messages,capabilities,session]}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
     post: {operationId: agentCommand, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [prompt,steer,follow-up,abort,compact,model,thinking,session-name,navigate,fork,extension-response]}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
-  /session-aliases:
-    get: {operationId: listSessionAliases, description: 'Session slots 1-6 (the six-key keyboard slots) with the bound agent state. Readable by the voice token.', responses: {'200': {$ref: '#/components/responses/Success'}}}
-    put: {operationId: replaceSessionAliases, description: 'Replace all numeric slot bindings: {bindings:[{slot,agentId,color?}]}. Full pairing code only.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
-  /session-aliases/{ref}:
-    get: {operationId: getSessionAlias, parameters: [{name: ref, in: path, required: true, description: slot number from 1 to 6, schema: {type: string}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
-    delete: {operationId: deleteSessionAlias, parameters: [{name: ref, in: path, required: true, schema: {type: string}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
-  /session-aliases/{ref}/prompt:
-    post: {operationId: promptSessionAlias, description: 'Body {message, mode?: auto|prompt|steer|follow-up, source?}. auto sends a follow-up while the agent is busy; unloaded agents are started on demand.', parameters: [{name: ref, in: path, required: true, schema: {type: string}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
-  /agents/{id}/last-result:
-    get: {operationId: agentLastResult, description: 'Final assistant text of the last settled task since server start (404 NO_RESULT otherwise).', parameters: [{$ref: '#/components/parameters/Id'}], responses: {'200': {$ref: '#/components/responses/Success'}}}
   /draft:
-    post: {operationId: draftText, description: 'Queue text for the Web UI input on this backend (without sending). Body {text, mode?: append|replace, agentId?, source?}; without an agentId, the page uses its currently selected agent.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
-  /agents/{id}/draft:
-    post: {operationId: draftTextForAgent, parameters: [{$ref: '#/components/parameters/Id'}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
-  /session-aliases/{ref}/draft:
-    post: {operationId: draftTextForSlot, parameters: [{name: ref, in: path, required: true, description: slot number from 1 to 6, schema: {type: integer}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
-  /attention:
-    get: {operationId: listAttention, description: 'Recent completed tasks since server start; ?since=<seq> fetches newly completed tasks only (bounded in memory). No mutable ack/resolution state.', responses: {'200': {$ref: '#/components/responses/Success'}}}
+    post: {operationId: draftText, description: 'Insert text into the currently displayed Web UI input box on this backend, without sending it to an Agent. Body {text, mode?: append|replace, source?}; explicit agent/slot targets are rejected. Pending text is kept in memory until a page acknowledges it.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
 components:
   securitySchemes: {bearerAuth: {type: http, scheme: bearer}}
   parameters:

@@ -5,7 +5,7 @@ import {randomUUID} from 'node:crypto';
  * Web UI and kept as "pending" until some UI acknowledges it, so dictating while no page is open is not lost.
  */
 export type DraftMode='append'|'replace';
-export type Draft={id:string;text:string;mode:DraftMode;agentId?:string;source?:string;createdAt:string};
+export type Draft={id:string;text:string;mode:DraftMode;source?:string;createdAt:string};
 type Listener=(draft:Draft,replay:boolean)=>void;
 
 export class DraftHub {
@@ -15,9 +15,9 @@ export class DraftHub {
   private readonly ttlMs=60*60_000;
 
   /** Returns the stored draft and how many Web UIs were reached right now. */
-  add(input:{text:string;mode?:DraftMode;agentId?:string;source?:string}):{draft:Draft;delivered:number}{
+  add(input:{text:string;mode?:DraftMode;source?:string}):{draft:Draft;delivered:number}{
     this.expire();
-    const draft:Draft={id:`draft-${randomUUID()}`,text:input.text,mode:input.mode??'append',agentId:input.agentId,source:input.source,createdAt:new Date().toISOString()};
+    const draft:Draft={id:`draft-${randomUUID()}`,text:input.text,mode:input.mode??'append',source:input.source,createdAt:new Date().toISOString()};
     this.pending.push(draft);
     while(this.pending.length>this.max)this.pending.shift();
     const delivered=this.listeners.size;

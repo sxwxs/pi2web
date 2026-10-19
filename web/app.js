@@ -276,10 +276,7 @@
       backend.saved = true;
     }
     persistConnections();
-    backend.slotSyncReady = false;
-    backend.slotSyncGeneration = (backend.slotSyncGeneration || 0) + 1;
     connectSocket(backend);
-    void syncSessionSlots(backend);
     updateVoiceAvailability();
     updateHeaderStatus();
     renderBackendList();
@@ -577,7 +574,7 @@
     $('keyboardConnect').hidden=connected;$('keyboardDisconnect').hidden=!connected;
     const unavailable=!window.isSecureContext?'需要 HTTPS 或 localhost':!navigator.hid?'当前浏览器不支持 WebHID':'';
     $('keyboardConnect').disabled=Boolean(unavailable);$('keyboardConnect').title=unavailable;
-    $('keyboardStatus').textContent=connected?`已连接 ${name} · LLM 慢速呼吸，Tool 中速呼吸，Retry 快速呼吸，等待输入浅呼吸，空闲常亮`:unavailable||'未连接 · 绑定按 Backend 同步到服务器';
+    $('keyboardStatus').textContent=connected?`已连接 ${name} · LLM 慢速呼吸，Tool 中速呼吸，Retry 快速呼吸，等待输入浅呼吸，空闲常亮`:unavailable||'未连接 · 绑定保存在当前浏览器';
     renderKeyboardBindings();
   }
   function renderKeyboardBindings() {
@@ -614,40 +611,6 @@
     }));
     if (focusedId) $(focusedId)?.focus();
   }
-  // Slot numbers belong to a backend, whereas the physical keyboard uses composite Agent IDs.
-  let applyingServerSlots = false, slotPushTimer = null;
-  function pushSessionSlots() {
-    if (applyingServerSlots) return;
-    clearTimeout(slotPushTimer);
-    slotPushTimer = setTimeout(() => {
-      for (const backend of state.backends.filter(item => item.status === 'connected' && item.slotSyncReady)) {
-        const bindings = sessionKeyboard.getBindings().filter(item => splitResourceKey(item.agentId).backendId === backend.id)
-          .map(item => ({slot:item.slot+1, agentId:splitResourceKey(item.agentId).remoteId, color:item.color}));
-        requestBackend(backend.id, '/api/v1/session-aliases', {method:'PUT', body:JSON.stringify({bindings})})
-          .catch(error => console.warn('Session slot sync failed', backend.id, error));
-      }
-    }, 300);
-  }
-  async function syncSessionSlots(backend) {
-    const generation = backend.slotSyncGeneration;
-    const ownBindings = () => sessionKeyboard.getBindings().filter(item => splitResourceKey(item.agentId).backendId === backend.id);
-    const original = JSON.stringify(ownBindings());
-    let remote;
-    try { remote = await requestBackend(backend.id, '/api/v1/session-aliases'); } catch { return; } // older server
-    if (!Array.isArray(remote) || backend.status !== 'connected' || backend.slotSyncGeneration !== generation) return;
-    backend.slotSyncReady = true;
-    // A local edit made while the request was in flight takes precedence over its stale response.
-    if (JSON.stringify(ownBindings()) !== original) { pushSessionSlots(); return; }
-    const local = sessionKeyboard.getBindings();
-    const others = local.filter(item => splitResourceKey(item.agentId).backendId !== backend.id);
-    // Even [] is an explicit server state: a stale tab must not resurrect a cleared slot.
-    const occupied = new Set(others.map(item => item.slot));
-    const incoming = remote.filter(item => !occupied.has(item.slot-1))
-      .map(item => ({slot:item.slot-1, agentId:resourceKey(backend.id,item.agentId), color:item.color}));
-    if (incoming.length !== remote.length) console.warn('Session slots collide with bindings on another Backend', backend.id);
-    applyingServerSlots = true;
-    try { sessionKeyboard.replaceBindings([...others,...incoming]); } finally { applyingServerSlots = false; }
-  }
   const sessionKeyboard = new window.SessionKeyboardController({
     onKey:binding=>{
       const agent=state.agents.find(item=>item.agentId===binding.agentId);
@@ -656,7 +619,7 @@
       selectAgent(agent).catch(error=>toast(error.message));
     },
     onStateChange:updateKeyboardUi,
-    onBindingsChange:()=>{renderAgentList();renderKeyboardBindings();pushSessionSlots();},
+    onBindingsChange:()=>{renderAgentList();renderKeyboardBindings();},
     onError:error=>{console.error('Session keyboard error',error);toast(`键盘：${error.message}`);}
   });
   const formatTokens = value => { const n=Number(value); if(!Number.isFinite(n)||n<=0)return '0'; if(n>=1e6)return `${(n/1e6).toFixed(1)}M`;if(n>=1e3)return `${(n/1e3).toFixed(n>=1e4?0:1)}k`;return String(Math.round(n)); };
@@ -1146,25 +1109,14 @@
     if(!agentId){$('voiceInput').textContent='🎙';return;}const {backendId,remoteId}=splitResourceKey(agentId),transcribeBackend=backendOf(backendId);if(!transcribeBackend){$('voiceInput').textContent='🎙';return toast('该 Session 的 backend 已断开');}try{const response=await fetch(transcribeBackend.base+`/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${transcribeBackend.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
   }
   const handledDrafts = new Set();
-  let draftQueue = Promise.resolve();
-  async function handleDraftEvent(message) {
+  function handleDraftEvent(message) {
     const draft = message.draft, backend = backendOf(message.backendId);
     if (!draft || typeof draft.text !== 'string' || !backend) return;
     const ack = () => { handledDrafts.add(draft.id); if (handledDrafts.size > 200) handledDrafts.delete(handledDrafts.values().next().value); if (backend.ws?.readyState === WebSocket.OPEN) backend.ws.send(JSON.stringify({type:'draft_ack', id:draft.id})); };
     if (handledDrafts.has(draft.id)) { ack(); return; }
     try {
-      const id = draft.agentId ? resourceKey(backend.id, draft.agentId) : null;
-      if (id) {
-        if (state.selectedKind !== 'agent' || state.agent?.agentId !== id) {
-          let agent = state.agents.find(item => item.agentId === id);
-          if (!agent) { await refreshAgents(); agent = state.agents.find(item => item.agentId === id); }
-          if (!agent) { toast('语音输入：目标会话不存在'); return; }
-          await selectAgent(agent);
-        }
-      }
-      // An untargeted draft only goes to the page currently showing this backend.
-      if (state.selectedKind !== 'agent' || !state.agent || state.agent.backendId !== backend.id ||
-          (id && state.agent.agentId !== id)) return;
+      // The voice client cannot select a session: only the input currently shown on this backend is changed.
+      if (state.selectedKind !== 'agent' || !state.agent || state.agent.backendId !== backend.id) return;
       const input = $('input');
       if (draft.mode === 'replace') input.value = draft.text;
       else input.value += (input.value && !/\s$/.test(input.value) ? ' ' : '') + draft.text;
@@ -1173,10 +1125,7 @@
     } catch (error) { toast(`语音输入失败：${error.message}`); }
   }
   function handleAgentEvent(message) {
-    if (message.type === 'draft_event') {
-      draftQueue = draftQueue.then(() => handleDraftEvent(message));
-      return;
-    }
+    if (message.type === 'draft_event') { handleDraftEvent(message); return; }
     if (message.type === 'subscribed_drafts') return;
     if(message.type==='voice_event'){handleVoiceEvent(message);return;}
     if (message.type === 'subscribed') {
