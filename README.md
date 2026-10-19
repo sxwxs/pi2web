@@ -13,6 +13,22 @@ pi2web
 
 npm 包名为 `pi2web`，全局命令同名（`pi2web`）。安装时会准备 `better-sqlite3` 和 `node-pty` 两个原生模块：多数平台直接使用预编译产物，没有预编译产物的平台需要本机具备 Python 3 与 C/C++ 工具链（Linux `build-essential`、macOS Xcode Command Line Tools、Windows Visual Studio Build Tools）。
 
+### 从 Git 分支安装
+
+要装还没发布到 npm 的分支（默认 `feat/backend-relay`），用安装脚本。脚本把代码 clone 到固定目录（Windows `%LOCALAPPDATA%\pi2web\src`，Linux/macOS `~/.local/share/pi2web/src`），checkout 到分支最新提交，构建、打包后全局安装：
+
+```powershell
+# Windows PowerShell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/sxwxs/pi2web/feat/backend-relay/scripts/install.ps1)))
+```
+
+```bash
+# Linux / macOS / Git Bash
+curl -fsSL https://raw.githubusercontent.com/sxwxs/pi2web/feat/backend-relay/scripts/install.sh | bash
+```
+
+再运行一次就是更新到分支最新提交。可选参数：`-Branch` / `--branch`、`-Dir` / `--dir`、`-Force` / `--force`（丢弃 clone 目录里的本地改动）；也可以用环境变量 `PI2WEB_BRANCH`、`PI2WEB_SRC_DIR`、`PI2WEB_REPO`。不直接用 `npm install -g github:...#branch`，是因为它在 Windows + npm 11 上会安装失败。
+
 启动后访问终端显示的地址（默认 <http://127.0.0.1:11318>）。服务首次启动只在终端显示一次配对码；Web UI **必须由用户手动输入配对码**，不会从 URL 或服务端自动注入。连接成功后页面会询问是否保存到 localStorage；只有用户明确确认后才会保存，请仅在可信设备上使用。
 
 常用选项：
