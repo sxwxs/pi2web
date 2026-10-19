@@ -44,6 +44,8 @@
     return wire;
   };
   const relayName = backend => backend.relayHostId ? `经「${backendOf(backend.relayVia)?.name || '?'}」中继` : '';
+  /** What a Backend is reached with. An edit that fails has to put exactly this back, and no more. */
+  const routeOf = backend => ({name:backend.name, base:backend.base, token:backend.token, saved:backend.saved, relayHostId:backend.relayHostId, relayVia:backend.relayVia});
   const connectedBackends = () => backendRegistry.connected();
   const primaryBackend = () => backendRegistry.primary();
   const hasConnection = () => connectedBackends().length > 0;
@@ -1549,7 +1551,7 @@
       // Where this Backend was reached before. Its record holds the target's pairing code, so it may
       // only be dropped once the new route has proved it works.
       previous = existing?.relayHostId ? {via:existing.relayVia, hostId:existing.relayHostId} : null;
-      snapshot = existing ? {name:existing.name, base:existing.base, token:existing.token, saved:existing.saved, relayHostId:existing.relayHostId, relayVia:existing.relayVia} : null;
+      snapshot = existing ? routeOf(existing) : null;
       entry = {id:existing?.id || createBackendId(), name, base, token, saved:existing?.saved || false};
       // A Backend others are relayed through is the address they are reached at: moving it, or putting
       // it behind a relay itself, takes that address away and leaves their records on a server nothing
@@ -1562,15 +1564,19 @@
         // The relay stores the target pairing code; this browser only keeps the host id. The same
         // address returns the record it already has, a different one gets its own: an edit that moves
         // a Backend to another machine never writes that machine's address over the old record.
-        const host = await postBackend(relayVia, '/api/v1/hosts', {name, base, token});
+        // Naming the record this Backend already holds is what allows the call to change it: without
+        // that, a target somebody else registered is returned as it stands, code untouched.
+        const holding = previous && previous.via === relayVia ? {replaces:previous.hostId} : {};
+        const host = await postBackend(relayVia, '/api/v1/hosts', {name, base, token, ...holding});
         if (host.created) createdHost = {name, base, relayVia, relayHostId:host.id};
         // The relay decides which addresses are the same machine. One record is one Backend here too,
-        // so an address spelled differently than the one already registered edits it instead of
-        // adding a second entry that would delete the first one's record along with itself.
+        // so an address spelled differently than the one already registered edits that Backend
+        // instead of adding a second entry that would delete the first one's record along with itself.
         const owner = state.backends.find(item => item.relayHostId === host.id && item.id !== entry.id);
         // Moving a Backend onto a target another one already holds would leave two entries on one
         // record, and deleting the route of either would take the other's with it.
         if (owner && existing) throw Error(`这个目标已经是 backend「${owner.name}」，请直接改它，或先把它删掉`);
+        if (owner) { existing = owner; snapshot = routeOf(owner) }
         entry = {...entry, id:owner?.id || entry.id, token:'', relayHostId:host.id, relayVia};
       } else if (previous) {
         // Back to a direct connection: the code just typed needs the usual consent, which a relayed

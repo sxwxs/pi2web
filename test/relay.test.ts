@@ -89,15 +89,17 @@ describe('backend relay', () => {
     const {base, headers, host, status} = await start();
     expect(status).toBe(201);
     expect(host.created).toBe(true);
-    const again = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'lab from phone', base:target!.base})});
+    const again = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'lab from phone', base:target!.base, token:'wrong-code-from-the-phone'})});
     expect(again.status).toBe(200);
     const second = (await again.json()).data;
-    // Reused, so the code it was registered with stays and the browser that got it here may not
-    // delete it again as its own.
-    expect(second).toMatchObject({id:host.id, name:'lab from phone', hasToken:true, created:false});
+    // Reused as it stands: a second browser gets the record, not the right to rewrite it, so the code
+    // it is working with survives whatever that browser typed. It may not delete it as its own either.
+    expect(second).toMatchObject({id:host.id, name:'lab', hasToken:true, created:false});
 
     const listed = await (await fetch(`${base}/api/v1/hosts`, {headers})).json();
     expect(listed.data).toHaveLength(1);
+    expect((await fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`, {headers})).status).toBe(200);
+    expect(target!.requests.at(-1)).toMatchObject({authorization:`Bearer ${TARGET_TOKEN}`});
 
     // Editing is the same call: another address is another machine, so it gets its own record and
     // its own code instead of inheriting the one stored for the old address.
@@ -109,6 +111,13 @@ describe('backend relay', () => {
     // The record the Backend is still reachable through is untouched by that failed-or-not edit.
     expect((await fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`, {headers})).status).toBe(200);
     expect(target!.requests.at(-1)).toMatchObject({authorization:`Bearer ${TARGET_TOKEN}`});
+
+    // The browser that holds the record says which one it is, and only then may it store a code the
+    // target has rotated since.
+    const rotated = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'lab', base:target!.base, token:'rotated-token-9WqK3nZt0aLpXb', replaces:host.id})});
+    expect((await rotated.json()).data).toMatchObject({id:host.id, created:false});
+    await fetch(`${base}/api/v1/hosts/${host.id}/api/v1/agents`, {headers});
+    expect(target!.requests.at(-1)).toMatchObject({authorization:'Bearer rotated-token-9WqK3nZt0aLpXb'});
   });
 
   it('has no way to edit a record in place', async () => {

@@ -252,9 +252,11 @@ if(parts[2]==='hosts'){
   // An empty code means the target runs without one; anything else must be a code it could have issued.
   if(token&&!isAccessTokenShape(token))return json(res,400,{error:{code:'INVALID_REQUEST',message:RELAY_TOKEN_REQUIRED,requestId}});
   // Adding the same target from a second browser returns the existing host, so both share one id.
-  const hosts=this.relayHosts(),existing=hosts.find(host=>host.base===base);
-  const host:RelayHost=existing?{...existing,name,token:token||existing.token}:{id:`host-${randomUUID()}`,name,base,token:token||undefined,createdAt:new Date().toISOString()};
-  this.metadata.setSetting('relayHosts',existing?hosts.map(item=>item.id===host.id?host:item):[...hosts,host]);
+  // Only a browser that already holds the record may change it, which it shows by naming it: a code
+  // meant for some other machine then cannot overwrite the one this record is working with.
+  const hosts=this.relayHosts(),existing=hosts.find(host=>host.base===base),held=!!existing&&String(b.replaces??'')===existing.id;
+  const host:RelayHost=existing?(held?{...existing,name,token:token||existing.token}:existing):{id:`host-${randomUUID()}`,name,base,token:token||undefined,createdAt:new Date().toISOString()};
+  if(!existing||held)this.metadata.setSetting('relayHosts',existing?hosts.map(item=>item.id===host.id?host:item):[...hosts,host]);
   // Whether this call created the record decides who may delete it again: a reused one belongs to
   // whoever registered it first, and a browser that gives up must not take it from them.
   return json(res,existing?200:201,{data:{...this.safeRelayHost(host),created:!existing}});
