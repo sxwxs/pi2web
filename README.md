@@ -246,25 +246,21 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 **受限 voice token**：配对码等同于宿主机 Shell 权限（Terminal、`bash`）。语音客户端应改用单独的 voice token：
 
 ```bash
-pi2web --create-voice-token     # 创建或替换，明文只显示一次；旧 token 立即失效
+pi2web --create-voice-token     # 创建或替换，明文只显示一次
 pi2web --revoke-voice-token     # 停用
 ```
 
-voice token 只能：列出 Agent、读 Agent 状态与最近结果、对 Agent 发 `prompt/steer/follow-up/abort`、回答扩展对话框、读写会话槽位的**读取**与 prompt、读取并确认关注事件、WebSocket 的 `subscribe`/`subscribe_all`/`subscribe_attention` 与同样的四个命令。
-其余（Terminal、bash、Workspace 文件、Collab、邮件设置、创建/Archive Agent、**修改**槽位绑定）一律 `403`（Collab 返回 `401`）。它也不能当作配对码登录，更不能在 Collab 里充当"人"。注意：能给 Agent 发 prompt 就等于能让 Agent 使用它被授予的工具，请按此评估风险。
+voice token 仅用于 REST：列出 Agent、读 Agent 状态与最近结果、对 Agent 发 `prompt/steer/follow-up/abort`、回答扩展对话框、读取槽位并按槽位 prompt/draft、读取完成事件和写入 Draft。Terminal、bash、Workspace 文件、Collab、邮件设置、创建/Archive Agent、修改槽位绑定均不可用；WebSocket 握手也拒绝 voice token。它不能当作配对码登录。撤销或轮换后新的 REST 请求立即失效；由于 voice token 不开放 WebSocket，无需为撤销维护连接状态。注意：能给 Agent 发 prompt 就等于能让 Agent 使用它被授予的工具，请按此评估风险。`--no-auth` 模式下不检查 token，这种部署只适用于可信的本机回环环境。
 
 **会话槽位（"会话一"）**：六键 Session 键盘的槽位 1–6 现在按 Backend 保存在各自的服务端。Web UI 连接后同步对应 Backend 的绑定；Sotto 的 `services.pi2web.url` 指定要寻址的 Backend。不同 Backend 的槽位映射到同一块物理键盘时若发生撞槽，Web UI 保留已有绑定并在浏览器控制台提示，需手动调整。
 
-- `GET /api/v1/session-aliases`、`GET/DELETE /api/v1/session-aliases/:slot|:alias`、`PUT /api/v1/session-aliases`（整体替换，仅配对码）。
-- `POST /api/v1/session-aliases/:slot|:alias/prompt`，body `{message, mode?, idempotencyKey?, source?}`：`mode` 默认 `auto`，Agent 忙碌时自动转为 `follow-up`，已卸载的 Agent 按需启动；相同 `idempotencyKey` 在 10 分钟内只执行一次（避免重复识别结果重复提交）。绑定的 Agent 已不存在时返回 `404 ALIAS_TARGET_MISSING`。
+- `GET /api/v1/session-aliases`、`GET/DELETE /api/v1/session-aliases/:slot`、`PUT /api/v1/session-aliases`（整体替换，仅配对码）。槽位只能用 1–6 寻址，不支持自定义别名；即使服务端返回空绑定，浏览器也以服务端为准，不会隐式上传本地旧绑定。升级后如需保留旧绑定，请在网页重新设置。
+- `POST /api/v1/session-aliases/:slot/prompt`，body `{message, mode?, source?}`：`mode` 默认 `auto`，Agent 忙碌时自动转为 `follow-up`，已卸载的 Agent 按需启动；不提供重复请求去重（旧的 `idempotencyKey` 参数返回 400），语音客户端应要求发送确认。绑定的 Agent 已不存在时返回 `404 ALIAS_TARGET_MISSING`。
 - `GET /api/v1/agents/:id/last-result`：服务启动后最近一次完成任务的最终文本。
 
-**语音输入到输入框（Draft）**：`POST /api/v1/draft`（当前页面所显示的同一 Backend 上的 Agent）、`POST /api/v1/agents/:id/draft` 或 `POST /api/v1/session-aliases/:slot|:alias/draft`；body `{text,mode?:"append"|"replace",source?}`。文字不会自动发送给 Agent；Web UI 订阅 `draft_event`，插入输入框后回 `draft_ack`。服务端仅在进程内暂存未确认文字（最多 50 条、1 小时）；没有合适页面打开时仍可排队，页面切换到该 Backend 或重连后会重试。
+**语音输入到输入框（Draft）**：`POST /api/v1/draft`（当前页面所显示的同一 Backend 上的 Agent）、`POST /api/v1/agents/:id/draft` 或 `POST /api/v1/session-aliases/:slot/draft`；body `{text,mode?:"append"|"replace",source?}`。文字不会自动发送给 Agent；Web UI 订阅 `draft_event`，插入输入框后回 `draft_ack`。服务端仅在进程内暂存未确认文字（最多 50 条、1 小时）；没有合适页面打开时仍可排队，页面切换到该 Backend 或重连后会重试。
 
-**关注事件（Attention）**：把"需要人看一眼/处理"的信号统一成一个有界、可确认的列表（仅内存）：`agent_settled`（任务完成，含最终文本）、`needs_input`（扩展对话框待回答，回答后自动 resolved，用 `extension-response` 作答）、`collab_escalation`（协作升级待裁定）。
-
-- `GET /api/v1/attention?since=<seq>&pending=true`、`POST /api/v1/attention/:id/ack`（幂等，第一个确认者生效）。
-- WebSocket：`{"type":"subscribe_attention","sinceSeq":0}` → `subscribed_attention`，随后 `attention_event`（`change: new|updated`，补发的历史带 `replay:true`）。
+**最近完成事件（Attention）**：`GET /api/v1/attention?since=<seq>` 返回当前进程中最近的 Agent 完成事件和 `lastSeq`，最多保留 200 条，用于 Sotto 在发送后等待对应结果；中止的任务不会发布完成事件。暂无确认/解决状态或 WebSocket 通道，需要人工处理的通知留待后续阶段设计。
 
 协议定义见 `packages/protocol/`。
 

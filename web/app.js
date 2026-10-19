@@ -639,8 +639,8 @@
     // A local edit made while the request was in flight takes precedence over its stale response.
     if (JSON.stringify(ownBindings()) !== original) { pushSessionSlots(); return; }
     const local = sessionKeyboard.getBindings();
-    if (!remote.length) { if (original !== '[]') pushSessionSlots(); return; }
     const others = local.filter(item => splitResourceKey(item.agentId).backendId !== backend.id);
+    // Even [] is an explicit server state: a stale tab must not resurrect a cleared slot.
     const occupied = new Set(others.map(item => item.slot));
     const incoming = remote.filter(item => !occupied.has(item.slot-1))
       .map(item => ({slot:item.slot-1, agentId:resourceKey(backend.id,item.agentId), color:item.color}));
@@ -1145,17 +1145,16 @@
     clearTimeout(state.mediaTimer);const recorder=state.mediaRecorder,mime=recorder?.mimeType||'audio/webm',blob=new Blob(state.mediaChunks,{type:mime}),agentId=state.mediaAgentId;state.mediaStream?.getTracks().forEach(track=>track.stop());state.mediaRecorder=null;state.mediaStream=null;state.mediaChunks=[];state.mediaAgentId=null;$('voiceInput').textContent='…';$('voiceInput').classList.remove('recording');
     if(!agentId){$('voiceInput').textContent='🎙';return;}const {backendId,remoteId}=splitResourceKey(agentId),transcribeBackend=backendOf(backendId);if(!transcribeBackend){$('voiceInput').textContent='🎙';return toast('该 Session 的 backend 已断开');}try{const response=await fetch(transcribeBackend.base+`/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${transcribeBackend.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
   }
-  const handledDrafts = new Set(), draftsInFlight = new Set();
+  const handledDrafts = new Set();
+  let draftQueue = Promise.resolve();
   async function handleDraftEvent(message) {
     const draft = message.draft, backend = backendOf(message.backendId);
     if (!draft || typeof draft.text !== 'string' || !backend) return;
     const ack = () => { handledDrafts.add(draft.id); if (handledDrafts.size > 200) handledDrafts.delete(handledDrafts.values().next().value); if (backend.ws?.readyState === WebSocket.OPEN) backend.ws.send(JSON.stringify({type:'draft_ack', id:draft.id})); };
     if (handledDrafts.has(draft.id)) { ack(); return; }
-    if (draftsInFlight.has(draft.id)) return;
-    draftsInFlight.add(draft.id);
     try {
-      if (draft.agentId) {
-        const id = resourceKey(backend.id, draft.agentId);
+      const id = draft.agentId ? resourceKey(backend.id, draft.agentId) : null;
+      if (id) {
         if (state.selectedKind !== 'agent' || state.agent?.agentId !== id) {
           let agent = state.agents.find(item => item.agentId === id);
           if (!agent) { await refreshAgents(); agent = state.agents.find(item => item.agentId === id); }
@@ -1164,17 +1163,20 @@
         }
       }
       // An untargeted draft only goes to the page currently showing this backend.
-      if (state.selectedKind !== 'agent' || !state.agent || state.agent.backendId !== backend.id) return;
+      if (state.selectedKind !== 'agent' || !state.agent || state.agent.backendId !== backend.id ||
+          (id && state.agent.agentId !== id)) return;
       const input = $('input');
       if (draft.mode === 'replace') input.value = draft.text;
       else input.value += (input.value && !/\s$/.test(input.value) ? ' ' : '') + draft.text;
       input.focus(); input.setSelectionRange(input.value.length,input.value.length); input.scrollTop = input.scrollHeight;
       toast('语音输入已写入输入框'); ack();
     } catch (error) { toast(`语音输入失败：${error.message}`); }
-    finally { draftsInFlight.delete(draft.id); }
   }
   function handleAgentEvent(message) {
-    if (message.type === 'draft_event') { void handleDraftEvent(message); return; }
+    if (message.type === 'draft_event') {
+      draftQueue = draftQueue.then(() => handleDraftEvent(message));
+      return;
+    }
     if (message.type === 'subscribed_drafts') return;
     if(message.type==='voice_event'){handleVoiceEvent(message);return;}
     if (message.type === 'subscribed') {

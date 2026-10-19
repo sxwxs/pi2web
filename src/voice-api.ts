@@ -8,7 +8,7 @@ import type {MetadataStore} from './metadata-store.js';
  * plus the allow-list that confines the restricted `voice` token. Everything here is additive.
  */
 export const SESSION_SLOTS=6;
-export type SessionAlias={slot:number;agentId:string;color?:string;alias?:string};
+export type SessionAlias={slot:number;agentId:string;color?:string};
 export type PromptKind='prompt'|'steer'|'follow-up';
 type Ctx={method:string;url:URL;parts:string[];body:()=>Promise<any>;role:'full'|'voice'};
 export type ApiResult={status:number;payload:unknown};
@@ -24,15 +24,10 @@ export function voiceAllowed(method:string,pathname:string){
     /^\/api\/v1\/agents\/[^/]+\/(state|last-result)$/.test(p)||/^\/api\/v1\/session-aliases\/[^/]+$/.test(p);
   if(method==='POST')return p==='/api/v1/draft'||/^\/api\/v1\/agents\/[^/]+\/(prompt|steer|follow-up|abort|extension-response|draft)$/.test(p)||
     /^\/api\/v1\/session-aliases\/[^/]+\/draft$/.test(p)||
-    /^\/api\/v1\/session-aliases\/[^/]+\/prompt$/.test(p)||/^\/api\/v1\/attention\/[^/]+\/ack$/.test(p);
+    /^\/api\/v1\/session-aliases\/[^/]+\/prompt$/.test(p);
   return false;
 }
-/** WebSocket message types a voice token may send. */
-export const VOICE_WS_TYPES=new Set(['subscribe','subscribe_all','subscribe_attention','prompt','steer','follow-up','abort']);
-
 export class VoiceApi {
-  private idempotent=new Map<string,{at:number;result:unknown}>();
-  private readonly idempotencyTtlMs=10*60_000;
   constructor(private readonly deps:{
     metadata:MetadataStore;agents:AgentManager;feed:AttentionFeed;drafts:DraftHub;
     /** Sends a command the same way the REST/WS prompt endpoints do (naming, voice bookkeeping, indexing). */
@@ -42,7 +37,8 @@ export class VoiceApi {
   list():SessionAlias[]{
     const raw=this.deps.metadata.getSetting<SessionAlias[]>(SETTING);
     if(!Array.isArray(raw))return [];
-    return raw.filter(a=>a&&Number.isInteger(a.slot)&&a.slot>=1&&a.slot<=SESSION_SLOTS&&typeof a.agentId==='string').sort((a,b)=>a.slot-b.slot);
+    return raw.filter(a=>a&&Number.isInteger(a.slot)&&a.slot>=1&&a.slot<=SESSION_SLOTS&&typeof a.agentId==='string')
+      .map(({slot,agentId,color})=>({slot,agentId,color})).sort((a,b)=>a.slot-b.slot);
   }
   private describe(alias:SessionAlias){
     let agent:unknown=null;
@@ -50,10 +46,7 @@ export class VoiceApi {
     return {...alias,agent};
   }
   private resolve(ref:string):SessionAlias|undefined{
-    const aliases=this.list(),n=Number(ref);
-    if(Number.isInteger(n))return aliases.find(a=>a.slot===n);
-    const name=decodeURIComponent(ref).trim().toLowerCase();
-    return aliases.find(a=>a.alias?.trim().toLowerCase()===name);
+    return /^[1-6]$/.test(ref)?this.list().find(a=>a.slot===Number(ref)):undefined;
   }
   private validate(input:unknown):SessionAlias[]{
     if(!Array.isArray(input))throw invalid('bindings must be an array');
@@ -66,18 +59,12 @@ export class VoiceApi {
       if(agents.has(agentId))throw invalid('an agent can only occupy one slot');
       slots.add(slot);agents.add(agentId);
       const entry:SessionAlias={slot,agentId};
+      if(item?.alias!==undefined)throw invalid('named aliases are not supported; use a slot number');
       if(typeof item.color==='string'&&item.color.length<=32)entry.color=item.color;
-      if(typeof item.alias==='string'&&item.alias.trim())entry.alias=item.alias.trim().slice(0,64);
       out.push(entry);
     }
     return out.sort((a,b)=>a.slot-b.slot);
   }
-  private gc(){
-    const now=Date.now();
-    for(const [k,v] of this.idempotent)if(now-v.at>this.idempotencyTtlMs)this.idempotent.delete(k);
-    while(this.idempotent.size>500)this.idempotent.delete(this.idempotent.keys().next().value as string);
-  }
-
   async handle(ctx:Ctx):Promise<ApiResult|undefined>{
     const {method,parts,url}=ctx;
     if(parts[0]!=='api'||parts[1]!=='v1')return;
@@ -92,13 +79,9 @@ export class VoiceApi {
     }
     if(parts[2]==='attention'){
       if(parts.length===3&&method==='GET'){
-        const since=Number(url.searchParams.get('since')??0)||0,pending=url.searchParams.get('pending')==='true';
-        return ok({items:this.deps.feed.list({sinceSeq:since,pendingOnly:pending}),lastSeq:this.deps.feed.lastSeq()});
-      }
-      if(parts.length===5&&parts[4]==='ack'&&method==='POST'){
-        const body=await ctx.body();
-        const item=this.deps.feed.ack(parts[3],typeof body.by==='string'?body.by:ctx.role==='voice'?'voice':'client');
-        return item?ok(item):fail(404,'ATTENTION_NOT_FOUND','Attention item not found');
+        if(url.searchParams.has('pending'))return fail(400,'INVALID_REQUEST','pending is not supported');
+        const since=Number(url.searchParams.get('since')??0)||0;
+        return ok({items:this.deps.feed.list(since),lastSeq:this.deps.feed.lastSeq()});
       }
     }
     return;
@@ -107,7 +90,7 @@ export class VoiceApi {
   private async handleAliases(ctx:Ctx):Promise<ApiResult|undefined>{
     const {method,parts}=ctx;
     const needFull=()=>ctx.role==='full'?undefined:fail(403,'FORBIDDEN','Changing session slots requires the full pairing code');
-    const missing=(ref:string)=>fail(404,'ALIAS_NOT_FOUND',`No session bound to ${decodeURIComponent(ref)}`);
+    const missing=(ref:string)=>fail(404,'ALIAS_NOT_FOUND',`No session bound to slot ${ref}`);
     if(parts.length===3){
       if(method==='GET')return ok(this.list().map(a=>this.describe(a)));
       if(method==='PUT'){ // Replaces all bindings. Binding is a human action → full token only.
@@ -137,7 +120,7 @@ export class VoiceApi {
   }
 
   /**
-   * Places text into a Web UI input box without sending it. Target: an agent (path), a slot/alias (path), or — on
+   * Places text into a Web UI input box without sending it. Target: an agent (path), a slot (path), or — on
    * POST /draft — an optional body {agentId}; with no target the UI uses whichever agent it currently shows.
    */
   private async draft(ctx:Ctx,target:{agentId:string;slot?:number}|undefined):Promise<ApiResult>{
@@ -154,15 +137,13 @@ export class VoiceApi {
 
   private async promptAlias(ctx:Ctx):Promise<ApiResult>{
     const ref=ctx.parts[3],alias=this.resolve(ref);
-    if(!alias)return fail(404,'ALIAS_NOT_FOUND',`No session bound to ${decodeURIComponent(ref)}`);
+    if(!alias)return fail(404,'ALIAS_NOT_FOUND',`No session bound to slot ${ref}`);
     const body=await ctx.body(),message=typeof body.message==='string'?body.message.trim():'';
+    if(body.idempotencyKey!==undefined)return fail(400,'INVALID_REQUEST','idempotencyKey is not supported');
     if(!message)return fail(400,'INVALID_REQUEST','message is required');
     if(message.length>20000)return fail(413,'REQUEST_TOO_LARGE','message is too long');
     const mode=body.mode===undefined?'auto':String(body.mode);
     if(!['auto','prompt','steer','follow-up'].includes(mode))return fail(400,'INVALID_REQUEST','mode must be auto, prompt, steer or follow-up');
-    const key=typeof body.idempotencyKey==='string'&&body.idempotencyKey?`${alias.slot}:${alias.agentId}:${body.idempotencyKey.slice(0,128)}`:undefined;
-    this.gc();
-    if(key&&this.idempotent.has(key))return ok({...(this.idempotent.get(key)!.result as object),duplicate:true});
     let status:string;
     try{status=this.deps.agents.get(alias.agentId).record.status}
     catch{return fail(404,'ALIAS_TARGET_MISSING',`The session bound to slot ${alias.slot} no longer exists; rebind it`)}
@@ -172,7 +153,6 @@ export class VoiceApi {
     await this.deps.send(alias.agentId,kind,message);
     const result={accepted:true,slot:alias.slot,agentId:alias.agentId,mode:kind,statusBefore:status,
       source:typeof body.source==='string'?body.source.slice(0,32):undefined};
-    if(key)this.idempotent.set(key,{at:Date.now(),result});
     return ok(result);
   }
 }
