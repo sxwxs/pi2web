@@ -8,7 +8,7 @@ const draft=source.slice(source.indexOf('  const handledDrafts = new Set()'),sou
 const splitResourceKey=(key:string)=>{const index=key.indexOf(':');return {backendId:key.slice(0,index),remoteId:key.slice(index+1)}};
 
 function slotHarness(remote:any[]){
-  const backend={id:'a',status:'connected'},other={id:'b',status:'connected'};
+  const backend={id:'a',status:'connected',slotSyncReady:false},other={id:'b',status:'connected',slotSyncReady:true};
   const state={backends:[backend,other]};
   let bindings=[{slot:0,agentId:'b:other',color:'#ff0000'}];
   const writes:any[]=[];
@@ -23,6 +23,9 @@ function slotHarness(remote:any[]){
 describe('multi-backend voice integration',()=>{
   it('syncs only a backend’s remote IDs and never silently overwrites another backend’s physical slot',async()=>{
     const h=slotHarness([{slot:1,agentId:'remote-conflict'},{slot:2,agentId:'remote-ok',color:'#abcdef'}]);
+    h.pushSessionSlots();
+    expect(h.writes).toEqual([{id:'b',bindings:[{slot:1,agentId:'other',color:'#ff0000'}]}]);
+    h.writes.length=0;
     await h.syncSessionSlots(h.backend);
     expect(h.sessionKeyboard.getBindings().map((b:any)=>[b.slot,b.agentId])).toEqual([[0,'b:other'],[1,'a:remote-ok']]);
     h.pushSessionSlots();
