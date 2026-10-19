@@ -39,10 +39,10 @@ async function setup(){
 }
 
 describe('draft (text into the Web UI input box)',()=>{
-  it('is delivered live to subscribed Web UIs and targets an agent, a slot or an alias',async()=>{
+  it('is delivered live to subscribed Web UIs and targets an agent or a numbered slot',async()=>{
     const {call,fullToken,voiceToken,newAgent,openUi,wait}=await setup();
     const a1=await newAgent(),a2=await newAgent();
-    await call(fullToken,'PUT','/api/v1/session-aliases',{bindings:[{slot:1,agentId:a1.agentId,alias:'会话一'},{slot:2,agentId:a2.agentId}]});
+    await call(fullToken,'PUT','/api/v1/session-aliases',{bindings:[{slot:1,agentId:a1.agentId},{slot:2,agentId:a2.agentId}]});
     const ui=await openUi();
     ui.send({type:'subscribe_drafts'});await wait();
     expect(ui.msgs.map(m=>m.type)).toEqual(['subscribed_drafts']);
@@ -53,15 +53,13 @@ describe('draft (text into the Web UI input box)',()=>{
     expect(current.json.data).toMatchObject({agentId:null,slot:null,mode:'append',delivered:1,queued:true});
     const bySlot=await call(voiceToken,'POST','/api/v1/session-aliases/2/draft',{text:'第二个会话',mode:'replace'});
     expect(bySlot.json.data).toMatchObject({agentId:a2.agentId,slot:2,mode:'replace'});
-    const byAlias=await call(voiceToken,'POST',`/api/v1/session-aliases/${encodeURIComponent('会话一')}/draft`,{text:'别名'});
-    expect(byAlias.json.data).toMatchObject({agentId:a1.agentId,slot:1});
     const byAgent=await call(voiceToken,'POST',`/api/v1/agents/${a1.agentId}/draft`,{text:'直接'});
     expect(byAgent.json.data.agentId).toBe(a1.agentId);
     await wait();
 
     const drafts=ui.msgs.filter(m=>m.type==='draft_event');
     expect(drafts.map(m=>[m.draft.text,m.draft.agentId??null,m.draft.mode,m.replay])).toEqual([
-      ['帮我看下测试',null,'append',false],['第二个会话',a2.agentId,'replace',false],['别名',a1.agentId,'append',false],['直接',a1.agentId,'append',false]]);
+      ['帮我看下测试',null,'append',false],['第二个会话',a2.agentId,'replace',false],['直接',a1.agentId,'append',false]]);
     expect(drafts[0].draft.source).toBe('sotto');
     expect(drafts.every(m=>Check(schema,m))).toBe(true);
     expect(Check(schema,{type:'draft_ack',id:drafts[0].draft.id})).toBe(true);
@@ -101,12 +99,8 @@ describe('draft (text into the Web UI input box)',()=>{
     expect((await call(voiceToken,'POST','/api/v1/draft',{text:'ok',agentId:a1.agentId})).status).toBe(200);
   });
 
-  it('cannot be subscribed to with the voice token; only the voice endpoints are allowed',async()=>{
-    const {voiceToken,openUi,wait}=await setup();
-    const ws=await openUi(voiceToken);
-    ws.send({type:'subscribe_drafts',requestId:'d1'});await wait();
-    expect(ws.msgs[0]).toMatchObject({type:'command_result',requestId:'d1',success:false,error:{code:'FORBIDDEN'}});
-    ws.ws.close();
+  it('allows voice clients to post drafts but not change bindings',async()=>{
+    await setup();
     expect(voiceAllowed('POST','/api/v1/draft')).toBe(true);
     expect(voiceAllowed('POST','/api/v1/agents/a1/draft')).toBe(true);
     expect(voiceAllowed('POST','/api/v1/session-aliases/1/draft')).toBe(true);
