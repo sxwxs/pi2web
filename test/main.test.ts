@@ -4,9 +4,27 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {promisify} from 'node:util';
+import {AuthStore} from '../src/auth.js';
 
 const entry=path.resolve('src/main.ts');
 const run=(...args:string[])=>promisify(execFile)(process.execPath,['--import','tsx',entry,...args],{timeout:10_000});
+
+describe('voice token CLI',()=>{
+  it('prints a new pairing code to stderr while reserving stdout for the draft token',async()=>{
+    const dir=await mkdtemp(path.join(tmpdir(),'pi2web-voice-cli-'));
+    try{
+      const first=await run('--data-dir',dir,'--create-voice-token');
+      const code=first.stderr.match(/Remote Pi pairing code \(shown once; save it securely\): ([A-Za-z0-9_-]+)/)?.[1];
+      expect(code).toBeTruthy();
+      expect(first.stdout.trim()).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+      expect(first.stdout).not.toContain(code);
+      expect(await new AuthStore(dir).verify(code!)).toBe(true);
+      const next=await run('--data-dir',dir,'--create-voice-token');
+      expect(next.stderr).not.toContain('Remote Pi pairing code');
+      expect(next.stdout.trim()).not.toBe(first.stdout.trim());
+    }finally{await rm(dir,{recursive:true,force:true})}
+  },30_000);
+});
 
 describe('no-auth CLI options',()=>{
   it('documents the insecure override in help',async()=>{

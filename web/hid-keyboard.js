@@ -102,16 +102,6 @@
       } catch { return new Map(); }
     }
 
-    /** Adopts bindings coming from the server (shared "session slots"); slots here are 0-based. */
-    replaceBindings(list) {
-      this.bindings = new Map((list || []).flatMap(item => {
-        const slot = Number(item?.slot), agentId = String(item?.agentId || '');
-        const color = normalizeColor(item?.color) || PALETTE[((slot % PALETTE.length) + PALETTE.length) % PALETTE.length];
-        return Number.isInteger(slot) && slot >= 0 && slot < 6 && agentId && color ? [[slot, {agentId, color}]] : [];
-      }));
-      this.saveBindings();
-    }
-
     saveBindings() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.getBindings()));
       this.onBindingsChange?.(this.getBindings());

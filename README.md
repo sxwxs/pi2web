@@ -223,7 +223,7 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 ### 六键 Session 键盘（WebHID）
 
-在 Chrome/Edge 中通过 HTTPS 或 localhost 打开 Web UI，在“配置 → 六键 Session 键盘”连接设备。每个槽位可以绑定已有 Session、换色或解绑；即使 Session 已不可用，也能在这里清理绑定。绑定保存在当前浏览器，并按 Backend 同步到对应服务端（供语音助手按槽位寻址）；按键切换 Session，灯光显示活动状态。
+在 Chrome/Edge 中通过 HTTPS 或 localhost 打开 Web UI，在“配置 → 六键 Session 键盘”连接设备。每个槽位可以绑定已有 Session、换色或解绑；即使 Session 已不可用，也能在这里清理绑定。绑定仅保存在当前浏览器；按键切换 Session，灯光显示活动状态。语音输入不使用键盘槽位。
 
 目标固件是 **Nozzala CH552G 六键板 `v1-codex-full 1.0.0`**，Build ID `51AE6B3BF94B49FF`。协议参考为 **Nozzala CodexFull WebHID Console v0.1.0（2026-08-31）** 的 `DEVELOPMENT.md` 和 `protocol.js`：
 
@@ -239,30 +239,18 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 卸载 Agent 会通过同一条可回放事件流发送 `agent_unloaded`；在线客户端据此设为 `unloaded`、清除活动灯效并关闭待回答控件，无需重连。
 
-## 语音客户端 API（会话槽位 / 关注事件 / 受限 Token）
+## 外部语音听写到输入框（实验性）
 
-给外部语音助手（例如 [Sotto](https://github.com/sxwxs/sotto)）用的一组**增量**接口，普通 Web UI 不受影响。
+[Sotto](https://github.com/sxwxs/Sotto) 可以调用 `POST /api/v1/draft`，body 为 `{text, mode?:"append"|"replace", source?}`。Web UI 收到 `draft_event` 后只把文字写入**当前显示的输入框**，由人检查并手动发送；不指定 Agent、不切换会话、更不能通过 voice token 发 prompt。无选中 Agent 或无页面在线时，文字在服务进程内暂存（最多 50 条、1 小时），页面选择 Agent 或重连后补发，写入后回 `draft_ack`。Sotto 的 `services.pi2web.url` 选择目标 Backend；在同一 Backend 开多个网页标签时，同一段文字可能写入多个标签的输入框，请在可信设备上只开一个用于听写的页面。
 
-**受限 voice token**：配对码等同于宿主机 Shell 权限（Terminal、`bash`）。语音客户端应改用单独的 voice token：
+**受限 voice token** 只可调用 `POST /api/v1/draft` 和 `GET /api/v1/system/status`；不能读取 Agent、使用终端/文件、访问其他工作区 API，也不能连接 WebSocket 或作为网页配对码登录。普通网页仍用配对码访问完整 API。配置方式：
 
 ```bash
-pi2web --create-voice-token     # 创建或替换，明文只显示一次
+pi2web --create-voice-token     # 创建或替换，只输出一次 token
 pi2web --revoke-voice-token     # 停用
 ```
 
-voice token 仅用于 REST：列出 Agent、读 Agent 状态与最近结果、对 Agent 发 `prompt/steer/follow-up/abort`、回答扩展对话框、读取槽位并按槽位 prompt/draft、读取完成事件和写入 Draft。Terminal、bash、Workspace 文件、Collab、邮件设置、创建/Archive Agent、修改槽位绑定均不可用；WebSocket 握手也拒绝 voice token。它不能当作配对码登录。撤销或轮换后新的 REST 请求立即失效；由于 voice token 不开放 WebSocket，无需为撤销维护连接状态。注意：能给 Agent 发 prompt 就等于能让 Agent 使用它被授予的工具，请按此评估风险。`--no-auth` 模式下不检查 token，这种部署只适用于可信的本机回环环境。
-
-**会话槽位（"会话一"）**：六键 Session 键盘的槽位 1–6 现在按 Backend 保存在各自的服务端。Web UI 连接后同步对应 Backend 的绑定；Sotto 的 `services.pi2web.url` 指定要寻址的 Backend。不同 Backend 的槽位映射到同一块物理键盘时若发生撞槽，Web UI 保留已有绑定并在浏览器控制台提示，需手动调整。
-
-- `GET /api/v1/session-aliases`、`GET/DELETE /api/v1/session-aliases/:slot`、`PUT /api/v1/session-aliases`（整体替换，仅配对码）。槽位只能用 1–6 寻址，不支持自定义别名；即使服务端返回空绑定，浏览器也以服务端为准，不会隐式上传本地旧绑定。升级后如需保留旧绑定，请在网页重新设置。
-- `POST /api/v1/session-aliases/:slot/prompt`，body `{message, mode?, source?}`：`mode` 默认 `auto`，Agent 忙碌时自动转为 `follow-up`，已卸载的 Agent 按需启动；不提供重复请求去重（旧的 `idempotencyKey` 参数返回 400），语音客户端应要求发送确认。绑定的 Agent 已不存在时返回 `404 ALIAS_TARGET_MISSING`。
-- `GET /api/v1/agents/:id/last-result`：服务启动后最近一次完成任务的最终文本。
-
-**语音输入到输入框（Draft）**：`POST /api/v1/draft`（当前页面所显示的同一 Backend 上的 Agent）、`POST /api/v1/agents/:id/draft` 或 `POST /api/v1/session-aliases/:slot/draft`；body `{text,mode?:"append"|"replace",source?}`。文字不会自动发送给 Agent；Web UI 订阅 `draft_event`，插入输入框后回 `draft_ack`。服务端仅在进程内暂存未确认文字（最多 50 条、1 小时）；没有合适页面打开时仍可排队，页面切换到该 Backend 或重连后会重试。
-
-**最近完成事件（Attention）**：`GET /api/v1/attention?since=<seq>` 返回当前进程中最近的 Agent 完成事件和 `lastSeq`，最多保留 200 条，用于 Sotto 在发送后等待对应结果；中止的任务不会发布完成事件。暂无确认/解决状态或 WebSocket 通道，需要人工处理的通知留待后续阶段设计。
-
-协议定义见 `packages/protocol/`。
+如果在全新数据目录首次创建 voice token，CLI 会将首次生成的**网页配对码输出到 stderr**，而 stdout 仍只包含 voice token，便于重定向到凭据文件。`--no-auth` 模式下不检查 token，仅适合可信的本机回环环境。语音听写接口定义见 `packages/protocol/`。
 
 ## 多 Agent 协作中枢（Collab Hub）
 

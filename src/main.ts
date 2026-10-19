@@ -56,8 +56,8 @@ if(mailParts===3){
 }
 const server=new RemotePiServer({host,port,noAuth,allowInsecureNoAuth,dataDir:value('--data-dir',process.env.PI_REMOTE_DIR??`${process.env.HOME??'.'}/.pi/remote-pi`),voice,sessionNamer,mailNotifier});
 if(args.includes('--rotate-access-token')){await server.auth.init();console.log(await server.auth.rotate());process.exit(0)}
-if(args.includes('--create-voice-token')){await server.auth.init();console.error('Restricted voice token (can prompt agents; no direct terminal, bash or file access). Shown once:');console.log(await server.auth.rotateVoice());process.exit(0)}
-if(args.includes('--revoke-voice-token')){await server.auth.init();await server.auth.revokeVoice();console.error('Voice token revoked.');process.exit(0)}
+if(args.includes('--create-voice-token')){const first=await server.auth.init();if(first.token)console.error(`Remote Pi pairing code (shown once; save it securely): ${first.token}`);console.error('Draft-only voice token (shown once):');console.log(await server.auth.rotateVoice());process.exit(0)}
+if(args.includes('--revoke-voice-token')){const first=await server.auth.init();if(first.token)console.error(`Remote Pi pairing code (shown once; save it securely): ${first.token}`);await server.auth.revokeVoice();console.error('Voice token revoked.');process.exit(0)}
 if(args.includes('--set-access-token')||args.includes('--set-access-token-env')){
   const fromEnv=args.includes('--set-access-token-env'),flag=fromEnv?'--set-access-token-env':'--set-access-token';
   let token=value(flag,'');
