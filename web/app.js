@@ -276,6 +276,8 @@
       backend.saved = true;
     }
     persistConnections();
+    backend.slotSyncReady = false;
+    backend.slotSyncGeneration = (backend.slotSyncGeneration || 0) + 1;
     connectSocket(backend);
     void syncSessionSlots(backend);
     updateVoiceAvailability();
@@ -618,7 +620,7 @@
     if (applyingServerSlots) return;
     clearTimeout(slotPushTimer);
     slotPushTimer = setTimeout(() => {
-      for (const backend of state.backends.filter(item => item.status === 'connected')) {
+      for (const backend of state.backends.filter(item => item.status === 'connected' && item.slotSyncReady)) {
         const bindings = sessionKeyboard.getBindings().filter(item => splitResourceKey(item.agentId).backendId === backend.id)
           .map(item => ({slot:item.slot+1, agentId:splitResourceKey(item.agentId).remoteId, color:item.color}));
         requestBackend(backend.id, '/api/v1/session-aliases', {method:'PUT', body:JSON.stringify({bindings})})
@@ -627,11 +629,17 @@
     }, 300);
   }
   async function syncSessionSlots(backend) {
+    const generation = backend.slotSyncGeneration;
+    const ownBindings = () => sessionKeyboard.getBindings().filter(item => splitResourceKey(item.agentId).backendId === backend.id);
+    const original = JSON.stringify(ownBindings());
     let remote;
     try { remote = await requestBackend(backend.id, '/api/v1/session-aliases'); } catch { return; } // older server
-    if (!Array.isArray(remote) || backend.status !== 'connected') return;
+    if (!Array.isArray(remote) || backend.status !== 'connected' || backend.slotSyncGeneration !== generation) return;
+    backend.slotSyncReady = true;
+    // A local edit made while the request was in flight takes precedence over its stale response.
+    if (JSON.stringify(ownBindings()) !== original) { pushSessionSlots(); return; }
     const local = sessionKeyboard.getBindings();
-    if (!remote.length) { if (local.some(item => splitResourceKey(item.agentId).backendId === backend.id)) pushSessionSlots(); return; }
+    if (!remote.length) { if (original !== '[]') pushSessionSlots(); return; }
     const others = local.filter(item => splitResourceKey(item.agentId).backendId !== backend.id);
     const occupied = new Set(others.map(item => item.slot));
     const incoming = remote.filter(item => !occupied.has(item.slot-1))
