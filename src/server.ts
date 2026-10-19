@@ -221,6 +221,10 @@ this.server.on('upgrade',(req,socket,head)=>{void this.upgrade(req,socket,head).
   const fail=(status:number)=>{if(settled)return;done();socket.write(`HTTP/1.1 ${status} Relay Failed\r\nContent-Length: 0\r\n\r\n`);socket.destroy()};
   // The browser's socket owns the upstream until a client takes it over, and a handshake this server
   // rejects never hands one over, so closing it takes the upstream down whether it opened or not.
+  // Node hands the socket over on upgrade and takes its own error handler with it, so a browser that
+  // resets the connection while the target is still answering would otherwise throw with nobody
+  // listening. Destroying it is enough: the close handler does the rest.
+  socket.on('error',()=>socket.destroy());
   socket.on('close',()=>{done();if(!established)upstream.terminate()});
   upstream.on('open',()=>{done();this.wss.handleUpgrade(req,socket,head,client=>{established=client;
    // Relayed sockets must be known to stop(), or an open Agent or Terminal keeps shutdown waiting.

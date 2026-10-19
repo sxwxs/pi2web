@@ -254,6 +254,31 @@ describe('backend relay', () => {
     browser.destroy();
   });
 
+  it('survives a browser that resets the connection while the target is still answering', async () => {
+    const {base, headers, token} = await start();
+    const pending:net.Socket[] = [];
+    const silent = net.createServer(socket => { pending.push(socket) });
+    await new Promise<void>(resolve => silent.listen(0, '127.0.0.1', resolve));
+    const port = (silent.address() as {port:number}).port;
+    const created = await fetch(`${base}/api/v1/hosts`, {method:'POST', headers, body:JSON.stringify({name:'silent', base:`http://127.0.0.1:${port}`})});
+    const host = (await created.json()).data;
+
+    const url = new URL(base);
+    const browser = net.connect(Number(url.port), url.hostname);
+    await new Promise<void>(resolve => browser.on('connect', () => resolve()));
+    browser.write([`GET /api/v1/hosts/${host.id}/api/v1/ws HTTP/1.1`, `Host: ${url.host}`, 'Upgrade: websocket', 'Connection: Upgrade',
+      'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', `Sec-WebSocket-Protocol: access-token.${token}`, '', ''].join('\r\n'));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    // Node hands the socket over on upgrade and stops watching it for errors, so a reset here used to
+    // be thrown with nobody listening, taking the whole server down with one browser.
+    browser.resetAndDestroy();
+    await new Promise<void>(resolve => setTimeout(resolve, 100));
+    expect((await fetch(`${base}/api/v1/hosts`, {headers})).status).toBe(200);
+
+    for (const socket of pending) socket.destroy();
+    await new Promise<void>(resolve => silent.close(() => resolve()));
+  });
+
   it('closes relayed sockets on shutdown', async () => {
     const {base, token, host} = await start();
     const socket = new WebSocket(`${base.replace('http', 'ws')}/api/v1/hosts/${host.id}/api/v1/ws`, [`access-token.${token}`]);
