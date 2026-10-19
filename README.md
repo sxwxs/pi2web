@@ -193,7 +193,7 @@ Web UI 的 Agent 列表支持右键 `Archive`。Archive 只设置数据库记录
 
 ```bash
 npm pack --dry-run
-npm install -g ./pi2web-0.2.0.tgz
+npm install -g ./pi2web-0.2.1.tgz
 ```
 
 ## Web UI
