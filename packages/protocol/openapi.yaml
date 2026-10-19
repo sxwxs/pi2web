@@ -22,6 +22,8 @@ paths:
   /agents/{id}/{action}:
     get: {operationId: getAgentResource, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [state,messages,capabilities,session]}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
     post: {operationId: agentCommand, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [prompt,steer,follow-up,abort,compact,model,thinking,session-name,navigate,fork,extension-response]}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /draft:
+    post: {operationId: draftText, description: 'Insert text into the currently displayed Web UI input box on this backend, without sending it to an Agent. Body {text, mode?: append|replace, source?}; explicit agent/slot targets are rejected. Pending text is kept in memory until a page acknowledges it.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
 components:
   securitySchemes: {bearerAuth: {type: http, scheme: bearer}}
   parameters:

@@ -29,6 +29,7 @@ describe('queued steering and follow-up messages',()=>{
   expect((await (await fetch(base+`/api/v1/agents/${agent.agentId}/queue`,{headers})).json()).data).toEqual({steering:[],followUp:[]});
 
   const running=post(`/api/v1/agents/${agent.agentId}/prompt`,{message:'work'});
+  await expect.poll(()=>agents.get(agent.agentId).record.status).toBe('streaming');
   expect((await (await post(`/api/v1/agents/${agent.agentId}/steer`,{message:'redirect'})).json()).data).toEqual({success:true,disposition:'queued'});
   expect((await (await post(`/api/v1/agents/${agent.agentId}/follow-up`,{message:'and then'})).json()).data).toEqual({success:true,disposition:'queued'});
   const queued={steering:['redirect'],followUp:['and then']};
@@ -47,12 +48,13 @@ describe('queued steering and follow-up messages',()=>{
  });
 
  it('clears the queue over the WebSocket within the published protocol',async()=>{
-  const {agent,base,token,post,backends}=await setup();
+  const {agents,agent,base,token,post,backends}=await setup();
   const socket=new WebSocket(`${base.replace('http','ws')}/api/v1/ws`,{headers:{authorization:`Bearer ${token}`}});
   await once(socket,'open');
   const messages:any[]=[];socket.on('message',data=>messages.push(JSON.parse(String(data))));
   socket.send(JSON.stringify({type:'subscribe',agentId:agent.agentId}));
   const running=post(`/api/v1/agents/${agent.agentId}/prompt`,{message:'work'});
+  await expect.poll(()=>agents.get(agent.agentId).record.status).toBe('streaming');
   await post(`/api/v1/agents/${agent.agentId}/steer`,{message:'redirect'});
   const command={type:'clear-queue',requestId:'r1',agentId:agent.agentId};
   expect(Check(schema,command)).toBe(true);

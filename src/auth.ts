@@ -6,6 +6,8 @@ export type AuthFile = {
   tokenHash: string;
   createdAt: string;
   rotatedAt?: string;
+  voiceTokenHash?: string;
+  voiceTokenCreatedAt?: string;
 };
 
 const hash = (token:string) => createHash('sha256').update(token).digest('hex');
@@ -17,6 +19,8 @@ const validateToken = (token:string) => {
     );
   }
 };
+
+export type AuthRole = 'full' | 'voice';
 
 export class AuthStore {
   constructor(private readonly dir:string) {}
@@ -52,6 +56,35 @@ export class AuthStore {
     } catch {
       return false;
     }
+  }
+
+  /** Only the pairing code verifies as a full-power token. */
+  async role(token:string):Promise<AuthRole|undefined> {
+    try {
+      const data = JSON.parse(await readFile(this.file, 'utf8')) as AuthFile;
+      const same = (expected?:string) => {
+        if (!expected) return false;
+        const actual = Buffer.from(hash(token)), stored = Buffer.from(expected);
+        return actual.length === stored.length && timingSafeEqual(actual, stored);
+      };
+      if (same(data.tokenHash)) return 'full';
+      if (same(data.voiceTokenHash)) return 'voice';
+    } catch { /* absent credential */ }
+    return undefined;
+  }
+
+  async rotateVoice() {
+    const old = JSON.parse(await readFile(this.file, 'utf8')) as AuthFile;
+    const token = randomBytes(32).toString('base64url');
+    await this.save({...old, voiceTokenHash:hash(token), voiceTokenCreatedAt:new Date().toISOString()});
+    return token;
+  }
+
+  async revokeVoice() {
+    const old = JSON.parse(await readFile(this.file, 'utf8')) as AuthFile;
+    delete old.voiceTokenHash;
+    delete old.voiceTokenCreatedAt;
+    await this.save(old);
   }
 
   async rotate() {
