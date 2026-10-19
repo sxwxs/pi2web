@@ -862,7 +862,7 @@
     try { await loadMessagePage(agent.agentId,undefined,true); await loadSessionIdentity(); } catch (error) { addCard('加载消息失败', error.message, 'error', true); }
     renderAgentList();
     const backend=backendOf(agent.backendId);
-    if(backend)subscribeAgent(backend,agent);
+    if(backend){subscribeAgent(backend,agent);if(backend.ws?.readyState===WebSocket.OPEN)backend.ws.send(JSON.stringify({type:'subscribe_drafts'}));}
   }
   async function loadSessionIdentity() {
     if (!state.agent) return;
@@ -1137,12 +1137,14 @@
     clearTimeout(state.mediaTimer);const recorder=state.mediaRecorder,mime=recorder?.mimeType||'audio/webm',blob=new Blob(state.mediaChunks,{type:mime}),agentId=state.mediaAgentId;state.mediaStream?.getTracks().forEach(track=>track.stop());state.mediaRecorder=null;state.mediaStream=null;state.mediaChunks=[];state.mediaAgentId=null;$('voiceInput').textContent='…';$('voiceInput').classList.remove('recording');
     if(!agentId){$('voiceInput').textContent='🎙';return;}const {backendId,remoteId}=splitResourceKey(agentId),transcribeBackend=backendOf(backendId);if(!transcribeBackend){$('voiceInput').textContent='🎙';return toast('该 Session 的 backend 已断开');}try{const response=await fetch(transcribeBackend.base+`/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${transcribeBackend.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
   }
-  const handledDrafts = new Set();
+  const handledDrafts = new Set(), draftsInFlight = new Set();
   async function handleDraftEvent(message) {
     const draft = message.draft, backend = backendOf(message.backendId);
     if (!draft || typeof draft.text !== 'string' || !backend) return;
     const ack = () => { handledDrafts.add(draft.id); if (handledDrafts.size > 200) handledDrafts.delete(handledDrafts.values().next().value); if (backend.ws?.readyState === WebSocket.OPEN) backend.ws.send(JSON.stringify({type:'draft_ack', id:draft.id})); };
     if (handledDrafts.has(draft.id)) { ack(); return; }
+    if (draftsInFlight.has(draft.id)) return;
+    draftsInFlight.add(draft.id);
     try {
       if (draft.agentId) {
         const id = resourceKey(backend.id, draft.agentId);
@@ -1161,6 +1163,7 @@
       input.focus(); input.setSelectionRange(input.value.length,input.value.length); input.scrollTop = input.scrollHeight;
       toast('语音输入已写入输入框'); ack();
     } catch (error) { toast(`语音输入失败：${error.message}`); }
+    finally { draftsInFlight.delete(draft.id); }
   }
   function handleAgentEvent(message) {
     if (message.type === 'draft_event') { void handleDraftEvent(message); return; }

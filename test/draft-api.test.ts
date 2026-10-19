@@ -8,6 +8,8 @@ import {WorkspaceStore} from '../src/workspaces.js';
 import {AgentManager,MockBackend} from '../src/agents.js';
 import {DraftHub} from '../src/drafts.js';
 import {voiceAllowed} from '../src/voice-api.js';
+import {Check} from 'typebox/value';
+import schema from '../packages/protocol/websocket.schema.json' with {type:'json'};
 
 let server:RemotePiServer|undefined;
 afterEach(async()=>{await server?.stop();server=undefined});
@@ -44,6 +46,7 @@ describe('draft (text into the Web UI input box)',()=>{
     const ui=await openUi();
     ui.send({type:'subscribe_drafts'});await wait();
     expect(ui.msgs.map(m=>m.type)).toEqual(['subscribed_drafts']);
+    expect(Check(schema,ui.msgs[0])).toBe(true);
 
     const current=await call(voiceToken,'POST','/api/v1/draft',{text:'帮我看下测试',source:'sotto'});
     expect(current.status).toBe(200);
@@ -60,6 +63,8 @@ describe('draft (text into the Web UI input box)',()=>{
     expect(drafts.map(m=>[m.draft.text,m.draft.agentId??null,m.draft.mode,m.replay])).toEqual([
       ['帮我看下测试',null,'append',false],['第二个会话',a2.agentId,'replace',false],['别名',a1.agentId,'append',false],['直接',a1.agentId,'append',false]]);
     expect(drafts[0].draft.source).toBe('sotto');
+    expect(drafts.every(m=>Check(schema,m))).toBe(true);
+    expect(Check(schema,{type:'draft_ack',id:drafts[0].draft.id})).toBe(true);
     ui.ws.close();
   });
 
