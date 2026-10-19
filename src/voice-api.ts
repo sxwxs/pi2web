@@ -160,7 +160,7 @@ export class VoiceApi {
     if(message.length>20000)return fail(413,'REQUEST_TOO_LARGE','message is too long');
     const mode=body.mode===undefined?'auto':String(body.mode);
     if(!['auto','prompt','steer','follow-up'].includes(mode))return fail(400,'INVALID_REQUEST','mode must be auto, prompt, steer or follow-up');
-    const key=typeof body.idempotencyKey==='string'&&body.idempotencyKey?`${alias.slot}:${body.idempotencyKey.slice(0,128)}`:undefined;
+    const key=typeof body.idempotencyKey==='string'&&body.idempotencyKey?`${alias.slot}:${alias.agentId}:${body.idempotencyKey.slice(0,128)}`:undefined;
     this.gc();
     if(key&&this.idempotent.has(key))return ok({...(this.idempotent.get(key)!.result as object),duplicate:true});
     let status:string;

@@ -58,6 +58,10 @@ describe('session slots + prompt by slot',()=>{
     const dup=await call(voice,'POST','/api/v1/session-aliases/1/prompt',{message:'帮我跑测试',idempotencyKey:'k1'});
     expect(dup.json.data.duplicate).toBe(true);
     expect((await call(full,'GET',`/api/v1/agents/${a1.agentId}/messages`)).json.data.filter((m:any)=>m.role==='user')).toHaveLength(1);
+    await call(full,'PUT','/api/v1/session-aliases',{bindings:[{slot:1,agentId:a2.agentId}]});
+    const rebound=await call(voice,'POST','/api/v1/session-aliases/1/prompt',{message:'新会话',idempotencyKey:'k1'});
+    expect(rebound.json.data).toMatchObject({agentId:a2.agentId,accepted:true});
+    expect(rebound.json.data.duplicate).toBeUndefined();
 
     expect((await call(voice,'POST','/api/v1/session-aliases/3/prompt',{message:'x'})).json.error.code).toBe('ALIAS_NOT_FOUND');
     expect((await call(voice,'POST','/api/v1/session-aliases/1/prompt',{message:'  '})).status).toBe(400);
