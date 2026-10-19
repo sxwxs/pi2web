@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const {BackendRegistry, createBackendId, resourceKey, splitResourceKey, normalizePath, isInsidePath, matchWorkspace} = window.RemotePiBackendState;
+  const {BackendRegistry, createBackendId, resourceKey, splitResourceKey, normalizePath, isInsidePath, matchWorkspace, backendWire, relayChildren} = window.RemotePiBackendState;
   const backendRegistry = new BackendRegistry(localStorage, location.origin);
   // The registry owns backend connections and their resource caches. This object
   // only keeps cross-backend UI selections and transient view state.
@@ -36,6 +36,16 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const toast = text => { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => $('toast').hidden = true, 3000); };
   const backendOf = id => backendRegistry.find(id);
+  const wireOf = backend => backendWire(backend, backendOf(backend.relayVia));
+  /** Every call to a Backend goes through here, so a relayed one can never fall back to its own address. */
+  const requireWire = backend => {
+    const wire = wireOf(backend);
+    if (!wire) throw Error(`请先连接中继 Backend「${backendOf(backend.relayVia)?.name || backend.relayVia}」`);
+    return wire;
+  };
+  const relayName = backend => backend.relayHostId ? `经「${backendOf(backend.relayVia)?.name || '?'}」中继` : '';
+  /** What a Backend is reached with. An edit that fails has to put exactly this back, and no more. */
+  const routeOf = backend => ({name:backend.name, base:backend.base, token:backend.token, saved:backend.saved, relayHostId:backend.relayHostId, relayVia:backend.relayVia});
   const connectedBackends = () => backendRegistry.connected();
   const primaryBackend = () => backendRegistry.primary();
   const hasConnection = () => connectedBackends().length > 0;
@@ -62,7 +72,9 @@
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (response.status === 401) onUnauthorized?.();
-      throw Error(body.error?.message || `HTTP ${response.status}`);
+      // Status and code travel with the error: a caller cleaning up may need to tell "already gone"
+      // from "could not reach it", which the message alone does not say.
+      throw Object.assign(Error(body.error?.message || `HTTP ${response.status}`), {status:response.status, code:body.error?.code});
     }
     return body.data;
   }
@@ -73,7 +85,8 @@
     const backend = backendOf(backendId);
     if (!backend) throw Error('Backend 不存在');
     if (backend.status !== 'connected') throw Error(`Backend「${backend.name || backendId}」未连接`);
-    return request(backend.base, backend.token, url, options, () => {
+    const wire = requireWire(backend);
+    return request(wire.prefix, wire.token, url, options, () => {
       if (backend.status === 'connected') void deactivateBackend(backend, {status:'error', error:'配对码无效或已失效'});
     });
   }
@@ -83,6 +96,26 @@
     return requestBackend(backendId, `/api/v1/agents/${encodeURIComponent(remoteId)}${suffix}`, options);
   };
   const postAgent = (agentId, suffix = '', body = {}) => requestAgent(agentId, suffix, {method:'POST', body:JSON.stringify(body)});
+  /**
+   * Deletes the relay records of Backends that are about to be forgotten here. Every record holds a
+   * target's address and pairing code, so one that cannot be deleted is reported rather than leaked
+   * silently, and one failure does not stop the records after it from being deleted.
+   *
+   * A record the relay no longer has counts as deleted, so retrying a half-finished cascade can
+   * actually finish instead of failing on the part that already succeeded.
+   */
+  async function deleteRelayRecords(items) {
+    const failed = [];
+    for (const item of items) {
+      if (!item.relayHostId) continue;
+      try {
+        await requestBackend(item.relayVia, `/api/v1/hosts/${encodeURIComponent(item.relayHostId)}`, {method:'DELETE'});
+      } catch (error) {
+        if (error.status !== 404 && error.code !== 'HOST_NOT_FOUND') failed.push({backend:item, error});
+      }
+    }
+    return failed;
+  }
 
   function openPair(backend = null) {
     if ($('pairDialog').open) return;
@@ -91,10 +124,26 @@
     $('pairName').value = backend?.name || '';
     $('pairBase').value = backend?.base || location.origin;
     $('pairToken').value = backend?.token || '';
+    renderRelayOptions(backend);
     if (!$('pairDialog').open) $('pairDialog').showModal();
   }
   function persistConnections() {
     backendRegistry.persist();
+  }
+
+  /** Only a connected direct Backend can relay: it is the one that will reach the target and store its code. */
+  function renderRelayOptions(backend = null) {
+    const select = $('pairRelayVia'), connected = connectedBackends().filter(item => !item.relayHostId && item.id !== backend?.id);
+    // The Backend's own relay stays on the list while it is offline: dropping it would leave the route
+    // silently set to 直连, so editing a name would try to reach the target the browser cannot reach.
+    const current = backend?.relayVia ? backendOf(backend.relayVia) : null;
+    const relays = current && !connected.includes(current) ? [...connected, current] : connected;
+    const direct = document.createElement('option'); direct.value = ''; direct.textContent = '直连';
+    select.replaceChildren(direct, ...relays.map(item => {
+      const option = document.createElement('option'); option.value = item.id; option.textContent = `经「${item.name || item.base}」中继${item.status === 'connected' ? '' : '（未连接）'}`; return option;
+    }));
+    select.value = relays.some(item => item.id === backend?.relayVia) ? backend.relayVia : '';
+    select.closest('label').hidden = !relays.length;
   }
 
   function updateHeaderStatus() {
@@ -184,6 +233,8 @@
     clearWorkspaceSelection(backend.id);
     clearAgentSelection(backend.id);
     clearTerminalSelection(backend.id);
+    // A relayed Backend only exists through its relay, so it goes down with it.
+    for (const relayed of relayChildren(state.backends, backend.id)) if (relayed.status === 'connected') deactivateBackendState(relayed, status, error);
   }
 
   async function deactivateBackend(backend, {status = 'off', error = ''} = {}) {
@@ -229,12 +280,15 @@
   async function connectBackend(entry, {confirmSave = true, pair = true} = {}) {
     const base = String(entry.base || '').trim().replace(/\/$/, '') || location.origin;
     let token = String(entry.token || '').trim();
-    if (!token && await backendRequiresAuth(base)) {
+    const wire = requireWire({...entry, base, token});
+    // A relayed Backend holds no code in this browser: the relay authenticates for it, whether or not
+    // the target asks for one. Only a direct one has to find out whether this server still wants a code.
+    if (!entry.relayHostId && !token && await backendRequiresAuth(wire.prefix)) {
       if (pair) openPair(entry);
       throw Error('请先输入配对码');
     }
 
-    const statusInfo = await request(base, token, '/api/v1/system/status');
+    const statusInfo = await request(wire.prefix, wire.token, '/api/v1/system/status');
     if (statusInfo.protocolVersion !== 1) {
       throw Error(`不支持的协议版本 ${statusInfo.protocolVersion}（需要 1）`);
     }
@@ -254,6 +308,8 @@
       name: String(entry.name || '').trim() || base,
       base,
       token,
+      relayHostId: entry.relayHostId || '',
+      relayVia: entry.relayVia || '',
       status: 'connected',
       error: '',
       statusInfo,
@@ -271,7 +327,8 @@
       throw error;
     }
 
-    if (entry.saved) backend.saved = true;
+    // A relayed Backend keeps no secret in this browser, so there is nothing to ask about saving.
+    if (entry.saved || backend.relayHostId) backend.saved = true;
     if (confirmSave && authRequired && !backend.saved && confirm(`是否将「${backend.name}」的配对码保存到浏览器本地存储？\n\n请仅在可信设备上保存。`)) {
       backend.saved = true;
     }
@@ -367,7 +424,7 @@
       const name = document.createElement('b'); name.textContent = backend.name || backend.base;
       const detail = document.createElement('small');
       const statusText = backend.status === 'connected' ? (backend.reconnecting ? '已连接 · 重连中' : `已连接 · ${backend.authRequired === false ? '无需认证 · ' : ''}${backend.serverInfo}`) : backend.status === 'error' ? `连接失败 · ${backend.error || ''}` : '未连接';
-      detail.textContent = `${backend.base} · ${statusText}`;
+      detail.textContent = [backend.base, relayName(backend), statusText].filter(Boolean).join(' · ');
       info.append(name, detail);
       const actions = document.createElement('div'); actions.className = 'backend-row-actions';
       const toggle = document.createElement('button'); toggle.type = 'button'; toggle.textContent = backend.status === 'connected' ? '断开' : '连接';
@@ -391,13 +448,24 @@
       edit.onclick = () => openPair(backend);
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger-action'; remove.textContent = '删除';
       remove.onclick = async () => {
-        if (!confirm(`删除 backend「${backend.name}」？只影响这个页面，不会停止该机器上的服务。`)) return;
-        const agentIds = backend.agents.map(agent => agent.agentId);
-        deactivateBackendState(backend, 'off');
-        backendRegistry.remove(backend);
+        const relayed = relayChildren(state.backends, backend.id), removed = [backend, ...relayed];
+        const question = backend.relayHostId ? `删除 backend「${backend.name}」？中继记录也会从「${backendOf(backend.relayVia)?.name || '中继节点'}」上删除。`
+          : relayed.length ? `删除 backend「${backend.name}」？通过它中继的 ${relayed.length} 个 backend 也会一并删除。`
+          : `删除 backend「${backend.name}」？只影响这个页面，不会停止该机器上的服务。`;
+        if (!confirm(question)) return;
+        // Each relay record holds a target's address and pairing code, so it has to go before the relay
+        // is forgotten here and becomes unreachable. The children's records live on the relay too.
+        const failed = await deleteRelayRecords(removed);
+        if (failed.length) {
+          const detail = failed.map(entry => `「${entry.backend.name || entry.backend.base}」：${entry.error.message}`).join('\n');
+          // Answering no keeps every entry, which is what makes the deletion retryable once the relay is back.
+          if (!confirm(`以下中继记录删除失败：\n${detail}\n\n仍然从这个浏览器移除吗？这些目标配对码会留在中继服务器上，只能到中继那台机器上手动清理。`)) return;
+        }
+        const agentIds = removed.flatMap(item => item.agents.map(agent => agent.agentId));
+        for (const item of removed) { deactivateBackendState(item, 'off'); backendRegistry.remove(item); }
         persistConnections();
         for (const agentId of agentIds) sessionKeyboard.unbind(agentId);
-        if (state.backendFilter === backend.id) {
+        if (removed.some(item => item.id === state.backendFilter)) {
           state.backendFilter = '';
           localStorage.removeItem('rpBackendFilter');
         }
@@ -752,7 +820,7 @@
     try{
       const term=await ensureTerminalEmulator();if(attempt!==state.terminalConnectAttempt||state.selectedKind!=='terminal'||state.terminal?.terminalId!==terminalId)return;term.reset();term.clear();$('terminalStatus').textContent=`${terminal.cwd} · 正在连接…`;
       const terminalBackend=backendOf(terminal.backendId);if(!terminalBackend||terminalBackend.status!=='connected')throw Error(`Backend「${terminal.backendName||terminal.backendId}」未连接`);
-      const ws=new WebSocket(terminalBackend.base.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(terminal.remoteId)}/ws`,['access-token.'+terminalBackend.token]);state.terminalWs=ws;
+      const terminalWire=requireWire(terminalBackend);const ws=new WebSocket(terminalWire.prefix.replace(/^http/,'ws')+`/api/v1/terminals/${encodeURIComponent(terminal.remoteId)}/ws`,['access-token.'+terminalWire.token]);state.terminalWs=ws;
       ws.onopen=()=>{if(ws!==state.terminalWs)return;requestAnimationFrame(()=>{try{state.fitAddon.fit();ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}));term.focus();}catch{}});};
       ws.onmessage=event=>{if(ws!==state.terminalWs)return;try{const message=JSON.parse(event.data);if(message.type==='snapshot'){term.reset();if(message.data)term.write(message.data);terminal.status=message.record.status;updateTerminalHeader();renderAgentList();}else if(message.type==='output')term.write(message.data);else if(message.type==='exit'){terminal.status='exited';terminal.exitCode=message.exitCode;updateTerminalHeader();renderAgentList();void refreshAgents();}else if(message.type==='error')toast(message.message);}catch(error){console.error(error);}};
       ws.onerror=()=>{};ws.onclose=()=>{if(ws===state.terminalWs&&terminal.status==='running')$('terminalStatus').textContent=`${terminal.cwd} · 连接已断开`;};
@@ -1106,7 +1174,7 @@
   }
   async function transcribeVoice(){
     clearTimeout(state.mediaTimer);const recorder=state.mediaRecorder,mime=recorder?.mimeType||'audio/webm',blob=new Blob(state.mediaChunks,{type:mime}),agentId=state.mediaAgentId;state.mediaStream?.getTracks().forEach(track=>track.stop());state.mediaRecorder=null;state.mediaStream=null;state.mediaChunks=[];state.mediaAgentId=null;$('voiceInput').textContent='…';$('voiceInput').classList.remove('recording');
-    if(!agentId){$('voiceInput').textContent='🎙';return;}const {backendId,remoteId}=splitResourceKey(agentId),transcribeBackend=backendOf(backendId);if(!transcribeBackend){$('voiceInput').textContent='🎙';return toast('该 Session 的 backend 已断开');}try{const response=await fetch(transcribeBackend.base+`/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${transcribeBackend.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
+    if(!agentId){$('voiceInput').textContent='🎙';return;}const {backendId,remoteId}=splitResourceKey(agentId),transcribeBackend=backendOf(backendId);if(!transcribeBackend){$('voiceInput').textContent='🎙';return toast('该 Session 的 backend 已断开');}try{const transcribeWire=requireWire(transcribeBackend);const response=await fetch(transcribeWire.prefix+`/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe`,{method:'POST',headers:{Authorization:`Bearer ${transcribeWire.token}`,'Content-Type':mime,'X-Audio-Filename':mime.includes('mp4')?'recording.m4a':'recording.webm'},body:blob});const body=await response.json().catch(()=>({}));if(!response.ok)throw Error(body.error?.message||`HTTP ${response.status}`);const text=body.data?.text?.trim();if(text){const input=$('input'),prefix=input.value&& !/\s$/.test(input.value)?' ':'';input.value+=prefix+text;input.focus();toast('语音已转换为文字');}else toast('没有识别到语音');}catch(error){toast(`语音识别失败：${error.message}`);}finally{$('voiceInput').textContent='🎙';$('voiceInput').title='开始语音输入';}
   }
   function handleAgentEvent(message) {
     if(message.type==='voice_event'){handleVoiceEvent(message);return;}
@@ -1198,7 +1266,9 @@
   function connectSocket(backend) {
     if (!backend || backend.status !== 'connected') return;
     clearTimeout(backend.reconnectTimer); backend.manuallyClosed = true; const previous = backend.ws; backend.ws = null; previous?.close(); backend.manuallyClosed = false;
-    const ws = new WebSocket(backend.base.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + backend.token]); backend.ws = ws;
+    const wire = wireOf(backend);
+    if (!wire) return;
+    const ws = new WebSocket(wire.prefix.replace(/^http/, 'ws') + '/api/v1/ws', ['access-token.' + wire.token]); backend.ws = ws;
     ws.onopen = () => { if (ws !== backend.ws) return; backend.reconnectAttempt = 0; backend.reconnecting = false; updateHeaderStatus(); for (const agent of backend.agents) subscribeAgent(backend, agent); ws.send(JSON.stringify({type:'subscribe_all', fromNow:true})); };
     ws.onmessage = event => { if (ws !== backend.ws) return; try { const message = JSON.parse(event.data); if (typeof message.agentId === 'string') message.agentId = resourceKey(backend.id, message.agentId); message.backendId = backend.id; handleAgentEvent(message); } catch (error) { console.error(error); } };
     ws.onclose = () => { if (backend.ws !== ws || backend.manuallyClosed) return; backend.reconnecting = true; updateHeaderStatus(); const delays=[1000,2000,4000,8000,15000,30000], delay=delays[Math.min(backend.reconnectAttempt++, delays.length-1)]; backend.reconnectTimer = setTimeout(() => connectSocket(backend), delay); };
@@ -1463,6 +1533,12 @@
   $('pairForm').onsubmit = async event => {
     event.preventDefault();
     $('pairSubmit').disabled = true;
+    // A record this submission created and that no Backend owns yet: if the connection never comes
+    // up, it has to go, or the target's pairing code stays on the relay with nothing pointing at it.
+    // The Backend being edited, what it was reached with, and the entry this submission builds are
+    // kept for the same reason: connectBackend commits the new route onto the live Backend before the
+    // whole connection is known to work, so a failure has to be able to put it back.
+    let createdHost = null, existing = null, previous = null, snapshot = null, entry = null;
     try {
       const base = $('pairBase').value.trim().replace(/\/$/, '');
       const token = $('pairToken').value;
@@ -1470,14 +1546,69 @@
       if (!name) {
         try { name = new URL(base).hostname; } catch {}
       }
-      const editingId = $('pairDialog').dataset.backendId;
-      const existing = backendOf(editingId) || backendRegistry.findByBase(base);
-      const entry = {id:existing?.id || createBackendId(), name, base, token, saved:existing?.saved || false};
+      const editingId = $('pairDialog').dataset.backendId, relayVia = $('pairRelayVia').value;
+      existing = backendOf(editingId) || backendRegistry.findByBase(base, relayVia);
+      // Where this Backend was reached before. Its record holds the target's pairing code, so it may
+      // only be dropped once the new route has proved it works.
+      previous = existing?.relayHostId ? {via:existing.relayVia, hostId:existing.relayHostId} : null;
+      snapshot = existing ? routeOf(existing) : null;
+      entry = {id:existing?.id || createBackendId(), name, base, token, saved:existing?.saved || false};
+      // A Backend others are relayed through is the address they are reached at: moving it, or putting
+      // it behind a relay itself, takes that address away and leaves their records on a server nothing
+      // in this browser points at any more.
+      const children = existing ? relayChildren(state.backends, existing.id) : [];
+      if (children.length && (relayVia || base !== existing.base)) {
+        throw Error(`「${existing.name}」正在为 ${children.length} 个 backend 中继，改地址或改成中继连接都会让它们失联；请先把它们删掉或改走别的中继`);
+      }
+      if (relayVia) {
+        // The relay stores the target pairing code; this browser only keeps the host id. The same
+        // address returns the record it already has, a different one gets its own: an edit that moves
+        // a Backend to another machine never writes that machine's address over the old record.
+        // Naming the record this Backend already holds is what allows the call to change it: without
+        // that, a target somebody else registered is returned as it stands, code untouched.
+        const holding = previous && previous.via === relayVia ? {replaces:previous.hostId} : {};
+        const host = await postBackend(relayVia, '/api/v1/hosts', {name, base, token, ...holding});
+        if (host.created) createdHost = {name, base, relayVia, relayHostId:host.id};
+        // The relay decides which addresses are the same machine. One record is one Backend here too,
+        // so an address spelled differently than the one already registered edits that Backend
+        // instead of adding a second entry that would delete the first one's record along with itself.
+        const owner = state.backends.find(item => item.relayHostId === host.id && item.id !== entry.id);
+        // Moving a Backend onto a target another one already holds would leave two entries on one
+        // record, and deleting the route of either would take the other's with it.
+        if (owner && existing) throw Error(`这个目标已经是 backend「${owner.name}」，请直接改它，或先把它删掉`);
+        if (owner) { existing = owner; snapshot = routeOf(owner) }
+        entry = {...entry, id:owner?.id || entry.id, token:'', relayHostId:host.id, relayVia};
+      } else if (previous) {
+        // Back to a direct connection: the code just typed needs the usual consent, which a relayed
+        // Backend never had to give.
+        existing.saved = false;
+        entry = {...entry, saved:false, relayHostId:'', relayVia:''};
+      }
       await connectBackend(entry, {confirmSave:true});
+      createdHost = null;
+      // Only now is the old record unreachable from this browser, and only now may it be deleted.
+      if (previous && previous.hostId !== entry.relayHostId) {
+        const failed = await deleteRelayRecords([{...existing, relayVia:previous.via, relayHostId:previous.hostId}]);
+        if (failed.length) toast(`旧中继记录未能删除：${failed[0].error.message}`);
+      }
       $('pairDialog').close();
     } catch (error) {
+      let message = error.message;
+      // Nothing owns the record this submission created: a half-connected Backend was never saved, so
+      // the route it holds dies with the page. Take it back rather than leave a pairing code behind,
+      // and say so when that fails, because then nothing in the UI can reach it any more.
+      if (createdHost) {
+        const failed = await deleteRelayRecords([createdHost]);
+        if (failed.length) message += `；中继「${backendOf(createdHost.relayVia)?.name || createdHost.relayVia}」上刚建的记录 ${createdHost.relayHostId} 没能删掉（${failed[0].error.message}），用同一地址重新添加一次会复用它，之后删掉该 backend 就能一并清掉`;
+      }
+      // An edit goes back to the address and code it was reached with, so the record it still owns
+      // stays reachable; it stays in the error state it ended in, one click from reconnecting. An
+      // addition that never connected was never saved either, so it leaves no entry behind.
+      if (snapshot) Object.assign(existing, snapshot);
+      else if (entry && backendOf(entry.id)) backendRegistry.remove(backendOf(entry.id));
       updateHeaderStatus();
-      toast(error.message);
+      renderBackendList();
+      toast(message);
     } finally {
       $('pairSubmit').disabled = false;
     }
@@ -1527,7 +1658,10 @@
   void (async () => {
     const candidates = state.backends.filter(backend => backend.base && (backend.saved || !backend.token));
     if (!candidates.length) { openPair(state.backends[0] || null); return; }
-    const results = await Promise.allSettled(candidates.map(backend => connectBackend(backend, {confirmSave:false, pair:false})));
+    // Relayed Backends need their relay connected first, so they go in a second round.
+    const connect = backend => connectBackend(backend, {confirmSave:false, pair:false});
+    const results = await Promise.allSettled(candidates.filter(backend => !backend.relayHostId).map(connect));
+    results.push(...await Promise.allSettled(candidates.filter(backend => backend.relayHostId).map(connect)));
     if (!hasConnection()) {
       const error = results.find(result => result.status === 'rejected')?.reason;
       if (error) toast(`自动连接失败：${error.message}`);

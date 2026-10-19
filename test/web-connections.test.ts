@@ -57,6 +57,43 @@ describe('backend state', () => {
     expect(JSON.parse(localStorage.rpSessionKeyboardBindings)).toEqual([{agentId:'bk-main:agent-a', slot:0}]);
   });
 
+  it('sends relayed traffic to the relay, and direct traffic to the backend itself', () => {
+    const {api} = loadBackendState();
+    const relay = {id:'home', base:'https://home.example', token:'home-token', status:'connected'};
+    expect(api.backendWire(relay, undefined)).toEqual({prefix:'https://home.example', token:'home-token'});
+    // The target's own pairing code stays on the relay; the browser only knows the host id.
+    const relayed = {id:'lab', base:'http://192.168.1.9:11318', token:'', relayHostId:'host-1', relayVia:'home'};
+    expect(api.backendWire(relayed, relay)).toEqual({prefix:'https://home.example/api/v1/hosts/host-1', token:'home-token'});
+    // Without a connected relay there is no address to use: the target's own is unreachable from here,
+    // and a relative prefix would silently send the traffic to whatever is serving the page.
+    expect(api.backendWire(relayed, undefined)).toBeNull();
+    expect(api.backendWire(relayed, {...relay, status:'off'})).toBeNull();
+  });
+
+  it('keeps a relayed connection without storing a pairing code for it', () => {
+    const {api, localStorage} = loadBackendState({rpConnections:'[]'});
+    const registry = new api.BackendRegistry(localStorage, 'http://localhost');
+    registry.add({id:'lab', name:'Lab', base:'http://192.168.1.9:11318', relayHostId:'host-1', relayVia:'home'});
+    expect(registry.find('lab')).toMatchObject({saved:true, token:''});
+    registry.persist();
+    expect(JSON.parse(localStorage.rpConnections)).toEqual([
+      {id:'lab', name:'Lab', base:'http://192.168.1.9:11318', token:'', relayHostId:'host-1', relayVia:'home'},
+    ]);
+    expect(api.loadStoredBackends(localStorage, 'http://localhost')[0]).toMatchObject({relayHostId:'host-1', relayVia:'home', saved:true});
+    // The collaboration board connects directly, so it must not be offered a relayed connection.
+    expect(api.selectConnection(localStorage, 'http://localhost')).toBeNull();
+  });
+
+  it('tells apart two targets that share an address but a different route', () => {
+    const {api, localStorage} = loadBackendState({rpConnections:JSON.stringify([
+      {id:'direct', name:'Direct', base:'http://10.0.0.5:11318', token:'t'},
+      {id:'lab', name:'Lab', base:'http://10.0.0.5:11318', token:'', relayHostId:'host-1', relayVia:'home'},
+    ])});
+    const registry = new api.BackendRegistry(localStorage, 'http://localhost');
+    expect(registry.findByBase('http://10.0.0.5:11318')?.id).toBe('direct');
+    expect(registry.findByBase('http://10.0.0.5:11318', 'home')?.id).toBe('lab');
+  });
+
   it('uses reversible composite resource keys', () => {
     const {api} = loadBackendState();
     const key = api.resourceKey('backend-a', 'agent:with:colons');
