@@ -54,7 +54,7 @@ describe('pairing rate limit', () => {
       socket.on('error', () => resolve(undefined));
     });
     expect(socketStatus).toBe(429);
-    server!['loginFailures'].clear();
+    server!['loginLimiter'].reset();
     expect((await attempt(token)).status).toBe(200);
     expect((await attempt('wrong')).status).toBe(401);
   });

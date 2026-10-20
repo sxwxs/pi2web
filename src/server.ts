@@ -28,6 +28,9 @@ import {
   readJsonBody
 } from './http/utils.js';
 import {serveWebAsset} from './http/web-assets.js';
+import {LoginLimiter} from './http/login-limiter.js';
+import {handleAgentSocket} from './ws/agent-socket.js';
+import {handleTerminalSocket} from './ws/terminal-socket.js';
 import {handleAgentRoutes} from './http/agent-routes.js';
 export type ServerOptions = {
   host?: string;
@@ -42,7 +45,6 @@ export type ServerOptions = {
   sessionNamer?: SessionNamer;
   mailNotifier?: MailNotifier;
 };
-type LoginFailure = {count: number; expiresAt: number; lockedUntil: number; lockLevel: number};
 export {LOOPBACK_HOSTS};
 export class RemotePiServer {
   server: http.Server;
@@ -72,11 +74,7 @@ export class RemotePiServer {
   private voice?: VoiceManager;
   private sessionNamer?: SessionNamer;
   private mailNotifier?: MailNotifier;
-  private loginFailures = new Map<string, LoginFailure>();
-  private readonly loginWindowMs = 60_000;
-  private readonly loginMaxFailures = 10;
-  private readonly loginLockMs = 60_000;
-  private readonly loginMaxLockMs = 15 * 60_000;
+  private loginLimiter = new LoginLimiter();
   constructor(options: ServerOptions = {}) {
     this.opts = {host: options.host ?? '127.0.0.1', port: options.port ?? 11318};
     this.noAuth = options.noAuth ?? false;
@@ -122,7 +120,24 @@ export class RemotePiServer {
       const match = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname.match(
         /^\/api\/v1\/terminals\/([^/]+)\/ws$/
       );
-      match ? this.terminalConnection(ws, decodeURIComponent(match[1])) : this.connection(ws, req);
+      if (match)
+        handleTerminalSocket(
+          {terminals: this.terminals, clients: this.clients},
+          ws,
+          decodeURIComponent(match[1])
+        );
+      else
+        handleAgentSocket(
+          {
+            agents: this.agents,
+            drafts: this.drafts,
+            collab: this.collab,
+            voice: this.voice,
+            sessionNamer: this.sessionNamer,
+            clients: this.clients
+          },
+          ws
+        );
     });
   }
   async start() {
@@ -390,7 +405,7 @@ export class RemotePiServer {
       return;
     }
     const key = this.clientKey(req),
-      retryAfter = this.loginRetryAfterMs(key);
+      retryAfter = this.loginLimiter.retryAfterMs(key);
     if (retryAfter > 0) {
       socket.write(`HTTP/1.1 429 Too Many Requests\r\nRetry-After: ${Math.ceil(retryAfter / 1000)}\r\n\r\n`);
       socket.destroy();
@@ -400,7 +415,7 @@ export class RemotePiServer {
       (await this.authRole(req.headers.authorization)) ??
       (wsToken ? await this.auth.role(wsToken) : undefined);
     if (!role) {
-      this.recordLoginFailure(key);
+      this.loginLimiter.recordFailure(key);
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
@@ -410,299 +425,11 @@ export class RemotePiServer {
       socket.destroy();
       return;
     }
-    this.loginFailures.delete(key);
+    this.loginLimiter.clear(key);
     this.wss.handleUpgrade(req, socket, head, ws => this.wss.emit('connection', ws, req));
   }
   private clientKey(req: http.IncomingMessage) {
     return req.socket.remoteAddress ?? 'unknown';
-  }
-  /** Rate limits pairing attempts per source address. Reverse proxies and tunnels share one bucket by design. */
-  private loginRetryAfterMs(key: string) {
-    const entry = this.loginFailures.get(key);
-    if (!entry) return 0;
-    const now = Date.now();
-    if (entry.lockedUntil > now) return entry.lockedUntil - now;
-    if (entry.expiresAt <= now) this.loginFailures.delete(key);
-    return 0;
-  }
-  private recordLoginFailure(key: string) {
-    const now = Date.now();
-    if (this.loginFailures.size > 1000)
-      for (const [id, value] of this.loginFailures)
-        if (value.expiresAt <= now && value.lockedUntil <= now) this.loginFailures.delete(id);
-    const entry = this.loginFailures.get(key);
-    if (!entry || (entry.expiresAt <= now && entry.lockedUntil <= now)) {
-      this.loginFailures.set(key, {
-        count: 1,
-        expiresAt: now + this.loginWindowMs,
-        lockedUntil: 0,
-        lockLevel: 0
-      });
-      return 0;
-    }
-    entry.count += 1;
-    entry.expiresAt = now + this.loginWindowMs;
-    if (entry.count < this.loginMaxFailures) return 0;
-    entry.count = 0;
-    entry.lockLevel = Math.min(entry.lockLevel + 1, 5);
-    entry.lockedUntil = now + Math.min(this.loginLockMs * 2 ** (entry.lockLevel - 1), this.loginMaxLockMs);
-    entry.expiresAt = entry.lockedUntil + this.loginWindowMs;
-    return entry.lockedUntil - now;
-  }
-  private connection(ws: WebSocket, _req: http.IncomingMessage) {
-    this.clients.add(ws);
-    const subscriptions = new Map<string, () => void>();
-    // Pi providers may emit one delta per character. Sending every delta as its own
-    // WebSocket frame is especially expensive over a high-latency/low-bandwidth
-    // link: agent_end gets stuck behind thousands of tiny frames. Coalesce adjacent
-    // text/thinking deltas while preserving their sequence cursor and event order.
-    let pendingDelta: any, deltaTimer: ReturnType<typeof setTimeout> | undefined;
-    const sendNow = (message: unknown) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      if (ws.bufferedAmount > 2 * 1024 * 1024) {
-        ws.close(1013, 'Agent client is too slow');
-        return;
-      }
-      ws.send(JSON.stringify(message));
-    };
-    const flushDelta = () => {
-      if (deltaTimer) clearTimeout(deltaTimer);
-      deltaTimer = undefined;
-      if (pendingDelta) {
-        const message = pendingDelta;
-        pendingDelta = undefined;
-        sendNow(message);
-      }
-    };
-    const send = (message: any) => {
-      const update =
-          message?.type === 'agent_event' && message.event?.type === 'message_update'
-            ? message.event.assistantMessageEvent
-            : undefined,
-        isDelta =
-          update &&
-          (update.type === 'text_delta' || update.type === 'thinking_delta') &&
-          typeof update.delta === 'string';
-      if (!isDelta) {
-        flushDelta();
-        sendNow(message);
-        return;
-      }
-      const previous = pendingDelta?.event?.assistantMessageEvent;
-      if (pendingDelta && pendingDelta.agentId === message.agentId && previous?.type === update.type) {
-        previous.delta += update.delta;
-        pendingDelta.eventId = message.eventId;
-        pendingDelta.sequence = message.sequence;
-        pendingDelta.timestamp = message.timestamp;
-      } else {
-        flushDelta();
-        pendingDelta = {...message, event: {...message.event, assistantMessageEvent: {...update}}};
-      }
-      if (!deltaTimer) deltaTimer = setTimeout(flushDelta, 40);
-    };
-    const unsubscribeVoice = this.voice?.subscribe((agentId, event) => {
-      if (subscriptions.has('*') || subscriptions.has(agentId)) send({type: 'voice_event', agentId, event});
-    });
-    const unsubscribeNamer = this.sessionNamer?.subscribe((agentId, event) => {
-      if (subscriptions.has('*') || subscriptions.has(agentId))
-        send({type: 'session_namer_event', agentId, event});
-    });
-    ws.on('close', () => {
-      if (deltaTimer) clearTimeout(deltaTimer);
-      pendingDelta = undefined;
-      this.clients.delete(ws);
-      unsubscribeVoice?.();
-      unsubscribeNamer?.();
-      for (const unsubscribe of subscriptions.values()) unsubscribe();
-    });
-    ws.on('message', raw => {
-      void (async () => {
-        let m: any;
-        try {
-          m = JSON.parse(raw.toString());
-          if (m.type === 'subscribe_drafts') {
-            subscriptions.get('drafts')?.();
-            send({type: 'subscribed_drafts', protocolVersion: 1});
-            subscriptions.set(
-              'drafts',
-              this.drafts.subscribe((draft, replay) => send({type: 'draft_event', draft, replay}))
-            );
-            return;
-          }
-          if (m.type === 'draft_ack') {
-            this.drafts.ack(String(m.id ?? ''));
-            return;
-          }
-          if (m.type === 'subscribe_collab') {
-            subscriptions.get('collab')?.();
-            subscriptions.set(
-              'collab',
-              this.collab.subscribe(event => send({type: 'collab_event', event}))
-            );
-            send({type: 'subscribed_collab', protocolVersion: 1});
-            return;
-          }
-          if (m.type === 'subscribe_all') {
-            subscriptions.get('*')?.();
-            const forward = (agentId: string, e: any) =>
-              !subscriptions.has(agentId) &&
-              send({
-                type: 'agent_event',
-                agentId,
-                eventId: e.id,
-                sequence: e.sequence,
-                timestamp: e.timestamp,
-                status: e.status,
-                event: e.event
-              });
-            subscriptions.set('*', this.agents.subscribeAll(forward));
-            send({type: 'subscribed_all', protocolVersion: 1});
-            return;
-          }
-          if (m.type === 'subscribe') {
-            const agentId = m.agentId,
-              fromNow = m.fromNow === true;
-            subscriptions.get(agentId)?.();
-            const forward = (e: any) =>
-              send({
-                type: 'agent_event',
-                agentId,
-                eventId: e.id,
-                sequence: e.sequence,
-                timestamp: e.timestamp,
-                status: e.status,
-                event: e.event
-              });
-            let ready = false,
-              active = true;
-            const unsubscribe = this.agents.subscribe(agentId, e => {
-              if (ready) forward(e);
-            });
-            const stop = () => {
-              active = false;
-              ready = false;
-              unsubscribe();
-            };
-            subscriptions.set(agentId, stop);
-            try {
-              send({
-                type: 'subscribed',
-                agentId,
-                protocolVersion: 1,
-                currentSequence: this.agents.currentSequence(agentId)
-              });
-              if (!fromNow) {
-                const last = Number(m.lastSequence ?? 0),
-                  replay = this.agents.events(agentId, last);
-                if (this.agents.hasReplayGap(agentId, last) || replay.length > 250) {
-                  const messageLimit = m.messageLimit === undefined ? undefined : Number(m.messageLimit);
-                  const snapshot = await this.agents.snapshot(
-                    agentId,
-                    Number.isFinite(messageLimit) ? messageLimit : undefined
-                  );
-                  if (!active) return; // Closed or replaced by a newer subscription while awaiting messages.
-                  // Do not forward live events ahead of the snapshot. Catch up from the
-                  // existing bounded replay cache instead of maintaining another buffer.
-                  const updates = this.agents.events(agentId, snapshot.lastSequence);
-                  if (
-                    this.agents.hasReplayGap(agentId, snapshot.lastSequence) ||
-                    (updates.length && updates[0].sequence !== snapshot.lastSequence + 1)
-                  ) {
-                    stop();
-                    ws.close(1013, 'Replay gap during snapshot');
-                    return;
-                  }
-                  send({type: 'agent_snapshot', agentId, ...snapshot});
-                  for (const event of updates) forward(event);
-                } else for (const event of replay) forward(event);
-              }
-              // Refresh/reconnect may already have a saved cursor but no in-memory
-              // activity. Send the current IDs after replay, even if replay was empty.
-              send({
-                type: 'agent_state',
-                agentId,
-                sequence: this.agents.currentSequence(agentId),
-                state: this.agents.snapshotState(agentId)
-              });
-              ready = true;
-            } catch (error) {
-              if (!active) return;
-              stop();
-              if (subscriptions.get(agentId) === stop) subscriptions.delete(agentId);
-              throw error;
-            }
-            return;
-          }
-          if (['prompt', 'steer', 'follow-up', 'abort'].includes(m.type)) {
-            if (m.type !== 'abort') {
-              this.voice?.recordUserPrompt(m.agentId, String(m.message ?? ''));
-              this.sessionNamer?.recordUserPrompt(m.agentId, String(m.message ?? ''));
-            }
-            const disposition = await this.agents.command(m.agentId, m.type, m.message);
-            send({type: 'command_result', requestId: m.requestId, success: true, disposition});
-            return;
-          }
-          if (m.type === 'clear-queue') {
-            send({
-              type: 'command_result',
-              requestId: m.requestId,
-              success: true,
-              queue: await this.agents.clearQueue(m.agentId)
-            });
-            return;
-          }
-          throw new Error('Unknown command');
-        } catch (e) {
-          send({
-            type: 'command_result',
-            requestId: m?.requestId,
-            success: false,
-            error: {
-              code: (e as any).code ?? 'BAD_REQUEST',
-              message: e instanceof SyntaxError ? 'Invalid JSON' : (e as Error).message
-            }
-          });
-        }
-      })();
-    });
-  }
-  private terminalConnection(ws: WebSocket, terminalId: string) {
-    this.clients.add(ws);
-    let unsubscribe = () => {};
-    ws.on('close', () => {
-      this.clients.delete(ws);
-      unsubscribe();
-    });
-    try {
-      const send = (message: unknown) => {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        if (ws.bufferedAmount > 1024 * 1024) {
-          ws.close(1013, 'Terminal client is too slow');
-          return;
-        }
-        ws.send(JSON.stringify(message));
-      };
-      unsubscribe = this.terminals.subscribe(terminalId, event => {
-        send(event);
-        if (event.type === 'exit') setTimeout(() => ws.close(), 50);
-      });
-      const snapshot = this.terminals.snapshot(terminalId);
-      send({type: 'snapshot', data: snapshot.data, record: snapshot.record});
-      ws.on('message', raw => {
-        try {
-          const message = JSON.parse(raw.toString());
-          if (message.type === 'input') this.terminals.write(terminalId, message.data);
-          else if (message.type === 'resize')
-            this.terminals.resize(terminalId, Number(message.cols), Number(message.rows));
-          else throw new Error('Unknown terminal command');
-        } catch (error) {
-          send({type: 'error', message: (error as Error).message});
-        }
-      });
-    } catch (error) {
-      ws.send(JSON.stringify({type: 'error', message: (error as Error).message}));
-      ws.close();
-    }
   }
   private async loadMetadata() {
     let workspaces = this.metadata.listWorkspaces();
@@ -796,7 +523,7 @@ export class RemotePiServer {
       const parts = u.pathname.split('/').filter(Boolean);
       if (req.method === 'POST' && u.pathname === '/api/v1/auth/login') {
         const key = this.clientKey(req),
-          retryAfter = this.loginRetryAfterMs(key);
+          retryAfter = this.loginLimiter.retryAfterMs(key);
         if (retryAfter > 0) {
           res.setHeader('retry-after', String(Math.ceil(retryAfter / 1000)));
           return json(res, 429, {
@@ -809,16 +536,16 @@ export class RemotePiServer {
         }
         const b = await readJsonBody(req);
         if (await this.auth.verify(String(b.token ?? ''))) {
-          this.loginFailures.delete(key);
+          this.loginLimiter.clear(key);
           return json(res, 200, {data: {authenticated: true}});
         }
-        const lockedFor = this.recordLoginFailure(key);
+        const lockedFor = this.loginLimiter.recordFailure(key);
         if (lockedFor > 0) res.setHeader('retry-after', String(Math.ceil(lockedFor / 1000)));
         return json(res, 401, {error: {code: 'UNAUTHORIZED', message: 'Invalid token', requestId}});
       }
       if (parts[0] === 'api' && parts[1] === 'v1' && parts[2] === 'collab') {
         const key = this.clientKey(req),
-          retryAfter = this.loginRetryAfterMs(key);
+          retryAfter = this.loginLimiter.retryAfterMs(key);
         if (retryAfter > 0) {
           res.setHeader('retry-after', String(Math.ceil(retryAfter / 1000)));
           return json(res, 429, {
@@ -839,8 +566,8 @@ export class RemotePiServer {
           body: () => readJsonBody(req)
         });
         if (!result) return json(res, 404, {error: {code: 'NOT_FOUND', message: 'Not found', requestId}});
-        if (result.authFailed) this.recordLoginFailure(key);
-        else this.loginFailures.delete(key);
+        if (result.authFailed) this.loginLimiter.recordFailure(key);
+        else this.loginLimiter.clear(key);
         return json(res, result.status, result.payload);
       }
       const role = await this.authRole(req.headers.authorization);
