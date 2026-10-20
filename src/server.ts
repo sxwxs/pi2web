@@ -1,15 +1,11 @@
 import http from 'node:http';
 import path from 'node:path';
-import {readFile} from 'node:fs/promises';
-import {fileURLToPath} from 'node:url';
-import {createRequire} from 'node:module';
-import {createHash, randomUUID} from 'node:crypto';
+import {randomUUID} from 'node:crypto';
 import {WebSocketServer, WebSocket} from 'ws';
 import {AuthStore} from './auth.js';
 import {WorkspaceStore, type Workspace} from './workspaces.js';
-import {AgentManager, type AgentProfile} from './agents.js';
+import {AgentManager} from './agents.js';
 import {createSdkBackend} from './sdk-backend.js';
-import {listMcpServers, setMcpServerEnabled} from './mcp.js';
 import {TerminalManager} from './terminals.js';
 import {MetadataStore} from './metadata-store.js';
 import {VoiceManager} from './voice.js';
@@ -23,6 +19,16 @@ import {DraftHub} from './drafts.js';
 import type {CollabAction, CollabToolBridge} from './collab/pi-extension.js';
 import {SessionManager, VERSION as PI_VERSION} from '@earendil-works/pi-coding-agent';
 import pkg from '../package.json' with {type: 'json'};
+import {
+  LOOPBACK_HOSTS,
+  errorStatus,
+  isLoopbackHost,
+  json,
+  readBinaryBody,
+  readJsonBody
+} from './http/utils.js';
+import {serveWebAsset} from './http/web-assets.js';
+import {handleAgentRoutes} from './http/agent-routes.js';
 export type ServerOptions = {
   host?: string;
   port?: number;
@@ -37,43 +43,7 @@ export type ServerOptions = {
   mailNotifier?: MailNotifier;
 };
 type LoginFailure = {count: number; expiresAt: number; lockedUntil: number; lockLevel: number};
-export const LOOPBACK_HOSTS = ['127.0.0.1', '::1', 'localhost'];
-const isLoopbackHost = (value: string) => {
-  try {
-    return LOOPBACK_HOSTS.includes(new URL(`http://${value}`).hostname.replace(/^\[|\]$/g, ''));
-  } catch {
-    return false;
-  }
-};
-const json = (res: http.ServerResponse, status: number, data: unknown) => {
-  res.statusCode = status;
-  res.setHeader('content-type', 'application/json');
-  res.end(JSON.stringify(data));
-};
-const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../web'),
-  require = createRequire(import.meta.url);
-const markedBrowser = path.join(path.dirname(require.resolve('marked/package.json')), 'lib', 'marked.umd.js');
-const webFiles: Record<string, {file: string; type: string}> = {
-  '/': {file: 'index.html', type: 'text/html; charset=utf-8'},
-  '/index.html': {file: 'index.html', type: 'text/html; charset=utf-8'},
-  '/app.js': {file: 'app.js', type: 'text/javascript; charset=utf-8'},
-  '/backend-state.js': {file: 'backend-state.js', type: 'text/javascript; charset=utf-8'},
-  '/hid-keyboard.js': {file: 'hid-keyboard.js', type: 'text/javascript; charset=utf-8'},
-  '/collab': {file: 'collab.html', type: 'text/html; charset=utf-8'},
-  '/collab.html': {file: 'collab.html', type: 'text/html; charset=utf-8'},
-  '/collab.js': {file: 'collab.js', type: 'text/javascript; charset=utf-8'},
-  '/styles.css': {file: 'styles.css', type: 'text/css; charset=utf-8'},
-  '/icon.svg': {file: 'icon.svg', type: 'image/svg+xml'},
-  '/favicon.ico': {file: 'icon.svg', type: 'image/svg+xml'},
-  '/vendor/xterm.js': {file: require.resolve('@xterm/xterm'), type: 'text/javascript; charset=utf-8'},
-  '/vendor/xterm.css': {file: require.resolve('@xterm/xterm/css/xterm.css'), type: 'text/css; charset=utf-8'},
-  '/vendor/addon-fit.js': {file: require.resolve('@xterm/addon-fit'), type: 'text/javascript; charset=utf-8'},
-  '/vendor/marked.js': {file: markedBrowser, type: 'text/javascript; charset=utf-8'},
-  '/vendor/dompurify.js': {
-    file: require.resolve('dompurify/purify.min.js'),
-    type: 'text/javascript; charset=utf-8'
-  }
-};
+export {LOOPBACK_HOSTS};
 export class RemotePiServer {
   server: http.Server;
   wss: WebSocketServer;
@@ -798,56 +768,6 @@ export class RemotePiServer {
     if (this.noAuth) return 'full' as const;
     return value?.startsWith('Bearer ') ? this.auth.role(value.slice(7)) : undefined;
   }
-  private async serveWeb(pathname: string, req: http.IncomingMessage, res: http.ServerResponse) {
-    const asset = webFiles[pathname];
-    if (!asset) return false;
-    try {
-      const content = await readFile(
-          path.isAbsolute(asset.file) ? asset.file : path.join(webRoot, asset.file)
-        ),
-        etag = `"${createHash('sha256').update(content).digest('base64url')}"`,
-        ifNoneMatch = String(req.headers['if-none-match'] ?? '')
-          .split(',')
-          .map(value => value.trim().replace(/^W\//, ''));
-      res.setHeader('content-type', asset.type);
-      res.setHeader('cache-control', pathname.startsWith('/vendor/') ? 'public, max-age=86400' : 'no-cache');
-      res.setHeader('etag', etag);
-      res.setHeader('x-content-type-options', 'nosniff');
-      if (this.noAuth && asset.type.startsWith('text/html'))
-        res.setHeader('content-security-policy', "frame-ancestors 'self'");
-      if (ifNoneMatch.includes(etag) || ifNoneMatch.includes('*')) {
-        res.statusCode = 304;
-        res.end();
-        return true;
-      }
-      res.statusCode = 200;
-      res.end(content);
-    } catch {
-      json(res, 500, {
-        error: {
-          code: 'WEB_UI_UNAVAILABLE',
-          message: 'Web UI files are missing. Reinstall the pi2web package.'
-        }
-      });
-    }
-    return true;
-  }
-  /** Reads a JSON body as bytes so the size limit applies while streaming and multi-byte characters are never split across chunks. */
-  private async body(req: http.IncomingMessage, maxBytes = 2 * 1024 * 1024) {
-    const raw = await this.binaryBody(req, maxBytes);
-    return raw.length ? JSON.parse(raw.toString('utf8')) : {};
-  }
-  private async binaryBody(req: http.IncomingMessage, maxBytes = 25 * 1024 * 1024) {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const value of req) {
-      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-      size += chunk.length;
-      if (size > maxBytes) throw Object.assign(new Error('Request too large'), {code: 'REQUEST_TOO_LARGE'});
-      chunks.push(chunk);
-    }
-    return Buffer.concat(chunks);
-  }
   private async handle(req: http.IncomingMessage, res: http.ServerResponse) {
     const requestId = randomUUID();
     res.setHeader('x-request-id', requestId);
@@ -870,7 +790,7 @@ export class RemotePiServer {
         return res.end();
       }
       const u = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-      if (req.method === 'GET' && (await this.serveWeb(u.pathname, req, res))) return;
+      if (req.method === 'GET' && (await serveWebAsset(u.pathname, req, res, {noAuth: this.noAuth}))) return;
       if (req.method === 'GET' && u.pathname === '/health')
         return json(res, 200, {data: {status: 'ok', authRequired: !this.noAuth}});
       const parts = u.pathname.split('/').filter(Boolean);
@@ -887,7 +807,7 @@ export class RemotePiServer {
             }
           });
         }
-        const b = await this.body(req);
+        const b = await readJsonBody(req);
         if (await this.auth.verify(String(b.token ?? ''))) {
           this.loginFailures.delete(key);
           return json(res, 200, {data: {authenticated: true}});
@@ -916,7 +836,7 @@ export class RemotePiServer {
           url: u,
           parts,
           token,
-          body: () => this.body(req)
+          body: () => readJsonBody(req)
         });
         if (!result) return json(res, 404, {error: {code: 'NOT_FOUND', message: 'Not found', requestId}});
         if (result.authFailed) this.recordLoginFailure(key);
@@ -937,7 +857,7 @@ export class RemotePiServer {
           error: {code: 'FORBIDDEN', message: 'This token cannot access this endpoint', requestId}
         });
       if (req.method === 'POST' && u.pathname === '/api/v1/draft') {
-        const b = await this.body(req),
+        const b = await readJsonBody(req),
           text = typeof b?.text === 'string' ? b.text : '';
         if (!text.trim())
           return json(res, 400, {error: {code: 'INVALID_REQUEST', message: 'text is required', requestId}});
@@ -986,7 +906,7 @@ export class RemotePiServer {
           throw Object.assign(new Error('MailDispatch is not configured at server startup'), {
             code: 'MAIL_NOTIFICATIONS_DISABLED'
           });
-        const b = await this.body(req),
+        const b = await readJsonBody(req),
           patch: Partial<MailNotificationSettings> = {};
         if ('enabled' in b) {
           if (typeof b.enabled !== 'boolean')
@@ -1024,7 +944,7 @@ export class RemotePiServer {
       if (req.method === 'GET' && u.pathname === '/api/v1/workspaces')
         return json(res, 200, {data: this.workspaces.list()});
       if (req.method === 'POST' && u.pathname === '/api/v1/workspaces') {
-        const b = await this.body(req);
+        const b = await readJsonBody(req);
         if (typeof b.label !== 'string' || typeof b.rootPath !== 'string')
           return json(res, 400, {
             error: {code: 'INVALID_REQUEST', message: 'label and rootPath required', requestId}
@@ -1062,7 +982,7 @@ export class RemotePiServer {
       if (req.method === 'GET' && u.pathname === '/api/v1/terminals')
         return json(res, 200, {data: this.terminals.list()});
       if (req.method === 'POST' && u.pathname === '/api/v1/terminals') {
-        const b = await this.body(req);
+        const b = await readJsonBody(req);
         const terminal = await this.terminals.create(
           String(b.workspaceId ?? ''),
           String(b.relativeCwd ?? '.'),
@@ -1080,193 +1000,25 @@ export class RemotePiServer {
           return json(res, 200, {data: {closed: true}});
         }
       }
-      if (req.method === 'GET' && u.pathname === '/api/v1/agents/models') {
-        const workspaceId = u.searchParams.get('workspaceId') ?? '',
-          relativeCwd = u.searchParams.get('relativeCwd') ?? '.';
-        return json(res, 200, {data: await this.agents.capabilityPreview(workspaceId, relativeCwd)});
-      }
-      if (req.method === 'GET' && u.pathname === '/api/v1/agents')
-        return json(res, 200, {data: this.agents.list()});
-      if (req.method === 'POST' && u.pathname === '/api/v1/agents') {
-        const b = await this.body(req),
-          profile: AgentProfile = b.profile === undefined ? 'default' : b.profile;
-        if (profile !== 'default' && profile !== 'collab')
-          throw Object.assign(new Error('profile must be default or collab'), {code: 'INVALID_REQUEST'});
-        let sessionFile: string | undefined;
-        if (b.sessionFile) {
-          const workspace = this.workspaces.get(b.workspaceId);
-          if (!workspace)
-            throw Object.assign(new Error('Workspace not found'), {code: 'WORKSPACE_NOT_FOUND'});
-          const cwd = await this.workspaces.resolve(workspace, b.relativeCwd ?? '.');
-          await this.ensureSessionIndex(workspace, cwd);
-          if (!this.metadata.hasSession(cwd, b.sessionFile))
-            throw Object.assign(new Error('Session is not valid for cwd'), {code: 'SESSION_NOT_FOUND'});
-          sessionFile = b.sessionFile;
-        }
-        const agent = await this.agents.create(b.workspaceId, b.relativeCwd ?? '.', sessionFile, profile);
-        try {
-          if (b.model !== undefined) {
-            if (!b.model || typeof b.model.provider !== 'string' || typeof b.model.modelId !== 'string')
-              throw Object.assign(new Error('model.provider and model.modelId are required'), {
-                code: 'INVALID_REQUEST'
-              });
-            await this.agents.setModel(agent.agentId, b.model.provider, b.model.modelId);
-          }
-          if (b.sessionName !== undefined) {
-            if (typeof b.sessionName !== 'string')
-              throw Object.assign(new Error('sessionName must be a string'), {code: 'INVALID_REQUEST'});
-            await this.agents.setSessionName(agent.agentId, b.sessionName);
-          }
-          const configured = this.agents.get(agent.agentId).record;
-          this.metadata.saveAgent(configured);
-          return json(res, 201, {data: {...configured}});
-        } catch (error) {
-          await this.agents.remove(agent.agentId).catch(() => {});
-          throw error;
-        }
-      }
-      if (parts[2] === 'agents') {
-        const id = parts[3];
-        if (req.method === 'GET' && parts.length === 4)
-          return json(res, 200, {data: this.agents.get(id).record});
-        if (req.method === 'DELETE' && parts.length === 4) {
-          await this.agents.dispose(id);
-          this.metadata.saveAgent(this.agents.get(id).record);
-          return json(res, 200, {data: {stopped: true}});
-        }
-        if (req.method === 'POST' && parts[4] === 'archive') {
-          const record = await this.agents.archive(id);
-          this.metadata.archiveAgent(record);
-          return json(res, 200, {data: {archived: true}});
-        }
-        if (req.method === 'GET' && parts[4] === 'state')
-          return json(res, 200, {data: await this.agents.state(id)});
-        if (req.method === 'GET' && parts[4] === 'messages') {
-          const hasPaging = u.searchParams.has('limit') || u.searchParams.has('before');
-          if (!hasPaging) return json(res, 200, {data: await this.agents.messages(id)});
-          const limit = Number(u.searchParams.get('limit') ?? 25),
-            before = u.searchParams.has('before') ? Number(u.searchParams.get('before')) : undefined;
-          return json(res, 200, {data: await this.agents.messagePage(id, limit, before)});
-        }
-        if (req.method === 'GET' && parts[4] === 'capabilities')
-          return json(res, 200, {data: await this.agents.capabilities(id)});
-        if (req.method === 'GET' && parts[4] === 'session')
-          return json(res, 200, {
-            data:
-              u.searchParams.get('summary') === 'true'
-                ? await this.agents.sessionInfo(id)
-                : await this.agents.session(id)
-          });
-        if (req.method === 'POST' && parts[4] === 'compact') {
-          const b = await this.body(req);
-          return json(res, 200, {data: await this.agents.compact(id, b.instructions)});
-        }
-        if (req.method === 'POST' && parts[4] === 'model') {
-          const b = await this.body(req);
-          await this.agents.setModel(id, b.provider, b.modelId);
-          return json(res, 200, {data: await this.agents.capabilities(id)});
-        }
-        if (req.method === 'POST' && parts[4] === 'thinking') {
-          const b = await this.body(req);
-          await this.agents.setThinkingLevel(id, b.level);
-          return json(res, 200, {data: await this.agents.capabilities(id)});
-        }
-        if (req.method === 'POST' && parts[4] === 'session-name') {
-          const b = await this.body(req);
-          await this.agents.setSessionName(id, b.name);
-          const summary = await this.agents.sessionInfo(id),
-            record = this.agents.get(id).record;
-          this.metadata.saveAgent(record);
-          this.metadata.upsertSessionFromAgent(record, summary);
-          return json(res, 200, {data: summary});
-        }
-        if (req.method === 'POST' && parts[4] === 'navigate') {
-          const b = await this.body(req);
-          return json(res, 200, {data: await this.agents.navigate(id, b.entryId)});
-        }
-        if (req.method === 'POST' && parts[4] === 'fork') {
-          const b = await this.body(req);
-          const agent = await this.agents.fork(id, b.entryId);
-          this.metadata.saveAgent(agent.agent);
-          return json(res, 201, {data: agent});
-        }
-        if (req.method === 'GET' && parts[4] === 'commands')
-          return json(res, 200, {data: await this.agents.listCommands(id)});
-        if (req.method === 'POST' && parts[4] === 'bash') {
-          const b = await this.body(req);
-          if (typeof b.command !== 'string')
-            throw Object.assign(new Error('command must be a string'), {code: 'INVALID_REQUEST'});
-          const command = b.command.trim();
-          if (!command) throw Object.assign(new Error('command is required'), {code: 'INVALID_REQUEST'});
-          if (command.length > 8000)
-            throw Object.assign(new Error('command is too long'), {code: 'INVALID_REQUEST'});
-          const result = await this.agents.runBash(id, command, b.excludeFromContext === true);
-          this.metadata.scheduleAgent(this.agents.get(id).record);
-          return json(res, 200, {data: result});
-        }
-        if (req.method === 'POST' && parts[4] === 'bash-abort') {
-          await this.agents.abortBash(id);
-          return json(res, 200, {data: {aborted: true}});
-        }
-        if (parts[4] === 'queue') {
-          if (req.method === 'GET') return json(res, 200, {data: await this.agents.queue(id)});
-          if (req.method === 'DELETE') return json(res, 200, {data: await this.agents.clearQueue(id)});
-        }
-        if (parts[4] === 'mcp') {
-          const cwd = this.agents.get(id).record.cwd;
-          if (req.method === 'GET') return json(res, 200, {data: listMcpServers(cwd)});
-          if (req.method === 'POST') {
-            const b = await this.body(req);
-            if (typeof b.name !== 'string' || typeof b.enabled !== 'boolean')
-              throw Object.assign(new Error('name and enabled are required'), {code: 'INVALID_MCP_REQUEST'});
-            return json(res, 200, {data: setMcpServerEnabled(cwd, b.name, b.enabled)});
-          }
-        }
-        if (req.method === 'POST' && parts[4] === 'extension-response') {
-          const b = await this.body(req);
-          await this.agents.extensionResponse(id, b.requestId, b.value);
-          return json(res, 200, {data: {success: true}});
-        }
-        if (req.method === 'POST' && parts[4] === 'transcribe') {
-          if (!this.voice)
-            throw Object.assign(new Error('Voice service is disabled'), {code: 'VOICE_DISABLED'});
-          this.agents.get(id);
-          const audio = await this.binaryBody(req),
-            mime = String(req.headers['content-type'] ?? 'audio/webm').split(';')[0],
-            filename = String(req.headers['x-audio-filename'] ?? 'recording.webm');
-          return json(res, 200, {data: await this.voice.transcribe(audio, mime, filename)});
-        }
-        if (req.method === 'POST' && ['prompt', 'steer', 'follow-up', 'abort'].includes(parts[4])) {
-          const b = await this.body(req);
-          if (parts[4] !== 'abort') {
-            this.voice?.recordUserPrompt(id, String(b.message ?? ''));
-            this.sessionNamer?.recordUserPrompt(id, String(b.message ?? ''));
-          }
-          const disposition = await this.agents.command(id, parts[4] as any, b.message ?? '');
-          const record = this.agents.get(id).record;
-          this.metadata.scheduleAgent(record);
-          if (parts[4] === 'prompt') void this.indexAgentSession(id);
-          return json(res, 200, {data: {success: true, disposition}});
-        }
-      }
+      const agentContext = {
+        agents: this.agents,
+        metadata: this.metadata,
+        workspaces: this.workspaces,
+        voice: this.voice,
+        sessionNamer: this.sessionNamer,
+        ensureSessionIndex: (workspace: Workspace, cwd: string, force?: boolean) =>
+          this.ensureSessionIndex(workspace, cwd, force),
+        indexAgentSession: (agentId: string) => this.indexAgentSession(agentId),
+        body: () => readJsonBody(req),
+        binaryBody: () => readBinaryBody(req)
+      };
+      if (await handleAgentRoutes(agentContext, req, res, u, parts)) return;
       return json(res, 404, {error: {code: 'NOT_FOUND', message: 'Not found', requestId}});
     } catch (e) {
       const x = e as any;
-      return json(
-        res,
-        x.code === 'WORKSPACE_PATH_OUTSIDE_ROOT'
-          ? 403
-          : x.code === 'FILE_TOO_LARGE' || x.code === 'REQUEST_TOO_LARGE'
-            ? 413
-            : x.code === 'VOICE_DISABLED' ||
-                x.code === 'VOICE_STT_DISABLED' ||
-                x.code === 'MAIL_NOTIFICATIONS_DISABLED'
-              ? 503
-              : x.code?.endsWith('NOT_FOUND')
-                ? 404
-                : 400,
-        {error: {code: x.code ?? 'BAD_REQUEST', message: x.message ?? 'Request failed', requestId}}
-      );
+      return json(res, errorStatus(x.code), {
+        error: {code: x.code ?? 'BAD_REQUEST', message: x.message ?? 'Request failed', requestId}
+      });
     }
   }
 }
