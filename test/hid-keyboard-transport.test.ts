@@ -3,80 +3,110 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 
 const source = readFileSync(new URL('../web/hid-keyboard.js', import.meta.url), 'utf8');
-const agent = {agentId:'agent-a', status:'idle'};
+const agent = {agentId: 'agent-a', status: 'idle'};
 
 /** Nozzala codex-full framing: bare JSON requests, LF-terminated replies. */
 class MockHidDevice {
-  vendorId = 0x303A;
+  vendorId = 0x303a;
   productId = 0x8360;
   productName = 'Codex Micro';
   opened = false;
   autoReply = true;
-  collections = [{usagePage:0xFF00, usage:1, inputReports:[{reportId:6}], outputReports:[{reportId:6}]}];
-  requests:any[] = [];
-  listener?: (event:any) => void;
+  collections = [
+    {usagePage: 0xff00, usage: 1, inputReports: [{reportId: 6}], outputReports: [{reportId: 6}]}
+  ];
+  requests: any[] = [];
+  listener?: (event: any) => void;
   private decoder = new TextDecoder();
   private buffer = '';
 
-  open = vi.fn(async () => { this.opened = true; });
-  close = vi.fn(async () => { this.opened = false; });
-  addEventListener = vi.fn((type:string, listener:(event:any) => void) => {
+  open = vi.fn(async () => {
+    this.opened = true;
+  });
+  close = vi.fn(async () => {
+    this.opened = false;
+  });
+  addEventListener = vi.fn((type: string, listener: (event: any) => void) => {
     if (type === 'inputreport') this.listener = listener;
   });
-  removeEventListener = vi.fn((type:string, listener:(event:any) => void) => {
+  removeEventListener = vi.fn((type: string, listener: (event: any) => void) => {
     if (type === 'inputreport' && this.listener === listener) this.listener = undefined;
   });
-  sendReport = vi.fn(async (reportId:number, report:Uint8Array) => {
+  sendReport = vi.fn(async (reportId: number, report: Uint8Array) => {
     expect(reportId).toBe(6);
     expect(report.length).toBe(63);
     expect(report[0]).toBe(2);
-    this.buffer += this.decoder.decode(report.slice(2, 2 + report[1]), {stream:true});
+    this.buffer += this.decoder.decode(report.slice(2, 2 + report[1]), {stream: true});
     let request;
-    try { request = JSON.parse(this.buffer); } catch { return; }
+    try {
+      request = JSON.parse(this.buffer);
+    } catch {
+      return;
+    }
     this.buffer = '';
     this.requests.push(request);
     if (this.autoReply) this.reply(request.id);
   });
 
-  input(text:string, chunkSize = 61) {
+  input(text: string, chunkSize = 61) {
     const bytes = new TextEncoder().encode(text);
     for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-      const chunk = bytes.slice(offset, offset + chunkSize), report = new Uint8Array(63);
-      report[0] = 2; report[1] = chunk.length; report.set(chunk, 2);
-      this.listener?.({device:this, reportId:6, data:new DataView(report.buffer)});
+      const chunk = bytes.slice(offset, offset + chunkSize),
+        report = new Uint8Array(63);
+      report[0] = 2;
+      report[1] = chunk.length;
+      report.set(chunk, 2);
+      this.listener?.({device: this, reportId: 6, data: new DataView(report.buffer)});
     }
   }
-  reply(id:number) { this.input(JSON.stringify({id, result:{ok:1}}) + '\n'); }
+  reply(id: number) {
+    this.input(JSON.stringify({id, result: {ok: 1}}) + '\n');
+  }
 }
 
 function setup(authorized = true) {
   const device = new MockHidDevice();
   const hid = {
-    addEventListener:vi.fn(),
-    getDevices:vi.fn(async () => authorized ? [device] : []),
-    requestDevice:vi.fn(async () => [device]),
+    addEventListener: vi.fn(),
+    getDevices: vi.fn(async () => (authorized ? [device] : [])),
+    requestDevice: vi.fn(async () => [device])
   };
-  const window = {isSecureContext:true} as any;
-  const navigator:{hid:typeof hid|undefined} = {hid};
-  runInNewContext(source, {
-    window, navigator, Date, TextEncoder, TextDecoder, setTimeout, clearTimeout,
-    localStorage:{getItem:() => null, setItem:() => {}},
-  }, {filename:'web/hid-keyboard.js'});
-  const onStateChange = vi.fn(), onError = vi.fn(), onKey = vi.fn();
+  const window = {isSecureContext: true} as any;
+  const navigator: {hid: typeof hid | undefined} = {hid};
+  runInNewContext(
+    source,
+    {
+      window,
+      navigator,
+      Date,
+      TextEncoder,
+      TextDecoder,
+      setTimeout,
+      clearTimeout,
+      localStorage: {getItem: () => null, setItem: () => {}}
+    },
+    {filename: 'web/hid-keyboard.js'}
+  );
+  const onStateChange = vi.fn(),
+    onError = vi.fn(),
+    onKey = vi.fn();
   const keyboard = new window.SessionKeyboardController({onStateChange, onError, onKey});
   keyboard.bind(agent.agentId, 0, '#FF3040');
   keyboard.setAgents([agent]);
   return {keyboard, device, hid, window, navigator, onStateChange, onError, onKey};
 }
 
-async function connectKeyboard(keyboard:any) {
+async function connectKeyboard(keyboard: any) {
   const connected = expect(keyboard.connect()).resolves.toBe(true);
   await vi.runAllTimersAsync();
   await connected;
 }
 
 beforeEach(() => vi.useFakeTimers());
-afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
+});
 
 describe('WebHID connection lifecycle', () => {
   it('opens an authorized device and announces success only after all six replies', async () => {
@@ -96,7 +126,7 @@ describe('WebHID connection lifecycle', () => {
       await vi.advanceTimersByTimeAsync(50);
     }
     await connected;
-    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected:true, name:'Codex Micro'});
+    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected: true, name: 'Codex Micro'});
     expect(keyboard.pending.size).toBe(0);
     expect(keyboard.sentLights.size).toBe(6);
   });
@@ -104,7 +134,9 @@ describe('WebHID connection lifecycle', () => {
   it('requests a device with all four filters when none is authorized', async () => {
     const {keyboard, hid} = setup(false);
     await connectKeyboard(keyboard);
-    expect(hid.requestDevice).toHaveBeenCalledWith({filters:[{vendorId:0x303A, productId:0x8360, usagePage:0xFF00, usage:1}]});
+    expect(hid.requestDevice).toHaveBeenCalledWith({
+      filters: [{vendorId: 0x303a, productId: 0x8360, usagePage: 0xff00, usage: 1}]
+    });
   });
 
   it('does not open a picker during silent restore or publish success after cancellation', async () => {
@@ -117,18 +149,21 @@ describe('WebHID connection lifecycle', () => {
     expect(onStateChange).not.toHaveBeenCalled();
   });
 
-  it.each(['missing WebHID', 'insecure context'])('silently skips automatic restore in an unsupported environment: %s', async reason => {
-    const {keyboard, hid, window, navigator, onError, onStateChange} = setup();
-    if (reason === 'missing WebHID') navigator.hid = undefined;
-    else window.isSecureContext = false;
-    expect(await keyboard.restoreAuthorized()).toBe(false);
-    expect(hid.getDevices).not.toHaveBeenCalled();
-    expect(hid.requestDevice).not.toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
-    expect(onStateChange).not.toHaveBeenCalled();
-    // Explicit connection attempts must still explain why they cannot work.
-    await expect(keyboard.connect()).rejects.toThrow('WebHID');
-  });
+  it.each(['missing WebHID', 'insecure context'])(
+    'silently skips automatic restore in an unsupported environment: %s',
+    async reason => {
+      const {keyboard, hid, window, navigator, onError, onStateChange} = setup();
+      if (reason === 'missing WebHID') navigator.hid = undefined;
+      else window.isSecureContext = false;
+      expect(await keyboard.restoreAuthorized()).toBe(false);
+      expect(hid.getDevices).not.toHaveBeenCalled();
+      expect(hid.requestDevice).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect(onStateChange).not.toHaveBeenCalled();
+      // Explicit connection attempts must still explain why they cannot work.
+      await expect(keyboard.connect()).rejects.toThrow('WebHID');
+    }
+  );
 
   it('still reports genuine device failures during authorized restore', async () => {
     const {keyboard, device, onError} = setup();
@@ -158,11 +193,11 @@ describe('WebHID connection lifecycle', () => {
     expect(device.listener).toBeUndefined();
     expect(keyboard.pending.size).toBe(0);
     expect(keyboard.sentLights.size).toBe(0);
-    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected:false, name:''});
+    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected: false, name: ''});
     await connectKeyboard(keyboard);
     expect(device.open).toHaveBeenCalledTimes(2);
     expect(device.requests).toHaveLength(6);
-    expect(onStateChange).toHaveBeenLastCalledWith({connected:true, name:'Codex Micro'});
+    expect(onStateChange).toHaveBeenLastCalledWith({connected: true, name: 'Codex Micro'});
   });
 
   it('rolls back when the initial reply times out', async () => {
@@ -175,7 +210,7 @@ describe('WebHID connection lifecycle', () => {
     expect(device.opened).toBe(false);
     expect(device.listener).toBeUndefined();
     expect(keyboard.pending.size).toBe(0);
-    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected:false, name:''});
+    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected: false, name: ''});
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -189,7 +224,7 @@ describe('WebHID connection lifecycle', () => {
     expect(keyboard.device).toBeNull();
     expect(device.listener).toBeUndefined();
     expect(keyboard.pending.size).toBe(0);
-    expect(onStateChange).toHaveBeenLastCalledWith({connected:false, name:''});
+    expect(onStateChange).toHaveBeenLastCalledWith({connected: false, name: ''});
   });
 
   it('cleans pending RPCs, caches and UI even if close rejects', async () => {
@@ -207,7 +242,7 @@ describe('WebHID connection lifecycle', () => {
     expect(keyboard.assembler.buffer).toBe('');
     expect(keyboard.sentLights.size).toBe(0);
     expect(device.listener).toBeUndefined();
-    expect(onStateChange).toHaveBeenLastCalledWith({connected:false, name:''});
+    expect(onStateChange).toHaveBeenLastCalledWith({connected: false, name: ''});
     await stopped;
     device.reply(request.id); // A late reply must not reach the detached controller.
     expect(vi.getTimerCount()).toBe(0);
@@ -218,17 +253,24 @@ describe('WebHID connection lifecycle', () => {
   it('waits for both close and the previous light sync before reopening the same device', async () => {
     const {keyboard, device, onStateChange} = setup();
     await connectKeyboard(keyboard);
-    keyboard.handleAgentEvent(agent.agentId, {type:'tool_execution_start', toolCallId:'tool'});
+    keyboard.handleAgentEvent(agent.agentId, {type: 'tool_execution_start', toolCallId: 'tool'});
     await vi.advanceTimersByTimeAsync(0); // The reply arrived, but its cooldown is still running.
     const sent = device.sendReport.mock.calls.length;
-    let finishClose!:() => void;
-    device.close.mockImplementationOnce(() => new Promise<void>(resolve => {
-      finishClose = () => { device.opened = false; resolve(); };
-    }));
-    const closing = keyboard.disconnect(), closingAgain = keyboard.disconnect();
+    let finishClose!: () => void;
+    device.close.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishClose = () => {
+            device.opened = false;
+            resolve();
+          };
+        })
+    );
+    const closing = keyboard.disconnect(),
+      closingAgain = keyboard.disconnect();
     const reconnected = expect(keyboard.connect()).resolves.toBe(true);
     await vi.advanceTimersByTimeAsync(0);
-    expect(onStateChange).toHaveBeenLastCalledWith({connected:false, name:''});
+    expect(onStateChange).toHaveBeenLastCalledWith({connected: false, name: ''});
     expect(device.listener).toBeUndefined();
     expect(device.open).toHaveBeenCalledOnce();
     expect(device.sendReport).toHaveBeenCalledTimes(sent);
@@ -244,8 +286,8 @@ describe('WebHID connection lifecycle', () => {
     expect(keyboard.connected).toBe(true);
     expect(keyboard.pending.size).toBe(0);
     expect(keyboard.sentLights.size).toBe(6);
-    expect(device.requests.slice(-6).map(request => request.p[0].id)).toEqual([0,1,2,3,4,5]);
-    expect(onStateChange).toHaveBeenLastCalledWith({connected:true, name:'Codex Micro'});
+    expect(device.requests.slice(-6).map(request => request.p[0].id)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(onStateChange).toHaveBeenLastCalledWith({connected: true, name: 'Codex Micro'});
   });
 
   it('rolls back when firmware returns an RPC error', async () => {
@@ -253,13 +295,13 @@ describe('WebHID connection lifecycle', () => {
     device.autoReply = false;
     const failed = expect(keyboard.connect()).rejects.toThrow('firmware refused');
     await vi.advanceTimersByTimeAsync(0);
-    device.input(JSON.stringify({id:device.requests[0].id, error:{message:'firmware refused'}}) + '\n');
+    device.input(JSON.stringify({id: device.requests[0].id, error: {message: 'firmware refused'}}) + '\n');
     await vi.runAllTimersAsync();
     await failed;
     expect(device.opened).toBe(false);
     expect(keyboard.pending.size).toBe(0);
     expect(keyboard.sentLights.size).toBe(0);
-    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected:false, name:''});
+    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected: false, name: ''});
   });
 
   it('closes the candidate if switching away from the previous device fails', async () => {
@@ -277,7 +319,7 @@ describe('WebHID connection lifecycle', () => {
     expect(candidate.close).toHaveBeenCalledOnce();
     expect(candidate.opened).toBe(false);
     expect(candidate.listener).toBeUndefined();
-    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected:false, name:''});
+    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected: false, name: ''});
   });
 
   it('does not repopulate caches or announce success after disconnecting in the final cooldown', async () => {
@@ -296,13 +338,18 @@ describe('WebHID connection lifecycle', () => {
     await vi.advanceTimersByTimeAsync(50);
     await stopped;
     expect(keyboard.sentLights.size).toBe(0);
-    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected:false, name:''});
+    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected: false, name: ''});
   });
 
   it('does not announce success or send more fragments after disconnecting during a send', async () => {
     const {keyboard, device, onStateChange} = setup();
-    let finishSend!:() => void;
-    device.sendReport.mockImplementationOnce(() => new Promise<void>(resolve => { finishSend = resolve; }));
+    let finishSend!: () => void;
+    device.sendReport.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishSend = resolve;
+        })
+    );
     const stopped = expect(keyboard.connect()).rejects.toThrow('键盘已断开');
     await vi.advanceTimersByTimeAsync(0);
     await keyboard.disconnect();
@@ -313,7 +360,7 @@ describe('WebHID connection lifecycle', () => {
     await vi.runAllTimersAsync();
     await stopped;
     expect(device.sendReport).toHaveBeenCalledOnce();
-    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected:false, name:''});
+    expect(onStateChange).toHaveBeenCalledExactlyOnceWith({connected: false, name: ''});
     expect(keyboard.sentLights.size).toBe(0);
   });
 });
@@ -321,7 +368,7 @@ describe('WebHID connection lifecycle', () => {
 describe('light synchronization scheduling', () => {
   it('does not drop a snapshot correction after an unchanged cached pass', async () => {
     const {keyboard, device} = setup();
-    keyboard.handleAgentEvent(agent.agentId, {type:'extension_ui_request', requestId:'old-dialog'});
+    keyboard.handleAgentEvent(agent.agentId, {type: 'extension_ui_request', requestId: 'old-dialog'});
     await connectKeyboard(keyboard);
     device.requests.length = 0;
     // This sequence previously ended the no-op worker, then joined its resolved
@@ -330,7 +377,7 @@ describe('light synchronization scheduling', () => {
     keyboard.setAgentSnapshot(agent);
     await vi.runAllTimersAsync();
     expect(device.requests.map(request => request.p[0])).toEqual([
-      {id:0, c:0xFF3040, b:1, e:1, s:0, sk:0, sa:0},
+      {id: 0, c: 0xff3040, b: 1, e: 1, s: 0, sk: 0, sa: 0}
     ]);
     expect(keyboard.sentLights.get(0)).toBe('#FF3040:1:0');
     expect(keyboard.syncPromise).toBeNull();
@@ -341,8 +388,8 @@ describe('light synchronization scheduling', () => {
     const {keyboard, device} = setup();
     await connectKeyboard(keyboard);
     device.requests.length = 0;
-    keyboard.handleAgentEvent(agent.agentId, {type:'tool_execution_start', toolCallId:'tool'});
-    keyboard.handleAgentEvent(agent.agentId, {type:'agent_settled'});
+    keyboard.handleAgentEvent(agent.agentId, {type: 'tool_execution_start', toolCallId: 'tool'});
+    keyboard.handleAgentEvent(agent.agentId, {type: 'agent_settled'});
     await vi.runAllTimersAsync();
     expect(device.requests).toEqual([]);
     expect(keyboard.syncPromise).toBeNull();
@@ -353,7 +400,7 @@ describe('light synchronization scheduling', () => {
     await connectKeyboard(keyboard);
     device.requests.length = 0;
     device.autoReply = false;
-    keyboard.handleAgentEvent(agent.agentId, {type:'tool_execution_start', toolCallId:'tool'});
+    keyboard.handleAgentEvent(agent.agentId, {type: 'tool_execution_start', toolCallId: 'tool'});
     await vi.advanceTimersByTimeAsync(0);
     expect(device.requests[0].p[0].e).toBe(4);
     keyboard.setAgentSnapshot(agent);
@@ -369,7 +416,7 @@ describe('light synchronization scheduling', () => {
     await connectKeyboard(keyboard);
     device.requests.length = 0;
     device.sendReport.mockRejectedValueOnce(Error('temporary send failure'));
-    keyboard.handleAgentEvent(agent.agentId, {type:'tool_execution_start', toolCallId:'tool'});
+    keyboard.handleAgentEvent(agent.agentId, {type: 'tool_execution_start', toolCallId: 'tool'});
     await vi.runAllTimersAsync();
     expect(onError).toHaveBeenCalledOnce();
     expect(keyboard.syncPromise).toBeNull();
@@ -381,11 +428,11 @@ describe('light synchronization scheduling', () => {
 });
 
 describe('key notifications', () => {
-  it.each([0,1,2,3,4,5])('routes a fragmented AG0%i press to its binding', async slot => {
+  it.each([0, 1, 2, 3, 4, 5])('routes a fragmented AG0%i press to its binding', async slot => {
     const {keyboard, device, onKey} = setup();
     keyboard.bind(agent.agentId, slot, '#FF3040');
     await connectKeyboard(keyboard);
-    const notification = {m:'v.oai.hid', p:{k:`AG0${slot}`, act:1}};
+    const notification = {m: 'v.oai.hid', p: {k: `AG0${slot}`, act: 1}};
     device.input(JSON.stringify(notification) + '\n', 1);
     expect(onKey).toHaveBeenCalledExactlyOnceWith(keyboard.getSlot(slot), notification);
   });
@@ -393,11 +440,15 @@ describe('key notifications', () => {
   it('ignores releases, foreign notifications, replies and unbound keys', async () => {
     const {keyboard, device, onKey} = setup();
     await connectKeyboard(keyboard);
-    const press = {m:'v.oai.hid', p:{k:'AG00', act:1}};
+    const press = {m: 'v.oai.hid', p: {k: 'AG00', act: 1}};
     for (const notification of [
-      {...press, p:{k:'AG00', act:0}}, {...press, m:'other'}, {...press, id:900},
-      {...press, p:{k:'AG06', act:1}}, {...press, p:{k:'AG01', act:1}},
-    ]) device.input(JSON.stringify(notification) + '\n');
+      {...press, p: {k: 'AG00', act: 0}},
+      {...press, m: 'other'},
+      {...press, id: 900},
+      {...press, p: {k: 'AG06', act: 1}},
+      {...press, p: {k: 'AG01', act: 1}}
+    ])
+      device.input(JSON.stringify(notification) + '\n');
     expect(onKey).not.toHaveBeenCalled();
     device.input(JSON.stringify(press) + '\n');
     expect(onKey).toHaveBeenCalledOnce();
@@ -407,14 +458,17 @@ describe('key notifications', () => {
     const {keyboard, device, onKey} = setup();
     keyboard.bind('agent-b', 1, '#00D9FF');
     await connectKeyboard(keyboard);
-    const press = (slot:number) => device.input(JSON.stringify({m:'v.oai.hid', p:{k:`AG0${slot}`, act:1}}) + '\n');
-    press(0); press(0);
+    const press = (slot: number) =>
+      device.input(JSON.stringify({m: 'v.oai.hid', p: {k: `AG0${slot}`, act: 1}}) + '\n');
+    press(0);
+    press(0);
     await vi.advanceTimersByTimeAsync(249);
-    press(0); press(1);
-    expect(onKey.mock.calls.map(([binding]) => binding.slot)).toEqual([0,1]);
+    press(0);
+    press(1);
+    expect(onKey.mock.calls.map(([binding]) => binding.slot)).toEqual([0, 1]);
     await vi.advanceTimersByTimeAsync(1);
     press(0);
-    expect(onKey.mock.calls.map(([binding]) => binding.slot)).toEqual([0,1,0]);
+    expect(onKey.mock.calls.map(([binding]) => binding.slot)).toEqual([0, 1, 0]);
   });
 });
 
@@ -425,10 +479,14 @@ describe('Nozzala codex-full wire contract', () => {
     device.sendReport.mockClear();
     keyboard.requestId = 41;
     const request = keyboard.lightRequest(3, '#FF00FF', 4, 0.45);
-    expect(request).toEqual({id:42, m:'v.oai.thstatus', p:[{id:3, c:0xFF00FF, b:1, e:4, s:0.45, sk:0, sa:0}]});
+    expect(request).toEqual({
+      id: 42,
+      m: 'v.oai.thstatus',
+      p: [{id: 3, c: 0xff00ff, b: 1, e: 4, s: 0.45, sk: 0, sa: 0}]
+    });
     const sent = keyboard.transmit(request);
     await vi.runAllTimersAsync();
-    expect(await sent).toEqual({id:42, result:{ok:1}});
+    expect(await sent).toEqual({id: 42, result: {ok: 1}});
     const reports = device.sendReport.mock.calls.map(([, report]) => report);
     expect(reports).toHaveLength(2);
     expect(reports[0][1]).toBe(61);
@@ -442,9 +500,12 @@ describe('Nozzala codex-full wire contract', () => {
 
   it.each([60, 61, 62, 122, 123])('fragments %i bytes without adding a delimiter', length => {
     const {keyboard} = setup();
-    const message = 'x'.repeat(length), reports:Uint8Array[] = keyboard.reports(message);
+    const message = 'x'.repeat(length),
+      reports: Uint8Array[] = keyboard.reports(message);
     expect(reports).toHaveLength(Math.ceil(length / 61));
-    expect(Buffer.concat(Array.from(reports, report => Buffer.from(report.slice(2, 2 + report[1])))).toString()).toBe(message);
+    expect(
+      Buffer.concat(Array.from(reports, report => Buffer.from(report.slice(2, 2 + report[1])))).toString()
+    ).toBe(message);
   });
 
   it('waits for a matching LF-terminated reply and the 50ms cooldown before the next RPC', async () => {
@@ -452,11 +513,13 @@ describe('Nozzala codex-full wire contract', () => {
     await connectKeyboard(keyboard);
     device.autoReply = false;
     device.requests.length = 0;
-    const first = keyboard.lightRequest(0, '#FF0000', 1), second = keyboard.lightRequest(1, '#00FF00', 1);
-    const firstReply = keyboard.transmit(first), secondReply = keyboard.transmit(second);
+    const first = keyboard.lightRequest(0, '#FF0000', 1),
+      second = keyboard.lightRequest(1, '#00FF00', 1);
+    const firstReply = keyboard.transmit(first),
+      secondReply = keyboard.transmit(second);
     await vi.advanceTimersByTimeAsync(0);
     device.reply(900); // An unrelated reply must not unblock the queue.
-    const response = {id:first.id, result:{message:'中文回复🙂'}};
+    const response = {id: first.id, result: {message: '中文回复🙂'}};
     device.input(JSON.stringify(response), 1); // Split inside UTF-8 sequences, but omit LF.
     await vi.advanceTimersByTimeAsync(100);
     expect(device.requests).toHaveLength(1);
@@ -469,6 +532,6 @@ describe('Nozzala codex-full wire contract', () => {
     device.reply(second.id);
     await vi.runAllTimersAsync();
     expect(await firstReply).toEqual(response);
-    expect(await secondReply).toEqual({id:second.id, result:{ok:1}});
+    expect(await secondReply).toEqual({id: second.id, result: {ok: 1}});
   });
 });
