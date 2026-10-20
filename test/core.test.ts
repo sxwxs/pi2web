@@ -1,38 +1,275 @@
-import {describe,it,expect,beforeEach} from 'vitest';import {mkdtemp,writeFile,mkdir,symlink,readFile} from 'node:fs/promises';import {tmpdir} from 'node:os';import path from 'node:path';import {AuthStore} from '../src/auth.js';import {WorkspaceStore} from '../src/workspaces.js';import {AgentManager,MockBackend} from '../src/agents.js';
-import {TerminalManager,type PtyProcess} from '../src/terminals.js';
+import {describe, it, expect, beforeEach} from 'vitest';
+import {mkdtemp, writeFile, mkdir, symlink, readFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {AuthStore} from '../src/auth.js';
+import {WorkspaceStore} from '../src/workspaces.js';
+import {AgentManager, MockBackend} from '../src/agents.js';
+import {TerminalManager, type PtyProcess} from '../src/terminals.js';
 import {EventEmitter} from 'node:events';
-const temp=()=>mkdtemp(path.join(tmpdir(),'remote-pi-'));
-describe('authentication',()=>{it('creates hashed 0600 token and verifies/rotates',async()=>{const d=await temp(),a=new AuthStore(d);const {token}=await a.init();expect(token).toBeTruthy();expect(await a.verify(token!)).toBe(true);const raw=await readFile(path.join(d,'auth.json'),'utf8');expect(raw).not.toContain(token!);const next=await a.rotate();expect(await a.verify(token!)).toBe(false);expect(await a.verify(next)).toBe(true)})});
-
-describe('manual access token',()=>{
- it('replaces the generated token with a caller-chosen one',async()=>{
-  const d=await temp(),a=new AuthStore(d);const {token}=await a.init();
-  await a.setToken('my-custom-token-0123456789');
-  expect(await a.verify(token!)).toBe(false);expect(await a.verify('my-custom-token-0123456789')).toBe(true);
-  const raw=await readFile(path.join(d,'auth.json'),'utf8');expect(raw).not.toContain('my-custom-token-0123456789');
- });
- it('keeps createdAt metadata and updates rotatedAt',async()=>{
-  const d=await temp(),a=new AuthStore(d);await a.init();
-  await a.setToken('my-custom-token-0123456789');
-  const stored=JSON.parse(await readFile(path.join(d,'auth.json'),'utf8'));expect(stored.createdAt).toBeTruthy();expect(stored.rotatedAt).toBeTruthy();
- });
- it('creates the first auth file directly from a caller-chosen token',async()=>{
-  const d=await temp(),a=new AuthStore(d);
-  await a.setToken('first-custom-token-012345');
-  expect(await a.verify('first-custom-token-012345')).toBe(true);
-  const stored=JSON.parse(await readFile(path.join(d,'auth.json'),'utf8'));expect(stored.createdAt).toBeTruthy();expect(stored.rotatedAt).toBeUndefined();
- });
- it('rejects invalid tokens without creating or changing storage',async()=>{
-  const fresh=await temp(),freshStore=new AuthStore(fresh);
-  await expect(freshStore.setToken('short')).rejects.toThrow('URL-safe');
-  await expect(readFile(path.join(fresh,'auth.json'),'utf8')).rejects.toThrow();
-  const d=await temp(),a=new AuthStore(d);const {token}=await a.init();const before=await readFile(path.join(d,'auth.json'),'utf8');
-  for(const invalid of ['short',' has-leading-space-012345','has-trailing-space-012345 ','has space in middle','has:colon:0123456789'])await expect(a.setToken(invalid)).rejects.toThrow('URL-safe');
-  expect(await a.verify(token!)).toBe(true);expect(await readFile(path.join(d,'auth.json'),'utf8')).toBe(before);
- });
+const temp = () => mkdtemp(path.join(tmpdir(), 'remote-pi-'));
+describe('authentication', () => {
+  it('creates hashed 0600 token and verifies/rotates', async () => {
+    const d = await temp(),
+      a = new AuthStore(d);
+    const {token} = await a.init();
+    expect(token).toBeTruthy();
+    expect(await a.verify(token!)).toBe(true);
+    const raw = await readFile(path.join(d, 'auth.json'), 'utf8');
+    expect(raw).not.toContain(token!);
+    const next = await a.rotate();
+    expect(await a.verify(token!)).toBe(false);
+    expect(await a.verify(next)).toBe(true);
+  });
 });
-describe('workspace security',()=>{let root:string,store:WorkspaceStore;beforeEach(async()=>{root=await temp();store=new WorkspaceStore();});it('lists sorted files including dotfiles and reads pages',async()=>{await writeFile(path.join(root,'b.txt'),'hello');await writeFile(path.join(root,'a.txt'),'world');await writeFile(path.join(root,'.secret'),'x');const w=store.add('x',root),names=(await store.tree(w.id)).map(x=>x.name);expect(names).toContain('.secret');expect(names.indexOf('a.txt')).toBeLessThan(names.indexOf('b.txt'));expect((await store.file(w.id,'b.txt',1,2)).content).toBe('el')});it('rejects traversal and symlink escape',async()=>{const outside=await temp();await writeFile(path.join(outside,'secret'),'no');await symlink(outside,path.join(root,'link'),process.platform==='win32'?'junction':undefined);const w=store.add('x',root);await expect(store.file(w.id,'../'+path.basename(outside)+'/secret')).rejects.toMatchObject({code:'WORKSPACE_PATH_OUTSIDE_ROOT'});await expect(store.file(w.id,'link/secret')).rejects.toMatchObject({code:'WORKSPACE_PATH_OUTSIDE_ROOT'})});it('rejects invalid or large reads and directories as files',async()=>{await mkdir(path.join(root,'dir'));await writeFile(path.join(root,'x'),'content');const w=store.add('x',root);await expect(store.file(w.id,'dir')).rejects.toThrow('Not a file');await expect(store.file(w.id,'x',-1,1)).rejects.toMatchObject({code:'INVALID_REQUEST'});await expect(store.file(w.id,'x',0,0)).rejects.toMatchObject({code:'INVALID_REQUEST'});await expect(store.file(w.id,'x',0,2*1024*1024)).rejects.toMatchObject({code:'FILE_TOO_LARGE'});expect((await store.file(w.id,'x',2,3)).content).toBe('nte')});it('rejects missing and non-directory workspace roots without changing the list',async()=>{expect(()=>store.add('missing',path.join(root,'missing'))).toThrow('Workspace root does not exist');const file=path.join(root,'file.txt');await writeFile(file,'x');expect(()=>store.add('file',file)).toThrow('Workspace root is not a directory');expect(store.list()).toEqual([])});it('rejects duplicate workspace roots without changing the list',()=>{store.add('first',root);expect(()=>store.add('duplicate',root)).toThrow('Workspace root already exists');expect(store.list()).toHaveLength(1)})});
-class FakePty implements PtyProcess {emitter=new EventEmitter();writes:string[]=[];sizes:{cols:number,rows:number}[]=[];killed=false;write(data:string){this.writes.push(data)}resize(cols:number,rows:number){this.sizes.push({cols,rows})}kill(){this.killed=true}onData(listener:(data:string)=>void){this.emitter.on('data',listener);return{dispose:()=>this.emitter.off('data',listener)}}onExit(listener:(event:{exitCode:number})=>void){this.emitter.on('exit',listener);return{dispose:()=>this.emitter.off('exit',listener)}}output(data:string){this.emitter.emit('data',data)}exit(exitCode=0){this.emitter.emit('exit',{exitCode})}}
-describe('terminal manager',()=>{it('validates cwd, buffers output and controls PTYs',async()=>{const root=await temp();await mkdir(path.join(root,'sub'));const ws=new WorkspaceStore(),workspace=ws.add('x',root),ptys:FakePty[]=[];const terminals=new TerminalManager(ws,()=>{const p=new FakePty();ptys.push(p);return p},1,5);const terminal=await terminals.create(workspace.id,'sub',100,40);expect(path.basename(terminal.cwd)).toBe('sub');terminals.write(terminal.terminalId,'echo');terminals.resize(terminal.terminalId,120,50);expect(ptys[0].writes).toEqual(['echo']);expect(ptys[0].sizes).toEqual([{cols:120,rows:50}]);ptys[0].output('1234567');expect(terminals.snapshot(terminal.terminalId).data).toBe('34567');await expect(terminals.create(workspace.id,'.')).rejects.toMatchObject({code:'TERMINAL_LIMIT'});ptys[0].exit(3);expect(terminals.get(terminal.terminalId).record).toMatchObject({status:'exited',exitCode:3});terminals.close(terminal.terminalId);expect(terminals.list()).toEqual([])});it('rejects paths outside the workspace',async()=>{const root=await temp(),outside=await temp(),ws=new WorkspaceStore(),workspace=ws.add('x',root),terminals=new TerminalManager(ws,()=>new FakePty());await expect(terminals.create(workspace.id,path.relative(root,outside))).rejects.toMatchObject({code:'WORKSPACE_PATH_OUTSIDE_ROOT'})})});
 
-describe('agent manager',()=>{it('emits ordered events and supports abort/dispose',async()=>{const root=await temp(),ws=new WorkspaceStore(),w=ws.add('x',root),m=new AgentManager(ws,(id,cwd)=>new MockBackend(id,cwd));const a=await m.create(w.id);expect(m.hasReplayGap(a.agentId,5)).toBe(true);const received:any[]=[],globalReceived:any[]=[];m.subscribe(a.agentId,e=>received.push(e));m.subscribeAll((agentId,e)=>globalReceived.push({agentId,e}));await m.command(a.agentId,'prompt','hello');expect((await m.state(a.agentId)).status).toBe('idle');expect(received.map(x=>x.sequence)).toEqual([1,2,3,4,5]);expect(globalReceived.map(x=>x.agentId)).toEqual(Array(5).fill(a.agentId));expect(received.every(x=>Number.isInteger(x.timestamp)&&x.timestamp>0)).toBe(true);expect((await m.messages(a.agentId))).toHaveLength(1);for(let i=0;i<29;i++)await m.command(a.agentId,'prompt',`message-${i}`);expect(await m.messagePage(a.agentId,5)).toMatchObject({total:30,start:25,end:30,hasMore:true});expect((await m.messagePage(a.agentId,5,25)).items).toHaveLength(5);await m.setSessionName(a.agentId,'Named Session');expect(m.list().find(x=>x.agentId===a.agentId)?.sessionName).toBe('Named Session');await m.dispose(a.agentId);expect(m.list().find(x=>x.agentId===a.agentId)?.status).toBe('unloaded');await m.command(a.agentId,'prompt','x');expect((await m.state(a.agentId)).status).toBe('idle')});it('restores metadata without starting backends and loads once on demand',async()=>{const root=await temp(),ws=new WorkspaceStore(),w=ws.add('x',root),source=new AgentManager(ws,(id,cwd)=>new MockBackend(id,cwd)),saved=await source.create(w.id);await source.setSessionName(saved.agentId,'Persisted Agent Name');const persisted={...source.get(saved.agentId).record};let starts=0;const restored=new AgentManager(ws,(id,cwd,session)=>{starts++;return new MockBackend(id,cwd,session)});await restored.restore([persisted]);expect(starts).toBe(0);expect(restored.list()[0].status).toBe('unloaded');expect(restored.isLoaded(saved.agentId)).toBe(false);await Promise.all([restored.messages(saved.agentId),restored.session(saved.agentId)]);expect(starts).toBe(1);expect(restored.isLoaded(saved.agentId)).toBe(true);expect(restored.list()[0].sessionName).toBe('Persisted Agent Name');expect((await restored.sessionInfo(saved.agentId)).sessionName).toBe('Persisted Agent Name')});it('rejects archiving an active agent',async()=>{const root=await temp(),ws=new WorkspaceStore(),w=ws.add('x',root),m=new AgentManager(ws,(id,cwd)=>new MockBackend(id,cwd)),a=await m.create(w.id);m.get(a.agentId).record.status='streaming';await expect(m.archive(a.agentId)).rejects.toMatchObject({code:'AGENT_ACTIVE'});expect(m.list()).toHaveLength(1)});it('forks before a selected user message and returns its text',async()=>{const root=await temp(),ws=new WorkspaceStore(),w=ws.add('x',root),m=new AgentManager(ws,(id,cwd,session)=>{const backend=new MockBackend(id,cwd,session);backend.fork=async()=>({sessionFile:path.join(root,'fork.jsonl'),selectedText:'edit me'});return backend});const source=await m.create(w.id),result=await m.fork(source.agentId,'entry-1');expect(result.selectedText).toBe('edit me');expect(result.agent.agentId).not.toBe(source.agentId);expect(m.list()).toHaveLength(2)})});
+describe('manual access token', () => {
+  it('replaces the generated token with a caller-chosen one', async () => {
+    const d = await temp(),
+      a = new AuthStore(d);
+    const {token} = await a.init();
+    await a.setToken('my-custom-token-0123456789');
+    expect(await a.verify(token!)).toBe(false);
+    expect(await a.verify('my-custom-token-0123456789')).toBe(true);
+    const raw = await readFile(path.join(d, 'auth.json'), 'utf8');
+    expect(raw).not.toContain('my-custom-token-0123456789');
+  });
+  it('keeps createdAt metadata and updates rotatedAt', async () => {
+    const d = await temp(),
+      a = new AuthStore(d);
+    await a.init();
+    await a.setToken('my-custom-token-0123456789');
+    const stored = JSON.parse(await readFile(path.join(d, 'auth.json'), 'utf8'));
+    expect(stored.createdAt).toBeTruthy();
+    expect(stored.rotatedAt).toBeTruthy();
+  });
+  it('creates the first auth file directly from a caller-chosen token', async () => {
+    const d = await temp(),
+      a = new AuthStore(d);
+    await a.setToken('first-custom-token-012345');
+    expect(await a.verify('first-custom-token-012345')).toBe(true);
+    const stored = JSON.parse(await readFile(path.join(d, 'auth.json'), 'utf8'));
+    expect(stored.createdAt).toBeTruthy();
+    expect(stored.rotatedAt).toBeUndefined();
+  });
+  it('rejects invalid tokens without creating or changing storage', async () => {
+    const fresh = await temp(),
+      freshStore = new AuthStore(fresh);
+    await expect(freshStore.setToken('short')).rejects.toThrow('URL-safe');
+    await expect(readFile(path.join(fresh, 'auth.json'), 'utf8')).rejects.toThrow();
+    const d = await temp(),
+      a = new AuthStore(d);
+    const {token} = await a.init();
+    const before = await readFile(path.join(d, 'auth.json'), 'utf8');
+    for (const invalid of [
+      'short',
+      ' has-leading-space-012345',
+      'has-trailing-space-012345 ',
+      'has space in middle',
+      'has:colon:0123456789'
+    ])
+      await expect(a.setToken(invalid)).rejects.toThrow('URL-safe');
+    expect(await a.verify(token!)).toBe(true);
+    expect(await readFile(path.join(d, 'auth.json'), 'utf8')).toBe(before);
+  });
+});
+describe('workspace security', () => {
+  let root: string, store: WorkspaceStore;
+  beforeEach(async () => {
+    root = await temp();
+    store = new WorkspaceStore();
+  });
+  it('lists sorted files including dotfiles and reads pages', async () => {
+    await writeFile(path.join(root, 'b.txt'), 'hello');
+    await writeFile(path.join(root, 'a.txt'), 'world');
+    await writeFile(path.join(root, '.secret'), 'x');
+    const w = store.add('x', root),
+      names = (await store.tree(w.id)).map(x => x.name);
+    expect(names).toContain('.secret');
+    expect(names.indexOf('a.txt')).toBeLessThan(names.indexOf('b.txt'));
+    expect((await store.file(w.id, 'b.txt', 1, 2)).content).toBe('el');
+  });
+  it('rejects traversal and symlink escape', async () => {
+    const outside = await temp();
+    await writeFile(path.join(outside, 'secret'), 'no');
+    await symlink(outside, path.join(root, 'link'), process.platform === 'win32' ? 'junction' : undefined);
+    const w = store.add('x', root);
+    await expect(store.file(w.id, '../' + path.basename(outside) + '/secret')).rejects.toMatchObject({
+      code: 'WORKSPACE_PATH_OUTSIDE_ROOT'
+    });
+    await expect(store.file(w.id, 'link/secret')).rejects.toMatchObject({
+      code: 'WORKSPACE_PATH_OUTSIDE_ROOT'
+    });
+  });
+  it('rejects invalid or large reads and directories as files', async () => {
+    await mkdir(path.join(root, 'dir'));
+    await writeFile(path.join(root, 'x'), 'content');
+    const w = store.add('x', root);
+    await expect(store.file(w.id, 'dir')).rejects.toThrow('Not a file');
+    await expect(store.file(w.id, 'x', -1, 1)).rejects.toMatchObject({code: 'INVALID_REQUEST'});
+    await expect(store.file(w.id, 'x', 0, 0)).rejects.toMatchObject({code: 'INVALID_REQUEST'});
+    await expect(store.file(w.id, 'x', 0, 2 * 1024 * 1024)).rejects.toMatchObject({code: 'FILE_TOO_LARGE'});
+    expect((await store.file(w.id, 'x', 2, 3)).content).toBe('nte');
+  });
+  it('rejects missing and non-directory workspace roots without changing the list', async () => {
+    expect(() => store.add('missing', path.join(root, 'missing'))).toThrow('Workspace root does not exist');
+    const file = path.join(root, 'file.txt');
+    await writeFile(file, 'x');
+    expect(() => store.add('file', file)).toThrow('Workspace root is not a directory');
+    expect(store.list()).toEqual([]);
+  });
+  it('rejects duplicate workspace roots without changing the list', () => {
+    store.add('first', root);
+    expect(() => store.add('duplicate', root)).toThrow('Workspace root already exists');
+    expect(store.list()).toHaveLength(1);
+  });
+});
+class FakePty implements PtyProcess {
+  emitter = new EventEmitter();
+  writes: string[] = [];
+  sizes: {cols: number; rows: number}[] = [];
+  killed = false;
+  write(data: string) {
+    this.writes.push(data);
+  }
+  resize(cols: number, rows: number) {
+    this.sizes.push({cols, rows});
+  }
+  kill() {
+    this.killed = true;
+  }
+  onData(listener: (data: string) => void) {
+    this.emitter.on('data', listener);
+    return {dispose: () => this.emitter.off('data', listener)};
+  }
+  onExit(listener: (event: {exitCode: number}) => void) {
+    this.emitter.on('exit', listener);
+    return {dispose: () => this.emitter.off('exit', listener)};
+  }
+  output(data: string) {
+    this.emitter.emit('data', data);
+  }
+  exit(exitCode = 0) {
+    this.emitter.emit('exit', {exitCode});
+  }
+}
+describe('terminal manager', () => {
+  it('validates cwd, buffers output and controls PTYs', async () => {
+    const root = await temp();
+    await mkdir(path.join(root, 'sub'));
+    const ws = new WorkspaceStore(),
+      workspace = ws.add('x', root),
+      ptys: FakePty[] = [];
+    const terminals = new TerminalManager(
+      ws,
+      () => {
+        const p = new FakePty();
+        ptys.push(p);
+        return p;
+      },
+      1,
+      5
+    );
+    const terminal = await terminals.create(workspace.id, 'sub', 100, 40);
+    expect(path.basename(terminal.cwd)).toBe('sub');
+    terminals.write(terminal.terminalId, 'echo');
+    terminals.resize(terminal.terminalId, 120, 50);
+    expect(ptys[0].writes).toEqual(['echo']);
+    expect(ptys[0].sizes).toEqual([{cols: 120, rows: 50}]);
+    ptys[0].output('1234567');
+    expect(terminals.snapshot(terminal.terminalId).data).toBe('34567');
+    await expect(terminals.create(workspace.id, '.')).rejects.toMatchObject({code: 'TERMINAL_LIMIT'});
+    ptys[0].exit(3);
+    expect(terminals.get(terminal.terminalId).record).toMatchObject({status: 'exited', exitCode: 3});
+    terminals.close(terminal.terminalId);
+    expect(terminals.list()).toEqual([]);
+  });
+  it('rejects paths outside the workspace', async () => {
+    const root = await temp(),
+      outside = await temp(),
+      ws = new WorkspaceStore(),
+      workspace = ws.add('x', root),
+      terminals = new TerminalManager(ws, () => new FakePty());
+    await expect(terminals.create(workspace.id, path.relative(root, outside))).rejects.toMatchObject({
+      code: 'WORKSPACE_PATH_OUTSIDE_ROOT'
+    });
+  });
+});
+
+describe('agent manager', () => {
+  it('emits ordered events and supports abort/dispose', async () => {
+    const root = await temp(),
+      ws = new WorkspaceStore(),
+      w = ws.add('x', root),
+      m = new AgentManager(ws, (id, cwd) => new MockBackend(id, cwd));
+    const a = await m.create(w.id);
+    expect(m.hasReplayGap(a.agentId, 5)).toBe(true);
+    const received: any[] = [],
+      globalReceived: any[] = [];
+    m.subscribe(a.agentId, e => received.push(e));
+    m.subscribeAll((agentId, e) => globalReceived.push({agentId, e}));
+    await m.command(a.agentId, 'prompt', 'hello');
+    expect((await m.state(a.agentId)).status).toBe('idle');
+    expect(received.map(x => x.sequence)).toEqual([1, 2, 3, 4, 5]);
+    expect(globalReceived.map(x => x.agentId)).toEqual(Array(5).fill(a.agentId));
+    expect(received.every(x => Number.isInteger(x.timestamp) && x.timestamp > 0)).toBe(true);
+    expect(await m.messages(a.agentId)).toHaveLength(1);
+    for (let i = 0; i < 29; i++) await m.command(a.agentId, 'prompt', `message-${i}`);
+    expect(await m.messagePage(a.agentId, 5)).toMatchObject({total: 30, start: 25, end: 30, hasMore: true});
+    expect((await m.messagePage(a.agentId, 5, 25)).items).toHaveLength(5);
+    await m.setSessionName(a.agentId, 'Named Session');
+    expect(m.list().find(x => x.agentId === a.agentId)?.sessionName).toBe('Named Session');
+    await m.dispose(a.agentId);
+    expect(m.list().find(x => x.agentId === a.agentId)?.status).toBe('unloaded');
+    await m.command(a.agentId, 'prompt', 'x');
+    expect((await m.state(a.agentId)).status).toBe('idle');
+  });
+  it('restores metadata without starting backends and loads once on demand', async () => {
+    const root = await temp(),
+      ws = new WorkspaceStore(),
+      w = ws.add('x', root),
+      source = new AgentManager(ws, (id, cwd) => new MockBackend(id, cwd)),
+      saved = await source.create(w.id);
+    await source.setSessionName(saved.agentId, 'Persisted Agent Name');
+    const persisted = {...source.get(saved.agentId).record};
+    let starts = 0;
+    const restored = new AgentManager(ws, (id, cwd, session) => {
+      starts++;
+      return new MockBackend(id, cwd, session);
+    });
+    await restored.restore([persisted]);
+    expect(starts).toBe(0);
+    expect(restored.list()[0].status).toBe('unloaded');
+    expect(restored.isLoaded(saved.agentId)).toBe(false);
+    await Promise.all([restored.messages(saved.agentId), restored.session(saved.agentId)]);
+    expect(starts).toBe(1);
+    expect(restored.isLoaded(saved.agentId)).toBe(true);
+    expect(restored.list()[0].sessionName).toBe('Persisted Agent Name');
+    expect((await restored.sessionInfo(saved.agentId)).sessionName).toBe('Persisted Agent Name');
+  });
+  it('rejects archiving an active agent', async () => {
+    const root = await temp(),
+      ws = new WorkspaceStore(),
+      w = ws.add('x', root),
+      m = new AgentManager(ws, (id, cwd) => new MockBackend(id, cwd)),
+      a = await m.create(w.id);
+    m.get(a.agentId).record.status = 'streaming';
+    await expect(m.archive(a.agentId)).rejects.toMatchObject({code: 'AGENT_ACTIVE'});
+    expect(m.list()).toHaveLength(1);
+  });
+  it('forks before a selected user message and returns its text', async () => {
+    const root = await temp(),
+      ws = new WorkspaceStore(),
+      w = ws.add('x', root),
+      m = new AgentManager(ws, (id, cwd, session) => {
+        const backend = new MockBackend(id, cwd, session);
+        backend.fork = async () => ({sessionFile: path.join(root, 'fork.jsonl'), selectedText: 'edit me'});
+        return backend;
+      });
+    const source = await m.create(w.id),
+      result = await m.fork(source.agentId, 'entry-1');
+    expect(result.selectedText).toBe('edit me');
+    expect(result.agent.agentId).not.toBe(source.agentId);
+    expect(m.list()).toHaveLength(2);
+  });
+});

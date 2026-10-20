@@ -36,6 +36,8 @@
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc -p tsconfig.json && chmod +x dist/main.js",
     "check": "npm run build",
+    "format": "prettier --write \"src/**/*.ts\" \"web/*.js\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"web/*.js\" \"test/**/*.ts\"",
     "test": "vitest run",
     "dev": "tsx src/main.ts",
     "dev:watch": "tsx watch src/main.ts",
@@ -68,6 +70,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
+    "prettier": "3.6.2",
     "tsx": "^4.19.0",
     "typescript": "^5.9.3",
     "vitest": "^3.0.0"

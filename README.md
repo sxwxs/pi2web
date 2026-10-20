@@ -170,6 +170,8 @@ npm test
 npm run dev -- --port 11318
 ```
 
+源码使用 Prettier 统一格式：`npm run format` 和 `npm run format:check` 覆盖 `src/**/*.ts` 与 `web/*.js`；不要格式化 `dist/` 或网站生成文件 `website/public/`，也不要把纯格式改动与功能修改混在同一次提交。
+
 ## 数据持久化
 
 Remote Pi 的服务端元数据保存在 `~/.pi/remote-pi/remote-pi.db` SQLite 数据库中：
