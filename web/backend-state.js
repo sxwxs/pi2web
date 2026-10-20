@@ -25,7 +25,7 @@
       reconnectTimer: null,
       reconnectAttempt: 0,
       manuallyClosed: false,
-      reconnecting: false,
+      reconnecting: false
     };
   }
 
@@ -37,7 +37,12 @@
     return `${backendId}:${remoteId}`;
   }
 
-  const normalizePath = value => String(value || '').split('\\').join('/').replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+  const normalizePath = value =>
+    String(value || '')
+      .split('\\')
+      .join('/')
+      .replace(/\/+/g, '/')
+      .replace(/\/$/, '') || '/';
   const isInsidePath = (file, dir) => file === dir || file.startsWith(`${dir}/`);
 
   /**
@@ -47,11 +52,15 @@
    */
   function matchWorkspace(workspaces, cwd) {
     const target = normalizePath(cwd);
-    let best = null, bestLength = -1;
+    let best = null,
+      bestLength = -1;
     for (const workspace of workspaces || []) {
       const root = normalizePath(workspace.rootPath);
       if (!isInsidePath(target, root)) continue;
-      if (root.length > bestLength) { best = workspace; bestLength = root.length; }
+      if (root.length > bestLength) {
+        best = workspace;
+        bestLength = root.length;
+      }
     }
     return best;
   }
@@ -81,10 +90,15 @@
     try {
       const bindings = JSON.parse(storage.rpSessionKeyboardBindings || '[]');
       if (!Array.isArray(bindings)) return;
-      storage.rpSessionKeyboardBindings = JSON.stringify(bindings.map(binding => {
-        const agentId = String(binding?.agentId || '');
-        return {...binding, agentId:agentId.includes(':') ? agentId : resourceKey(LEGACY_BACKEND_ID, agentId)};
-      }));
+      storage.rpSessionKeyboardBindings = JSON.stringify(
+        bindings.map(binding => {
+          const agentId = String(binding?.agentId || '');
+          return {
+            ...binding,
+            agentId: agentId.includes(':') ? agentId : resourceKey(LEGACY_BACKEND_ID, agentId)
+          };
+        })
+      );
     } catch {}
   }
 
@@ -98,7 +112,12 @@
       if (!Array.isArray(entries)) return null;
       return entries
         .filter(entry => entry && typeof entry.id === 'string' && typeof entry.base === 'string')
-        .map(entry => ({id:entry.id, name:String(entry.name || ''), base:normalizeBase(entry.base), token:String(entry.token || '')}));
+        .map(entry => ({
+          id: entry.id,
+          name: String(entry.name || ''),
+          base: normalizeBase(entry.base),
+          token: String(entry.token || '')
+        }));
     } catch {
       return null;
     }
@@ -116,14 +135,26 @@
     // Migrating without a code keeps their Backend id, so those keep matching after pairing again.
     if (!storage.rpToken && !storage.rpBase) return [];
     migrateLegacySelections(storage);
-    return [{id:LEGACY_BACKEND_ID, name:'本机', base:normalizeBase(storage.rpBase || origin), token:String(storage.rpToken || '')}];
+    return [
+      {
+        id: LEGACY_BACKEND_ID,
+        name: '本机',
+        base: normalizeBase(storage.rpBase || origin),
+        token: String(storage.rpToken || '')
+      }
+    ];
   }
 
   /** Connection a page should offer first: the one for `base`, else any with a saved pairing code. */
   function selectConnection(storage, origin, base = '') {
     const items = savedConnections(storage, origin);
     const wanted = normalizeBase(base);
-    return (wanted && items.find(item => item.base === wanted)) || items.find(item => item.token) || items[0] || null;
+    return (
+      (wanted && items.find(item => item.base === wanted)) ||
+      items.find(item => item.token) ||
+      items[0] ||
+      null
+    );
   }
 
   /** Upserts a connection without touching the other entries. The code is stored only on request. */
@@ -132,12 +163,14 @@
     if (!value) return null;
     const items = savedConnections(storage, value);
     const existing = items.find(item => item.base === value);
-    const entry = existing || {id:createBackendId(), name:'', base:value, token:''};
+    const entry = existing || {id: createBackendId(), name: '', base: value, token: ''};
     if (name) entry.name = String(name);
     if (!entry.name) entry.name = value;
     entry.token = remember ? String(token || '') : '';
     const next = existing ? items : [...items, entry];
-    storage[CONNECTIONS_KEY] = JSON.stringify(next.map(item => ({id:item.id, name:item.name, base:item.base, token:item.token})));
+    storage[CONNECTIONS_KEY] = JSON.stringify(
+      next.map(item => ({id: item.id, name: item.name, base: item.base, token: item.token}))
+    );
     // The list is authoritative from here on, so the migrated single-backend copy of the code must not
     // survive: keeping it would leave a pairing code behind that the user just asked to forget.
     delete storage.rpToken;
@@ -145,7 +178,9 @@
   }
 
   function loadStoredBackends(storage, origin) {
-    return savedConnections(storage, origin).map(entry => createBackend({...entry, saved:Boolean(entry.token)}));
+    return savedConnections(storage, origin).map(entry =>
+      createBackend({...entry, saved: Boolean(entry.token)})
+    );
   }
 
   class BackendRegistry {
@@ -182,12 +217,14 @@
     }
 
     persist() {
-      this.storage[CONNECTIONS_KEY] = JSON.stringify(this.items.map(backend => ({
-        id: backend.id,
-        name: backend.name,
-        base: backend.base,
-        token: backend.saved ? backend.token : '',
-      })));
+      this.storage[CONNECTIONS_KEY] = JSON.stringify(
+        this.items.map(backend => ({
+          id: backend.id,
+          name: backend.name,
+          base: backend.base,
+          token: backend.saved ? backend.token : ''
+        }))
+      );
       // The list is authoritative now, so the migrated single-backend copy of the code must not survive.
       delete this.storage.rpToken;
     }
@@ -214,7 +251,7 @@
         backendId: backend.id,
         backendName: backend.name,
         remoteId,
-        [idProperty]: resourceKey(backend.id, remoteId),
+        [idProperty]: resourceKey(backend.id, remoteId)
       };
     }
   }
@@ -232,6 +269,6 @@
     splitResourceKey,
     normalizePath,
     isInsidePath,
-    matchWorkspace,
+    matchWorkspace
   };
 })();
