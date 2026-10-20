@@ -1115,6 +1115,13 @@
             badge.title = `键盘按键 ${binding.slot + 1} · ${binding.color}`;
             el.querySelector('.agent-top').append(badge);
           }
+          if (item.template) {
+            const tag = document.createElement('span');
+            tag.className = 'template-tag';
+            tag.textContent = item.template.name || item.template.id;
+            tag.title = `System Prompt 模板：${item.template.name || item.template.id}（${templateModeText(item.template.mode)}，创建时固定）`;
+            el.querySelector('.agent-top').append(tag);
+          }
         } else
           el.innerHTML = `<div class="agent-top"><span class="terminal-kind">&gt;_</span><b>${esc(item.title || 'Terminal')}</b><span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span></div><small>${esc(item.cwd)}</small>`;
         if (connectedBackends().length > 1) {
@@ -2824,12 +2831,19 @@
     const workspace = state.workspace;
     if (!workspace) return toast('请先选择 Workspace');
     const cwd = $('agentCwd').value.trim() || '.';
-    let sessions;
+    let sessions,
+      templates = [];
     try {
-      sessions = await requestBackend(
-        workspace.backendId,
-        `/api/v1/sessions?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(cwd)}`
-      );
+      [sessions, templates] = await Promise.all([
+        requestBackend(
+          workspace.backendId,
+          `/api/v1/sessions?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(cwd)}`
+        ),
+        // Older backends have no templates endpoint; they simply offer Pi's default prompt.
+        requestBackend(workspace.backendId, '/api/v1/agent-templates')
+          .then(data => data.templates || [])
+          .catch(() => [])
+      ]);
     } catch (error) {
       return toast(error.message);
     }
@@ -2850,7 +2864,19 @@
             .join('');
         l.append(s);
         body.append(l);
-        return () => ({cwd: c.value.trim() || '.', sessionFile: s.value || undefined});
+        const t = templateSelect(body, templates);
+        const preview = promptPreviewBox(body, () => ({
+          backendId: workspace.backendId,
+          workspaceId: workspace.id,
+          relativeCwd: c.value.trim() || '.',
+          templateId: t.value
+        }));
+        t.onchange = () => preview.reset();
+        return () => ({
+          cwd: c.value.trim() || '.',
+          sessionFile: s.value || undefined,
+          templateId: t.value || undefined
+        });
       },
       '创建'
     );
@@ -2859,7 +2885,8 @@
       const created = await postBackend(workspace.backendId, '/api/v1/agents', {
         workspaceId: workspace.id,
         relativeCwd: result.cwd,
-        sessionFile: result.sessionFile
+        sessionFile: result.sessionFile,
+        templateId: result.templateId
       });
       const agent = stampNewItem(workspace.backendId, created);
       const binding = result.sessionFile ? null : autoBindNewSession(agent);
@@ -2869,6 +2896,336 @@
     } catch (error) {
       toast(error.message);
     }
+  }
+  const templateModeText = mode => (mode === 'replace' ? '替换 Pi 基础 Prompt' : '追加到 Pi Prompt 之后');
+  /** Template picker for the create-Agent dialog. The choice is copied onto the Agent and cannot change later. */
+  function templateSelect(body, templates) {
+    const label = document.createElement('label');
+    label.textContent = 'System Prompt 模板';
+    const select = document.createElement('select');
+    select.innerHTML =
+      '<option value="">Pi 默认（SYSTEM.md / APPEND_SYSTEM.md 或 Pi 内置）</option>' +
+      templates
+        .map(
+          x =>
+            `<option value="${esc(x.id)}">${esc(x.name)} · ${esc(templateModeText(x.mode))}${x.description ? ` — ${esc(x.description)}` : ''}</option>`
+        )
+        .join('');
+    const hint = document.createElement('small');
+    hint.className = 'muted';
+    hint.textContent =
+      '创建后不可更改；Fork 出的 Agent 沿用同一模板。模板内容在创建时复制，之后修改模板文件不影响已有 Agent。';
+    label.append(select, hint);
+    body.append(label);
+    return select;
+  }
+  function promptSourcesText(info) {
+    const parts = [];
+    if (info.template)
+      parts.push(
+        `模板：${info.template.name || info.template.id}（${templateModeText(info.template.mode)}）`
+      );
+    if (info.template?.mode !== 'replace')
+      parts.push(info.systemFile ? `基础 Prompt：${info.systemFile}` : '基础 Prompt：Pi 内置');
+    if (info.appendFiles?.length) parts.push(`追加：${info.appendFiles.join(', ')}`);
+    if (info.contextFiles?.length) parts.push(`上下文文件：${info.contextFiles.join(', ')}`);
+    if (info.cwd) parts.push(`cwd：${info.cwd}`);
+    if (typeof info.systemPrompt === 'string') parts.push(`${info.systemPrompt.length} 字符`);
+    return parts.join(' · ');
+  }
+  /** Collapsible, on-demand preview of the system prompt an Agent would start with. */
+  function promptPreviewBox(body, target, title = '预览 System Prompt') {
+    const box = document.createElement('details');
+    box.className = 'prompt-preview';
+    const summary = document.createElement('summary');
+    summary.textContent = title;
+    const meta = document.createElement('small');
+    meta.className = 'muted';
+    const pre = document.createElement('pre');
+    pre.className = 'prompt-text';
+    box.append(summary, meta, pre);
+    body.append(box);
+    let loaded = false,
+      request = 0;
+    const load = async () => {
+      const {backendId, workspaceId, relativeCwd, templateId, source} = target(),
+        current = ++request;
+      pre.textContent = '';
+      if (!workspaceId) {
+        meta.textContent = '需要先选择该 Backend 上的 Workspace 才能预览（Prompt 与工作目录有关）。';
+        return;
+      }
+      meta.textContent = '正在生成…';
+      try {
+        const query = new URLSearchParams({workspaceId, relativeCwd: relativeCwd || '.'});
+        if (templateId) query.set('templateId', templateId);
+        if (source) query.set('source', source);
+        const data = await requestBackend(backendId, `/api/v1/system-prompt/preview?${query}`);
+        if (current !== request) return;
+        meta.textContent = promptSourcesText(data);
+        pre.textContent = data.systemPrompt;
+        loaded = true;
+      } catch (error) {
+        if (current === request) meta.textContent = `预览失败：${error.message}`;
+      }
+    };
+    box.addEventListener('toggle', () => {
+      if (box.open && !loaded) void load();
+    });
+    return {
+      reset() {
+        loaded = false;
+        if (box.open) void load();
+      }
+    };
+  }
+  async function showAgentSystemPrompt() {
+    if (!state.agent) return toast('请选择 Agent');
+    const info = await requestAgent(state.agent.agentId, '/system-prompt');
+    await modal(
+      'Agent System Prompt',
+      body => {
+        const head = document.createElement('p');
+        head.textContent = info.template
+          ? `模板：${info.template.name || info.template.id}（${templateModeText(info.template.mode)}）。模板在创建 Agent 时选定并固定，不能更改。`
+          : '未使用模板：Pi 默认 System Prompt（含 ~/.pi/agent 与受信任项目 .pi 下的 SYSTEM.md / APPEND_SYSTEM.md）。模板只能在创建 Agent 时选择。';
+        const meta = document.createElement('small');
+        meta.className = 'muted';
+        meta.textContent = promptSourcesText(info);
+        const pre = document.createElement('pre');
+        pre.className = 'prompt-text';
+        pre.textContent = info.systemPrompt;
+        body.append(head, meta, pre);
+        if (info.template) {
+          const details = document.createElement('details');
+          details.className = 'prompt-preview';
+          const summary = document.createElement('summary');
+          summary.textContent = '模板原文（创建时快照）';
+          const raw = document.createElement('pre');
+          raw.className = 'prompt-text';
+          raw.textContent = info.template.systemPrompt;
+          details.append(summary, raw);
+          body.append(details);
+        }
+        return null;
+      },
+      '关闭'
+    );
+  }
+  /** Manage Pi's global prompt files and the shareable Agent templates of one backend. */
+  async function systemPromptManager() {
+    if (!requireConnection()) return;
+    const workspaceBackend =
+      state.workspace && backendOf(state.workspace.backendId)?.status === 'connected'
+        ? state.workspace.backendId
+        : null;
+    const backendId = workspaceBackend || primaryBackend()?.id;
+    if (!backendId) return toast('没有已连接的 Backend');
+    const backend = backendOf(backendId),
+      workspace = state.workspace?.backendId === backendId ? state.workspace : null,
+      relativeCwd = () => $('agentCwd').value.trim() || '.';
+    const send = (url, method = 'GET', body) =>
+      requestBackend(backendId, url, {method, ...(body ? {body: JSON.stringify(body)} : {})});
+    let files, catalog;
+    try {
+      [files, catalog] = await Promise.all([send('/api/v1/system-prompt'), send('/api/v1/agent-templates')]);
+    } catch (error) {
+      return toast(`读取失败：${error.message}（Backend 可能版本过旧）`);
+    }
+    if ($('configDialog').open) $('configDialog').close();
+    const el = (tag, props = {}, ...children) => {
+      const node = Object.assign(document.createElement(tag), props);
+      node.append(...children);
+      return node;
+    };
+    const section = (title, note) =>
+      el(
+        'section',
+        {className: 'config-section'},
+        el('h3', {textContent: title}),
+        el('p', {className: 'muted', textContent: note})
+      );
+    await modal(
+      `System Prompt · ${backend.name || backendId}`,
+      body => {
+        // Effective prompt preview ---------------------------------------------------------------
+        const previewSection = section(
+          '查看当前 System Prompt',
+          workspace
+            ? `基于 Workspace「${workspace.label}」的工作路径「${relativeCwd()}」生成，包含项目上下文、skills 与 cwd。`
+            : '先在左侧选择该 Backend 上的 Workspace 才能预览（Prompt 与工作目录有关）。'
+        );
+        const sourceSelect = el('select');
+        sourceSelect.innerHTML =
+          '<option value="">当前生效（含 SYSTEM.md / APPEND_SYSTEM.md）</option><option value="pi-default">Pi 内置（忽略 SYSTEM.md / APPEND_SYSTEM.md）</option>';
+        previewSection.append(el('label', {textContent: '来源'}, sourceSelect));
+        const preview = promptPreviewBox(previewSection, () => ({
+          backendId,
+          workspaceId: workspace?.id,
+          relativeCwd: relativeCwd(),
+          source: sourceSelect.value
+        }));
+        sourceSelect.onchange = () => preview.reset();
+        // Pi's global prompt files ----------------------------------------------------------------
+        const fileSection = section(
+          'Pi 全局 System Prompt',
+          `位于 ${files.agentDir}，对所有 Pi 会话（包括 Pi CLI）生效；受信任项目的 .pi/SYSTEM.md、.pi/APPEND_SYSTEM.md 优先。留空保存即删除文件（恢复 Pi 内置）。对之后加载的 Agent 生效。`
+        );
+        const fileEditor = (kind, title, placeholder) => {
+          const area = el('textarea', {className: 'prompt-editor', value: files[kind].content, placeholder});
+          const status = el('small', {className: 'muted'});
+          const showStatus = () =>
+            (status.textContent = files[kind].exists ? files[kind].path : `${files[kind].path}（不存在）`);
+          showStatus();
+          const save = el('button', {type: 'button', textContent: '保存'});
+          save.onclick = async () => {
+            if (
+              kind === 'system' &&
+              area.value.trim() &&
+              !confirm('SYSTEM.md 会替换 Pi 的整个基础 Prompt（包括工具说明、规则与文档段落），确定保存？')
+            )
+              return;
+            save.disabled = true;
+            try {
+              files = await send('/api/v1/system-prompt', 'PUT', {kind, content: area.value});
+              area.value = files[kind].content;
+              showStatus();
+              preview.reset();
+              toast(files[kind].exists ? `${title} 已保存` : `${title} 已删除`);
+            } catch (error) {
+              toast(`保存失败：${error.message}`);
+            } finally {
+              save.disabled = false;
+            }
+          };
+          fileSection.append(
+            el('label', {textContent: title}, area),
+            el('div', {className: 'config-actions'}, save, status)
+          );
+        };
+        fileEditor('system', 'SYSTEM.md（替换 Pi 内置基础 Prompt）', '留空 = 使用 Pi 内置 Prompt');
+        fileEditor('append', 'APPEND_SYSTEM.md（追加到基础 Prompt 之后）', '留空 = 不追加');
+        // Shareable Agent templates ---------------------------------------------------------------
+        const templateSection = section(
+          'Agent 模板',
+          `每个模板是 ${catalog.dir} 下的一个 .md 文件（YAML front matter：name、description、mode），可直接复制分享，手动放入的文件会立即出现。新建 Agent 时选择，之后不可更改。`
+        );
+        const list = el('div', {className: 'template-list'}),
+          errors = el('div'),
+          editor = el('div', {className: 'template-editor', hidden: true});
+        const idInput = el('input', {placeholder: '例如 reviewer（即文件名；字母、数字、. _ -）'}),
+          nameInput = el('input', {placeholder: '显示名称'}),
+          descInput = el('input', {placeholder: '一行说明（可选）'}),
+          modeSelect = el('select'),
+          promptArea = el('textarea', {className: 'prompt-editor', placeholder: 'System Prompt 内容'}),
+          saveTemplate = el('button', {type: 'button', textContent: '保存模板'}),
+          cancelTemplate = el('button', {type: 'button', textContent: '取消'});
+        modeSelect.innerHTML =
+          '<option value="append">append：追加到 Pi Prompt 之后（保留 Pi 的工具说明与规则）</option><option value="replace">replace：替换 Pi 基础 Prompt（等同 SYSTEM.md）</option>';
+        editor.append(
+          el('label', {textContent: 'ID'}, idInput),
+          el('label', {textContent: '名称'}, nameInput),
+          el('label', {textContent: '说明'}, descInput),
+          el('label', {textContent: '模式'}, modeSelect),
+          el('label', {textContent: 'System Prompt'}, promptArea),
+          el('div', {className: 'config-actions'}, saveTemplate, cancelTemplate)
+        );
+        const templatePreview = promptPreviewBox(
+          editor,
+          () => ({
+            backendId,
+            workspaceId: workspace?.id,
+            relativeCwd: relativeCwd(),
+            templateId: idInput.value.trim()
+          }),
+          '预览已保存版本生成的 System Prompt'
+        );
+        const openEditor = (template = null) => {
+          editor.hidden = false;
+          idInput.value = template?.id || '';
+          idInput.disabled = !!template;
+          nameInput.value = template?.name || '';
+          descInput.value = template?.description || '';
+          modeSelect.value = template?.mode || 'append';
+          promptArea.value = template?.systemPrompt || '';
+          templatePreview.reset();
+          (template ? promptArea : idInput).focus();
+        };
+        const reload = async () => {
+          catalog = await send('/api/v1/agent-templates');
+          renderList();
+        };
+        const renderList = () => {
+          list.replaceChildren();
+          if (!catalog.templates.length)
+            list.append(el('p', {className: 'muted', textContent: '还没有模板。'}));
+          for (const template of catalog.templates) {
+            const edit = el('button', {type: 'button', textContent: '编辑'});
+            edit.onclick = () => openEditor(template);
+            const remove = el('button', {type: 'button', textContent: '删除', className: 'danger-action'});
+            remove.onclick = async () => {
+              if (!confirm(`删除模板「${template.name}」？已用它创建的 Agent 不受影响。`)) return;
+              try {
+                await send(`/api/v1/agent-templates/${encodeURIComponent(template.id)}`, 'DELETE');
+                if (idInput.disabled && idInput.value === template.id) editor.hidden = true;
+                await reload();
+                toast('模板已删除');
+              } catch (error) {
+                toast(`删除失败：${error.message}`);
+              }
+            };
+            const info = el(
+              'div',
+              {className: 'template-info'},
+              el('b', {textContent: template.name}),
+              el('small', {
+                className: 'muted',
+                textContent: `${template.id}.md · ${templateModeText(template.mode)}${template.description ? ` · ${template.description}` : ''}`
+              })
+            );
+            list.append(el('div', {className: 'template-row'}, info, edit, remove));
+          }
+          errors.replaceChildren(
+            ...(catalog.errors || []).map(text => el('p', {className: 'mcp-error', textContent: text}))
+          );
+        };
+        cancelTemplate.onclick = () => (editor.hidden = true);
+        saveTemplate.onclick = async () => {
+          const id = idInput.value.trim();
+          if (!id) return toast('请填写模板 ID');
+          if (!promptArea.value.trim()) return toast('System Prompt 不能为空');
+          if (
+            !idInput.disabled &&
+            catalog.templates.some(x => x.id === id) &&
+            !confirm(`模板 ${id} 已存在，覆盖？`)
+          )
+            return;
+          saveTemplate.disabled = true;
+          try {
+            const saved = await send(`/api/v1/agent-templates/${encodeURIComponent(id)}`, 'PUT', {
+              name: nameInput.value.trim() || id,
+              description: descInput.value.trim(),
+              mode: modeSelect.value,
+              systemPrompt: promptArea.value
+            });
+            await reload();
+            openEditor(saved);
+            toast('模板已保存');
+          } catch (error) {
+            toast(`保存失败：${error.message}`);
+          } finally {
+            saveTemplate.disabled = false;
+          }
+        };
+        const addTemplate = el('button', {type: 'button', textContent: '新建模板'});
+        addTemplate.onclick = () => openEditor();
+        templateSection.append(list, errors, el('div', {className: 'config-actions'}, addTemplate), editor);
+        renderList();
+        body.append(previewSection, fileSection, templateSection);
+        return null;
+      },
+      '关闭'
+    );
   }
   async function navigateAgent(entryId, agent = state.agent) {
     if (!agent) return;
@@ -3253,6 +3610,8 @@
     }
   };
   $('mcp').onclick = () => mcpControls().catch(e => toast(e.message));
+  $('systemPrompt').onclick = () => showAgentSystemPrompt().catch(e => toast(e.message));
+  $('openSystemPrompts').onclick = () => systemPromptManager().catch(e => toast(e.message));
   $('sessionTree').onclick = () => showSessionTree().catch(e => toast(e.message));
   $('undo').onclick = () => revert().catch(e => toast(e.message));
   $('controls').onclick = () => modelControls().catch(e => toast(e.message));

@@ -213,7 +213,7 @@ export class MailNotifier {
       text,
       priority: this.config.priority,
       purpose: 'transactional',
-      metadata: {source: 'remote-pi', ...metadata, notification_id: randomUUID()}
+      metadata: {source: 'pi2web', ...metadata, notification_id: randomUUID()}
     };
     if (this.config.senderId) payload.sender_id = this.config.senderId;
     const response = await this.fetcher(this.config.endpoint, {

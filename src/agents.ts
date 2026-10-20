@@ -2,7 +2,8 @@ import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
 import {relative as pathRelative} from 'node:path';
 import type {WorkspaceStore} from './workspaces.js';
-import {createSdkBackend} from './sdk-backend.js';
+import {createSdkBackend, type BackendOptions} from './sdk-backend.js';
+import type {AgentTemplateSnapshot} from './agent-templates.js';
 export type AgentState = {
   status:
     | 'unloaded'
@@ -36,6 +37,13 @@ export type SlashCommandSummary = {
   argumentHint?: string;
   source: 'prompt' | 'skill';
 };
+export type SystemPromptInfo = {
+  systemPrompt: string;
+  /** SYSTEM.md that replaced Pi's base prompt, if any (a `replace` template hides it). */
+  systemFile?: string;
+  appendFiles?: string[];
+  contextFiles?: string[];
+};
 export type BashRunResult = {
   id: string;
   output: string;
@@ -52,6 +60,7 @@ export interface AgentBackend {
   abort(): Promise<void>;
   getState(): Promise<AgentState>;
   getMessages(): Promise<unknown[]>;
+  getSystemPrompt(): Promise<SystemPromptInfo>;
   getCapabilities(): Promise<Record<string, unknown>>;
   getSession(): Promise<Record<string, unknown>>;
   getSessionInfo(): Promise<Record<string, unknown>>;
@@ -75,7 +84,12 @@ export class MockBackend implements AgentBackend {
   private messages: unknown[] = [];
   private timer?: ReturnType<typeof setTimeout>;
   private queue: AgentQueue = {steering: [], followUp: []};
-  constructor(agentId: string, cwd: string, sessionId: string = randomUUID()) {
+  constructor(
+    agentId: string,
+    cwd: string,
+    sessionId: string = randomUUID(),
+    private readonly options: BackendOptions = {}
+  ) {
     this.state = {agentId, sessionId, cwd, status: 'idle'};
   }
   private emit(e: AgentEvent) {
@@ -141,6 +155,17 @@ export class MockBackend implements AgentBackend {
   }
   async getMessages() {
     return [...this.messages];
+  }
+  async getSystemPrompt(): Promise<SystemPromptInfo> {
+    const template = this.options.piDefaultPrompt ? undefined : this.options.template;
+    const base = template?.mode === 'replace' ? template.systemPrompt : 'Mock Pi system prompt';
+    return {
+      systemPrompt: [base, template?.mode === 'append' ? template.systemPrompt : '', `cwd: ${this.state.cwd}`]
+        .filter(Boolean)
+        .join('\n\n'),
+      appendFiles: [],
+      contextFiles: []
+    };
   }
   async getCapabilities() {
     return {model: null, models: [], thinkingLevel: 'off', thinkingLevels: ['off'], supportsThinking: false};
@@ -209,6 +234,8 @@ export type AgentProfile = 'default' | 'collab';
 export type AgentRecord = AgentState & {
   workspaceId: string;
   profile: AgentProfile;
+  /** System prompt template chosen at creation. Fixed for the Agent's lifetime, including forks. */
+  template?: AgentTemplateSnapshot;
   createdAt: string;
   lastActiveAt: string;
 };
@@ -240,8 +267,10 @@ export class AgentManager {
       id: string,
       cwd: string,
       sessionFile?: string,
-      profile?: AgentProfile
-    ) => AgentBackend | Promise<AgentBackend> = createSdkBackend
+      profile?: AgentProfile,
+      options?: BackendOptions
+    ) => AgentBackend | Promise<AgentBackend> = (id, cwd, sessionFile, profile, options) =>
+      createSdkBackend(id, cwd, sessionFile, profile, undefined, options)
   ) {}
   private async resolveCwd(workspaceId: string, relativeCwd = '.') {
     const ws = this.workspaces.get(workspaceId);
@@ -255,13 +284,21 @@ export class AgentManager {
     workspaceId: string,
     relativeCwd = '.',
     sessionFile?: string,
-    profile: AgentProfile = 'default'
+    profile: AgentProfile = 'default',
+    template?: AgentTemplateSnapshot
   ) {
     const cwd = await this.resolveCwd(workspaceId, relativeCwd);
     const id = `agent-${randomUUID()}`,
-      backend = await this.factory(id, cwd, sessionFile, profile),
+      backend = await this.factory(id, cwd, sessionFile, profile, template ? {template} : {}),
       now = new Date().toISOString();
-    const record = {...(await backend.getState()), workspaceId, profile, createdAt: now, lastActiveAt: now};
+    const record: AgentRecord = {
+      ...(await backend.getState()),
+      workspaceId,
+      profile,
+      ...(template ? {template: {...template}} : {}),
+      createdAt: now,
+      lastActiveAt: now
+    };
     this.attach(id, record, backend);
     return {...record};
   }
@@ -271,6 +308,19 @@ export class AgentManager {
       backend = await this.factory(`preview-${randomUUID()}`, cwd);
     try {
       return await backend.getCapabilities();
+    } finally {
+      await backend.dispose();
+    }
+  }
+  /**
+   * The system prompt an Agent created here would start with. `template` previews a template;
+   * `piDefaultPrompt` ignores SYSTEM.md / APPEND_SYSTEM.md to show Pi's built-in prompt.
+   */
+  async systemPromptPreview(workspaceId: string, relativeCwd = '.', options: BackendOptions = {}) {
+    const cwd = await this.resolveCwd(workspaceId, relativeCwd),
+      backend = await this.factory(`preview-${randomUUID()}`, cwd, undefined, 'default', options);
+    try {
+      return {...(await backend.getSystemPrompt()), cwd};
     } finally {
       await backend.dispose();
     }
@@ -391,7 +441,8 @@ export class AgentManager {
           id,
           entry.record.cwd,
           entry.record.sessionFile,
-          entry.record.profile
+          entry.record.profile,
+          entry.record.template ? {template: entry.record.template} : {}
         );
         const state = await backend.getState();
         entry.record = {
@@ -522,6 +573,10 @@ export class AgentManager {
       start = Math.max(0, end - safeLimit);
     return {items: messages.slice(start, end), total, start, end, limit: safeLimit, hasMore: start > 0};
   }
+  async systemPrompt(id: string) {
+    const info = await (await this.ensureLoaded(id)).getSystemPrompt();
+    return {...info, template: this.get(id).record.template ?? null};
+  }
   async capabilities(id: string) {
     return (await this.ensureLoaded(id)).getCapabilities();
   }
@@ -567,7 +622,8 @@ export class AgentManager {
       source.record.workspaceId,
       pathRelative(ws.rootPath, source.record.cwd),
       result.sessionFile,
-      source.record.profile
+      source.record.profile,
+      source.record.template
     );
     return {agent, selectedText: result.selectedText};
   }

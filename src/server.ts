@@ -16,6 +16,8 @@ import {CollabStore} from './collab/store.js';
 import {CollabRouter} from './collab/routes.js';
 import {CollabDispatcher} from './collab/dispatcher.js';
 import {DraftHub} from './drafts.js';
+import {AGENT_TEMPLATES_DIR, defaultDataDir} from './paths.js';
+import {AgentTemplateStore} from './agent-templates.js';
 import type {CollabAction, CollabToolBridge} from './collab/pi-extension.js';
 import {SessionManager, VERSION as PI_VERSION} from '@earendil-works/pi-coding-agent';
 import pkg from '../package.json' with {type: 'json'};
@@ -34,6 +36,7 @@ import {handleTerminalSocket} from './ws/terminal-socket.js';
 import {handleAgentRoutes} from './http/agent-routes.js';
 import {handleMailSettingsRoutes} from './http/mail-settings-routes.js';
 import {handleWorkspaceRoutes} from './http/workspace-routes.js';
+import {handleSystemPromptRoutes} from './http/system-prompt-routes.js';
 export type ServerOptions = {
   host?: string;
   port?: number;
@@ -56,6 +59,7 @@ export class RemotePiServer {
   agents: AgentManager;
   terminals: TerminalManager;
   metadata: MetadataStore;
+  templates: AgentTemplateStore;
   collab!: CollabHub;
   private collabRouter!: CollabRouter;
   private collabDispatcher!: CollabDispatcher;
@@ -81,9 +85,10 @@ export class RemotePiServer {
     this.opts = {host: options.host ?? '127.0.0.1', port: options.port ?? 11318};
     this.noAuth = options.noAuth ?? false;
     this.allowInsecureNoAuth = options.allowInsecureNoAuth ?? false;
-    this.dataDir = options.dataDir ?? path.join(process.env.HOME ?? '.', '.pi', 'remote-pi');
+    this.dataDir = options.dataDir ?? defaultDataDir();
     this.auth = new AuthStore(this.dataDir);
     this.metadata = new MetadataStore(this.dataDir);
+    this.templates = new AgentTemplateStore(path.join(this.dataDir, AGENT_TEMPLATES_DIR));
     this.workspaces = options.workspaces ?? new WorkspaceStore();
     this.voice = options.voice;
     this.sessionNamer = options.sessionNamer;
@@ -93,13 +98,14 @@ export class RemotePiServer {
     });
     this.agents =
       options.agents ??
-      new AgentManager(this.workspaces, (agentId, cwd, sessionFile, profile) =>
+      new AgentManager(this.workspaces, (agentId, cwd, sessionFile, profile, backendOptions) =>
         createSdkBackend(
           agentId,
           cwd,
           sessionFile,
           profile,
-          profile === 'collab' ? this.collabToolBridge() : undefined
+          profile === 'collab' ? this.collabToolBridge() : undefined,
+          backendOptions
         )
       );
     this.terminals = options.terminals ?? new TerminalManager(this.workspaces);
@@ -643,8 +649,19 @@ export class RemotePiServer {
           this.ensureSessionIndex(workspace, cwd, force)
       };
       if (await handleWorkspaceRoutes(workspaceContext, req, res, u, parts, requestId)) return;
+      if (
+        await handleSystemPromptRoutes(
+          {agents: this.agents, templates: this.templates, body: () => readJsonBody(req)},
+          req,
+          res,
+          u,
+          parts
+        )
+      )
+        return;
       const agentContext = {
         agents: this.agents,
+        templates: this.templates,
         metadata: this.metadata,
         workspaces: this.workspaces,
         voice: this.voice,

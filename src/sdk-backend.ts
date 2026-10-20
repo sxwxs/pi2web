@@ -16,6 +16,14 @@ import type {
   AgentState,
   QueuedInputDisposition
 } from './agents.js';
+import type {AgentTemplateSnapshot} from './agent-templates.js';
+
+export type BackendOptions = {
+  /** System prompt template copied onto the Agent at creation time. */
+  template?: AgentTemplateSnapshot;
+  /** Ignore SYSTEM.md / APPEND_SYSTEM.md and templates: Pi's built-in prompt, used for previews only. */
+  piDefaultPrompt?: boolean;
+};
 import {createCollabExtension, type CollabToolBridge} from './collab/pi-extension.js';
 
 /** Older Pi builds resolved steer()/followUp() with undefined; treat anything but an explicit `handled` as queued. */
@@ -40,19 +48,37 @@ export class SdkBackend implements AgentBackend {
     cwd: string,
     sessionFile?: string,
     profile: AgentProfile = 'default',
-    collabBridge?: CollabToolBridge
+    collabBridge?: CollabToolBridge,
+    options: BackendOptions = {}
   ): Promise<SdkBackend> {
     const sessionManager = sessionFile ? SessionManager.open(sessionFile) : SessionManager.create(cwd);
+    const {template, piDefaultPrompt} = options;
     // This factory is deliberately inline instead of auto-discovered: normal Pi and normal pi2web agents
     // never load the collaboration tools or their collaboration-specific system guidance.
-    const resourceLoader =
+    const extensionFactories =
       profile === 'collab' && collabBridge
+        ? [{name: 'pi2web-collab', factory: createCollabExtension(agentId, collabBridge)}]
+        : [];
+    // A template behaves like Pi's own prompt files: `replace` stands in for SYSTEM.md, `append` follows
+    // APPEND_SYSTEM.md. `piDefaultPrompt` ignores both files to show what Pi itself would send.
+    const systemPromptOverride = piDefaultPrompt
+      ? () => undefined
+      : template?.mode === 'replace'
+        ? () => template.systemPrompt
+        : undefined;
+    const appendSystemPromptOverride = piDefaultPrompt
+      ? () => []
+      : template?.mode === 'append'
+        ? (base: string[]) => [...base, template.systemPrompt]
+        : undefined;
+    const resourceLoader =
+      extensionFactories.length || systemPromptOverride || appendSystemPromptOverride
         ? new DefaultResourceLoader({
             cwd,
             agentDir: getAgentDir(),
-            extensionFactories: [
-              {name: 'pi2web-collab', factory: createCollabExtension(agentId, collabBridge)}
-            ]
+            extensionFactories,
+            systemPromptOverride,
+            appendSystemPromptOverride
           })
         : undefined;
     if (resourceLoader) await resourceLoader.reload();
@@ -104,6 +130,16 @@ export class SdkBackend implements AgentBackend {
   }
   async getMessages(): Promise<unknown[]> {
     return [...this.session.state.messages];
+  }
+  /** The effective system prompt Pi will send next, plus the prompt files that contributed to it. */
+  async getSystemPrompt() {
+    const loader = this.session.resourceLoader;
+    return {
+      systemPrompt: this.session.systemPrompt,
+      systemFile: loader.getSystemPromptSource()?.path,
+      appendFiles: loader.getAppendSystemPromptSources().map(source => source.path),
+      contextFiles: loader.getAgentsFiles().agentsFiles.map(file => file.path)
+    };
   }
   async getCapabilities() {
     const current = this.session.model as any;
@@ -322,5 +358,6 @@ export const createSdkBackend = (
   cwd: string,
   sessionFile?: string,
   profile: AgentProfile = 'default',
-  collabBridge?: CollabToolBridge
-) => SdkBackend.create(agentId, cwd, sessionFile, profile, collabBridge);
+  collabBridge?: CollabToolBridge,
+  options: BackendOptions = {}
+) => SdkBackend.create(agentId, cwd, sessionFile, profile, collabBridge, options);

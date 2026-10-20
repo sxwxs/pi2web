@@ -2,7 +2,9 @@ import Database from 'better-sqlite3';
 import {chmodSync, mkdirSync, statSync} from 'node:fs';
 import path from 'node:path';
 import type {AgentRecord} from './agents.js';
+import type {AgentTemplateSnapshot} from './agent-templates.js';
 import type {Workspace} from './workspaces.js';
+import {METADATA_DB_FILE} from './paths.js';
 
 type SessionListItem = {
   path: string;
@@ -28,7 +30,27 @@ const asTime = (value: string | Date | number | undefined) => {
   return Number.isFinite(time) ? time : Date.now();
 };
 
-/** SQLite-backed Remote Pi metadata. Pi conversation JSONL files remain the source of truth. */
+const parseTemplate = (value: unknown): AgentTemplateSnapshot | undefined => {
+  if (typeof value !== 'string' || !value) return;
+  try {
+    const parsed = JSON.parse(value);
+    if (
+      parsed &&
+      typeof parsed.id === 'string' &&
+      typeof parsed.systemPrompt === 'string' &&
+      (parsed.mode === 'replace' || parsed.mode === 'append')
+    )
+      return {
+        id: parsed.id,
+        name: String(parsed.name ?? parsed.id),
+        mode: parsed.mode,
+        systemPrompt: parsed.systemPrompt
+      };
+  } catch {}
+  return;
+};
+
+/** SQLite-backed pi2web metadata. Pi conversation JSONL files remain the source of truth. */
 export class MetadataStore {
   private db?: Database.Database;
   private pendingAgents = new Map<string, AgentRecord>();
@@ -36,7 +58,7 @@ export class MetadataStore {
   private flushTimer?: ReturnType<typeof setTimeout>;
   constructor(private readonly dataDir: string) {}
   get file() {
-    return path.join(this.dataDir, 'remote-pi.db');
+    return path.join(this.dataDir, METADATA_DB_FILE);
   }
   init() {
     if (this.db) return;
@@ -68,6 +90,7 @@ export class MetadataStore {
         cwd TEXT NOT NULL,
         status TEXT NOT NULL,
         profile TEXT NOT NULL DEFAULT 'default',
+        template TEXT,
         created_at INTEGER NOT NULL,
         last_active_at INTEGER NOT NULL,
         archived_at INTEGER,
@@ -104,6 +127,9 @@ export class MetadataStore {
     const agentColumns = db.prepare('PRAGMA table_info(agents)').all() as {name: string}[];
     if (!agentColumns.some(column => column.name === 'profile'))
       db.exec("ALTER TABLE agents ADD COLUMN profile TEXT NOT NULL DEFAULT 'default'");
+    // System prompt template snapshot (JSON). Agents created before templates existed use Pi's prompt.
+    if (!agentColumns.some(column => column.name === 'template'))
+      db.exec('ALTER TABLE agents ADD COLUMN template TEXT');
     // Only stamp the initial version: later migrations (collaboration tables) raise it and must not be reset on restart.
     if (Number(db.pragma('user_version', {simple: true})) < 1) db.pragma('user_version = 1');
     this.archivedAgents = new Set(
@@ -171,6 +197,7 @@ export class MetadataStore {
       cwd: row.cwd,
       status: row.status,
       profile: row.profile === 'collab' ? 'collab' : 'default',
+      ...(parseTemplate(row.template) ? {template: parseTemplate(row.template)} : {}),
       createdAt: new Date(row.created_at).toISOString(),
       lastActiveAt: new Date(row.last_active_at).toISOString()
     }));
@@ -178,7 +205,8 @@ export class MetadataStore {
   private writeAgent(record: AgentRecord, archivedAt: number | null) {
     this.database
       .prepare(
-        `INSERT INTO agents(id,workspace_id,session_id,session_file,session_name,cwd,status,profile,created_at,last_active_at,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id,session_id=excluded.session_id,session_file=excluded.session_file,session_name=excluded.session_name,cwd=excluded.cwd,status=excluded.status,profile=excluded.profile,last_active_at=excluded.last_active_at,archived_at=excluded.archived_at`
+        // `template` is written on insert only: an Agent's system prompt template never changes.
+        `INSERT INTO agents(id,workspace_id,session_id,session_file,session_name,cwd,status,profile,template,created_at,last_active_at,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id,session_id=excluded.session_id,session_file=excluded.session_file,session_name=excluded.session_name,cwd=excluded.cwd,status=excluded.status,profile=excluded.profile,last_active_at=excluded.last_active_at,archived_at=excluded.archived_at`
       )
       .run(
         record.agentId,
@@ -189,6 +217,7 @@ export class MetadataStore {
         record.cwd,
         record.status,
         record.profile ?? 'default',
+        record.template ? JSON.stringify(record.template) : null,
         asTime(record.createdAt),
         asTime(record.lastActiveAt),
         archivedAt

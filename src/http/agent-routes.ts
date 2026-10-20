@@ -2,6 +2,7 @@ import type http from 'node:http';
 import {listMcpServers, setMcpServerEnabled} from '../mcp.js';
 import type {AgentManager, AgentProfile} from '../agents.js';
 import type {MetadataStore} from '../metadata-store.js';
+import type {AgentTemplateStore} from '../agent-templates.js';
 import type {Workspace, WorkspaceStore} from '../workspaces.js';
 import type {VoiceManager} from '../voice.js';
 import type {SessionNamer} from '../session-namer.js';
@@ -10,6 +11,7 @@ import {json} from './utils.js';
 export type AgentRouteContext = {
   agents: AgentManager;
   metadata: MetadataStore;
+  templates: AgentTemplateStore;
   workspaces: WorkspaceStore;
   voice?: VoiceManager;
   sessionNamer?: SessionNamer;
@@ -36,7 +38,17 @@ export async function handleAgentRoutes(
       relativeCwd = u.searchParams.get('relativeCwd') ?? '.';
     return send(200, {data: await ctx.agents.capabilityPreview(workspaceId, relativeCwd)});
   }
-  if (req.method === 'GET' && u.pathname === '/api/v1/agents') return send(200, {data: ctx.agents.list()});
+  // The list carries which template an Agent uses but not its text; GET /agents/:id/system-prompt has the full prompt.
+  if (req.method === 'GET' && u.pathname === '/api/v1/agents')
+    return send(200, {
+      data: ctx.agents
+        .list()
+        .map(({template, ...record}) =>
+          template
+            ? {...record, template: {id: template.id, name: template.name, mode: template.mode}}
+            : record
+        )
+    });
   if (req.method === 'POST' && u.pathname === '/api/v1/agents') {
     const b = await ctx.body(),
       profile: AgentProfile = b.profile === undefined ? 'default' : b.profile;
@@ -52,7 +64,17 @@ export async function handleAgentRoutes(
         throw Object.assign(new Error('Session is not valid for cwd'), {code: 'SESSION_NOT_FOUND'});
       sessionFile = b.sessionFile;
     }
-    const agent = await ctx.agents.create(b.workspaceId, b.relativeCwd ?? '.', sessionFile, profile);
+    if (b.templateId !== undefined && b.templateId !== null && typeof b.templateId !== 'string')
+      throw Object.assign(new Error('templateId must be a string'), {code: 'INVALID_REQUEST'});
+    // The template is copied now; later edits to the template file do not affect this Agent.
+    const template = b.templateId ? ctx.templates.snapshot(b.templateId) : undefined;
+    const agent = await ctx.agents.create(
+      b.workspaceId,
+      b.relativeCwd ?? '.',
+      sessionFile,
+      profile,
+      template
+    );
     try {
       if (b.model !== undefined) {
         if (!b.model || typeof b.model.provider !== 'string' || typeof b.model.modelId !== 'string')
@@ -95,6 +117,8 @@ export async function handleAgentRoutes(
         before = u.searchParams.has('before') ? Number(u.searchParams.get('before')) : undefined;
       return send(200, {data: await ctx.agents.messagePage(id, limit, before)});
     }
+    if (req.method === 'GET' && parts[4] === 'system-prompt')
+      return send(200, {data: await ctx.agents.systemPrompt(id)});
     if (req.method === 'GET' && parts[4] === 'capabilities')
       return send(200, {data: await ctx.agents.capabilities(id)});
     if (req.method === 'GET' && parts[4] === 'session')
