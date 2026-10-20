@@ -19,9 +19,11 @@ export type SessionNamerContext={sessionName?:string;setSessionName?:(name:strin
 export type SessionNamerEvent={type:string,[key:string]:unknown};
 type Fetcher=typeof fetch;
 
+// No `temperature`: current reasoning models (gpt-5.x, gpt-6-luna, mai-code-*) reject the request with
+// "Unsupported parameter: 'temperature'", and naming does not need it.
 export const DEFAULT_SESSION_NAMER:Required<Omit<SessionNamerConfig,'apiKey'>>={
-  baseUrl:'http://localhost:8313/',model:'gpt-5-mini',language:'zh-CN',
-  // Reasoning models (gpt-5-mini and friends) burn this budget on hidden reasoning tokens before they
+  baseUrl:'http://localhost:8313/',model:'gpt-5.4-nano',language:'zh-CN',
+  // Reasoning models (gpt-5.x and friends) burn this budget on hidden reasoning tokens before they
   // emit the name, so a tight cap yields an empty message with finish_reason "length".
   maxInputChars:8000,maxOutputTokens:2000,requestTimeoutMs:60000
 };
@@ -81,7 +83,7 @@ export class SessionNamer{
     const response=await this.fetcher(endpoint(this.config.baseUrl,'/chat/completions'),{
       method:'POST',signal:deadline(this.config.requestTimeoutMs),
       headers:{'content-type':'application/json',...authHeaders(this.config.apiKey||undefined)},
-      body:JSON.stringify({model:this.config.model,stream:false,temperature:0.2,max_tokens:this.config.maxOutputTokens,
+      body:JSON.stringify({model:this.config.model,stream:false,max_tokens:this.config.maxOutputTokens,
         messages:[{role:'system',content:this.prompt()},{role:'user',content:body}]})
     });
     if(!response.ok)throw new Error(`Session naming request failed (${response.status}): ${(await response.text()).slice(0,300)}`);
