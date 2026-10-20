@@ -170,7 +170,7 @@ npm test
 npm run dev -- --port 11318
 ```
 
-源码格式化目前处于试点：`npm run format` 和 `npm run format:check` 覆盖 `src/` 和 `web/backend-state.js`，其余前端文件逐批纳入；不要格式化 `dist/` 或网站生成文件 `website/public/`，也不要把纯格式改动与功能修改混在同一次提交。
+源码使用 Prettier 统一格式：`npm run format` 和 `npm run format:check` 覆盖 `src/**/*.ts` 与 `web/*.js`；不要格式化 `dist/` 或网站生成文件 `website/public/`，也不要把纯格式改动与功能修改混在同一次提交。
 
 ## 数据持久化
 
