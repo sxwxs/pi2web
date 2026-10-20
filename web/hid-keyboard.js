@@ -9,9 +9,9 @@
   const CHANNEL_JSON = 2;
   const REPORT_BYTES = 63;
   const PAYLOAD_BYTES = 61;
-  const VENDOR_ID = 0x303A;
+  const VENDOR_ID = 0x303a;
   const PRODUCT_ID = 0x8360;
-  const USAGE_PAGE = 0xFF00;
+  const USAGE_PAGE = 0xff00;
   const USAGE = 1;
   const STORAGE_KEY = 'rpSessionKeyboardBindings';
   // Adjacent slots deliberately alternate across the color wheel so all six
@@ -28,16 +28,19 @@
   // so each cycle clearly falls toward dark before returning to full brightness.
   // Waiting remains a shallow breath to read as a separate third state.
   const ACTIVITY_LIGHTS = {
-    llm: {effect:EFFECT_BREATH, speed:0.12},
-    tool: {effect:EFFECT_BREATH, speed:0.45},
-    retry: {effect:EFFECT_BREATH, speed:0.8},
-    waiting: {effect:EFFECT_SHALLOW_BREATH, speed:0.1},
+    llm: {effect: EFFECT_BREATH, speed: 0.12},
+    tool: {effect: EFFECT_BREATH, speed: 0.45},
+    retry: {effect: EFFECT_BREATH, speed: 0.8},
+    waiting: {effect: EFFECT_SHALLOW_BREATH, speed: 0.1}
   };
-  const BUSY_LIGHT = {effect:EFFECT_BREATH, speed:0.15};
+  const BUSY_LIGHT = {effect: EFFECT_BREATH, speed: 0.15};
 
   // Keep activity in one place; the light phase is derived, never stored twice.
-  const newActivity = () => ({turn:'idle', tools:new Set(), bash:new Set(), dialogs:new Set()});
-  const resetTurn = (activity, turn = 'idle') => { activity.turn = turn; activity.tools.clear(); };
+  const newActivity = () => ({turn: 'idle', tools: new Set(), bash: new Set(), dialogs: new Set()});
+  const resetTurn = (activity, turn = 'idle') => {
+    activity.turn = turn;
+    activity.tools.clear();
+  };
   const activityPhase = activity => {
     if (!activity) return 'idle';
     if (activity.dialogs.size) return 'waiting';
@@ -46,15 +49,22 @@
   };
 
   const normalizeColor = value => {
-    const color = String(value || '').trim().toUpperCase();
+    const color = String(value || '')
+      .trim()
+      .toUpperCase();
     return /^#[0-9A-F]{6}$/.test(color) ? color : null;
   };
 
   class JsonLineAssembler {
-    constructor() { this.reset(); }
-    reset() { this.decoder = new TextDecoder(); this.buffer = ''; }
+    constructor() {
+      this.reset();
+    }
+    reset() {
+      this.decoder = new TextDecoder();
+      this.buffer = '';
+    }
     feed(data) {
-      this.buffer += this.decoder.decode(data, {stream:true});
+      this.buffer += this.decoder.decode(data, {stream: true});
       const messages = [];
       let newline;
       while ((newline = this.buffer.indexOf('\n')) >= 0) {
@@ -95,11 +105,19 @@
       try {
         const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
         if (!Array.isArray(parsed)) return new Map();
-        return new Map(parsed.flatMap(item => {
-          const slot = Number(item?.slot), agentId = String(item?.agentId || ''), color = normalizeColor(item?.color);
-          return Number.isInteger(slot) && slot >= 0 && slot < 6 && agentId && color ? [[slot, {agentId, color}]] : [];
-        }));
-      } catch { return new Map(); }
+        return new Map(
+          parsed.flatMap(item => {
+            const slot = Number(item?.slot),
+              agentId = String(item?.agentId || ''),
+              color = normalizeColor(item?.color);
+            return Number.isInteger(slot) && slot >= 0 && slot < 6 && agentId && color
+              ? [[slot, {agentId, color}]]
+              : [];
+          })
+        );
+      } catch {
+        return new Map();
+      }
     }
 
     saveBindings() {
@@ -108,11 +126,22 @@
       this.syncLights(true).catch(error => this.fail(error));
     }
 
-    get connected() { return Boolean(this.device?.opened); }
-    getBindings() { return [...this.bindings].sort(([a], [b]) => a - b).map(([slot, value]) => ({slot, ...value})); }
-    getBinding(agentId) { return this.getBindings().find(binding => binding.agentId === agentId) || null; }
-    getSlot(slot) { const value = this.bindings.get(Number(slot)); return value ? {slot:Number(slot), ...value} : null; }
-    getFreeSlots() { return Array.from({length:6}, (_, slot) => slot).filter(slot => !this.bindings.has(slot)); }
+    get connected() {
+      return Boolean(this.device?.opened);
+    }
+    getBindings() {
+      return [...this.bindings].sort(([a], [b]) => a - b).map(([slot, value]) => ({slot, ...value}));
+    }
+    getBinding(agentId) {
+      return this.getBindings().find(binding => binding.agentId === agentId) || null;
+    }
+    getSlot(slot) {
+      const value = this.bindings.get(Number(slot));
+      return value ? {slot: Number(slot), ...value} : null;
+    }
+    getFreeSlots() {
+      return Array.from({length: 6}, (_, slot) => slot).filter(slot => !this.bindings.has(slot));
+    }
 
     nextColor() {
       const used = new Set(this.getBindings().map(binding => binding.color));
@@ -120,11 +149,14 @@
     }
 
     bind(agentId, slot, color = this.nextColor()) {
-      slot = Number(slot); color = normalizeColor(color);
-      if (!agentId || !Number.isInteger(slot) || slot < 0 || slot > 5 || !color) throw Error('无效的键盘绑定');
+      slot = Number(slot);
+      color = normalizeColor(color);
+      if (!agentId || !Number.isInteger(slot) || slot < 0 || slot > 5 || !color)
+        throw Error('无效的键盘绑定');
       const occupied = this.bindings.get(slot);
       if (occupied && occupied.agentId !== agentId) throw Error(`按键 ${slot + 1} 已被其他 Session 使用`);
-      for (const [boundSlot, binding] of this.bindings) if (binding.agentId === agentId) this.bindings.delete(boundSlot);
+      for (const [boundSlot, binding] of this.bindings)
+        if (binding.agentId === agentId) this.bindings.delete(boundSlot);
       this.bindings.set(slot, {agentId, color});
       this.saveBindings();
       return this.getSlot(slot);
@@ -151,7 +183,7 @@
       if (!entry || !color) throw Error('无效的 Session 颜色');
       entry[1].color = color;
       this.saveBindings();
-      return {slot:entry[0], ...entry[1]};
+      return {slot: entry[0], ...entry[1]};
     }
 
     setAgents(agents) {
@@ -181,7 +213,8 @@
     }
 
     reconcileActivity(agentId) {
-      const activity = this.activities.get(agentId), status = this.agents.get(agentId)?.status;
+      const activity = this.activities.get(agentId),
+        status = this.agents.get(agentId)?.status;
       if (!activity) return;
       if (!status || ['unloaded', 'stopped', 'error'].includes(status)) {
         this.activities.delete(agentId);
@@ -243,21 +276,35 @@
           return;
       }
       const phase = activityPhase(activity);
-      if (phase === 'idle') this.activities.delete(agentId); else this.activities.set(agentId, activity);
+      if (phase === 'idle') this.activities.delete(agentId);
+      else this.activities.set(agentId, activity);
       if (phase !== previous) this.syncLights().catch(error => this.fail(error));
     }
 
-    isBusy(agentId) { return BUSY_STATUSES.has(this.agents.get(agentId)?.status); }
+    isBusy(agentId) {
+      return BUSY_STATUSES.has(this.agents.get(agentId)?.status);
+    }
 
     collection(device) {
-      return device.collections.find(item => item.usagePage === USAGE_PAGE && item.usage === USAGE &&
-        item.outputReports.some(report => report.reportId === REPORT_ID) && item.inputReports.some(report => report.reportId === REPORT_ID));
+      return device.collections.find(
+        item =>
+          item.usagePage === USAGE_PAGE &&
+          item.usage === USAGE &&
+          item.outputReports.some(report => report.reportId === REPORT_ID) &&
+          item.inputReports.some(report => report.reportId === REPORT_ID)
+      );
     }
 
     async connect({request = true} = {}) {
-      if (!window.isSecureContext || !navigator.hid) throw Error('WebHID 需要 Chrome/Edge，并通过 HTTPS 或 localhost 打开');
-      let devices = (await navigator.hid.getDevices()).filter(device => device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID && this.collection(device));
-      if (!devices.length && request) devices = await navigator.hid.requestDevice({filters:[{vendorId:VENDOR_ID, productId:PRODUCT_ID, usagePage:USAGE_PAGE, usage:USAGE}]});
+      if (!window.isSecureContext || !navigator.hid)
+        throw Error('WebHID 需要 Chrome/Edge，并通过 HTTPS 或 localhost 打开');
+      let devices = (await navigator.hid.getDevices()).filter(
+        device => device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID && this.collection(device)
+      );
+      if (!devices.length && request)
+        devices = await navigator.hid.requestDevice({
+          filters: [{vendorId: VENDOR_ID, productId: PRODUCT_ID, usagePage: USAGE_PAGE, usage: USAGE}]
+        });
       if (!devices.length) return false;
       const device = devices[0];
       // Finish the previous close and sync before reusing the same HIDDevice.
@@ -270,7 +317,8 @@
         if (this.device === device) device.removeEventListener('inputreport', this.handleInputReport);
         this.device = device;
         device.addEventListener('inputreport', this.handleInputReport);
-        this.assembler.reset(); this.sentLights.clear();
+        this.assembler.reset();
+        this.sentLights.clear();
         await this.syncLights(true);
         if (this.device !== device || !device.opened) throw Error('键盘已断开');
       } catch (error) {
@@ -280,62 +328,97 @@
         else if (device.opened) await device.close().catch(() => undefined);
         throw error;
       }
-      this.onStateChange?.({connected:true, name:device.productName || 'Codex Micro'});
+      this.onStateChange?.({connected: true, name: device.productName || 'Codex Micro'});
       return true;
     }
 
     async restoreAuthorized() {
       if (!window.isSecureContext || !navigator.hid) return false;
-      try { return await this.connect({request:false}); }
-      catch (error) { this.fail(error); return false; }
+      try {
+        return await this.connect({request: false});
+      } catch (error) {
+        this.fail(error);
+        return false;
+      }
     }
 
     async disconnect() {
       if (!this.device) return this.closePromise;
-      const device = this.device; this.device = null;
+      const device = this.device;
+      this.device = null;
       device.removeEventListener('inputreport', this.handleInputReport);
       // Detach and notify before awaiting the OS: close() can fail or stall.
-      for (const waiter of this.pending.values()) { clearTimeout(waiter.timer); waiter.reject(Error('键盘已断开')); }
-      this.pending.clear(); this.assembler.reset(); this.sentLights.clear();
-      this.syncRequested = false; this.forceSync = false;
+      for (const waiter of this.pending.values()) {
+        clearTimeout(waiter.timer);
+        waiter.reject(Error('键盘已断开'));
+      }
+      this.pending.clear();
+      this.assembler.reset();
+      this.sentLights.clear();
+      this.syncRequested = false;
+      this.forceSync = false;
       const closing = device.opened ? device.close() : Promise.resolve();
       this.closePromise = closing.catch(() => undefined);
-      this.onStateChange?.({connected:false, name:''});
+      this.onStateChange?.({connected: false, name: ''});
       return closing;
     }
 
-    handleDisconnect(event) { if (event.device === this.device) this.disconnect().catch(error => this.fail(error)); }
+    handleDisconnect(event) {
+      if (event.device === this.device) this.disconnect().catch(error => this.fail(error));
+    }
 
     handleInputReport(event) {
       if (event.device !== this.device || Number(event.reportId) !== REPORT_ID) return;
       try {
         const bytes = new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength);
-        if (bytes.length < 2 || bytes[0] !== CHANNEL_JSON || bytes[1] > PAYLOAD_BYTES || bytes[1] > bytes.length - 2) throw Error('收到无效的键盘 HID 数据');
+        if (
+          bytes.length < 2 ||
+          bytes[0] !== CHANNEL_JSON ||
+          bytes[1] > PAYLOAD_BYTES ||
+          bytes[1] > bytes.length - 2
+        )
+          throw Error('收到无效的键盘 HID 数据');
         for (const message of this.assembler.feed(bytes.slice(2, 2 + bytes[1]))) this.handleMessage(message);
-      } catch (error) { this.fail(error); }
+      } catch (error) {
+        this.fail(error);
+      }
     }
 
     handleMessage(message) {
       if (Object.prototype.hasOwnProperty.call(message, 'id')) {
         const waiter = this.pending.get(String(message.id));
-        if (waiter) { this.pending.delete(String(message.id)); clearTimeout(waiter.timer); waiter.resolve(message); }
+        if (waiter) {
+          this.pending.delete(String(message.id));
+          clearTimeout(waiter.timer);
+          waiter.resolve(message);
+        }
         return;
       }
-      if (message.m !== 'v.oai.hid' || !/^AG0[0-5]$/.test(message.p?.k) || Number(message.p?.act) !== 1) return;
-      const slot = Number(message.p.k.slice(-1)), now = Date.now();
+      if (message.m !== 'v.oai.hid' || !/^AG0[0-5]$/.test(message.p?.k) || Number(message.p?.act) !== 1)
+        return;
+      const slot = Number(message.p.k.slice(-1)),
+        now = Date.now();
       if (now - (this.lastPress.get(slot) || 0) < 250) return;
       this.lastPress.set(slot, now);
       const binding = this.getSlot(slot);
       if (binding) this.onKey?.(binding, message);
     }
 
-    nextId() { this.requestId = this.requestId >= 998 ? 0 : this.requestId + 1; return this.requestId; }
+    nextId() {
+      this.requestId = this.requestId >= 998 ? 0 : this.requestId + 1;
+      return this.requestId;
+    }
 
     reports(message) {
-      const bytes = new TextEncoder().encode(message), reports = [];
+      const bytes = new TextEncoder().encode(message),
+        reports = [];
       for (let offset = 0; offset < bytes.length; offset += PAYLOAD_BYTES) {
-        const fragment = bytes.slice(offset, offset + PAYLOAD_BYTES), report = new Uint8Array(REPORT_BYTES);
-        report[0] = CHANNEL_JSON; report[1] = fragment.length; report.set(fragment, 2); reports.push(report);
+        const fragment = bytes.slice(offset, offset + PAYLOAD_BYTES),
+          report = new Uint8Array(REPORT_BYTES);
+        report[0] = CHANNEL_JSON;
+        report[1] = fragment.length;
+        report.set(fragment, 2);
+        reports.push(report);
       }
       return reports;
     }
@@ -345,7 +428,10 @@
       const job = this.queue.then(async () => {
         if (this.device !== device || !device?.opened) throw Error('键盘未连接');
         const response = new Promise((resolve, reject) => {
-          const timer = setTimeout(() => { this.pending.delete(String(request.id)); reject(Error('键盘响应超时')); }, 5000);
+          const timer = setTimeout(() => {
+            this.pending.delete(String(request.id));
+            reject(Error('键盘响应超时'));
+          }, 5000);
           this.pending.set(String(request.id), {resolve, reject, timer});
         });
         // A timeout/disconnect can reject the reply while sendReport is still
@@ -373,17 +459,25 @@
 
     lightRequest(slot, color, effect, speed = 0) {
       const enabled = effect !== EFFECT_OFF;
-      return {id:this.nextId(), m:'v.oai.thstatus', p:[{id:slot, c:parseInt(color.slice(1), 16), b:enabled ? 1 : 0, e:effect, s:speed, sk:0, sa:0}]};
+      return {
+        id: this.nextId(),
+        m: 'v.oai.thstatus',
+        p: [
+          {id: slot, c: parseInt(color.slice(1), 16), b: enabled ? 1 : 0, e: effect, s: speed, sk: 0, sa: 0}
+        ]
+      };
     }
 
     lightState(slot) {
-      const binding = this.bindings.get(slot), active = Boolean(binding && this.agents.has(binding.agentId));
-      if (!active) return {color:binding?.color || '#000000', effect:EFFECT_OFF, speed:0};
+      const binding = this.bindings.get(slot),
+        active = Boolean(binding && this.agents.has(binding.agentId));
+      if (!active) return {color: binding?.color || '#000000', effect: EFFECT_OFF, speed: 0};
       const phase = activityPhase(this.activities.get(binding.agentId));
       let animation = ACTIVITY_LIGHTS[phase];
-      if (!animation && this.agents.get(binding.agentId)?.status === 'waiting_for_user') animation = ACTIVITY_LIGHTS.waiting;
+      if (!animation && this.agents.get(binding.agentId)?.status === 'waiting_for_user')
+        animation = ACTIVITY_LIGHTS.waiting;
       if (!animation && this.isBusy(binding.agentId)) animation = BUSY_LIGHT;
-      return {color:binding.color, effect:animation?.effect || EFFECT_SOLID, speed:animation?.speed || 0};
+      return {color: binding.color, effect: animation?.effect || EFFECT_SOLID, speed: animation?.speed || 0};
     }
 
     async syncLights(force = false) {
@@ -399,21 +493,27 @@
           if (this.device !== device || !device.opened) throw Error('键盘已断开');
           do {
             this.syncRequested = false;
-            const forcePass = this.forceSync; this.forceSync = false;
+            const forcePass = this.forceSync;
+            this.forceSync = false;
             for (let slot = 0; slot < 6; slot++) {
-              const {color, effect, speed} = this.lightState(slot), signature = `${color}:${effect}:${speed}`;
+              const {color, effect, speed} = this.lightState(slot),
+                signature = `${color}:${effect}:${speed}`;
               if (!forcePass && this.sentLights.get(slot) === signature) continue;
               await this.transmit(this.lightRequest(slot, color, effect, speed));
               if (this.device !== device || !device.opened) throw Error('键盘已断开');
               this.sentLights.set(slot, signature);
             }
           } while (this.syncRequested && this.connected);
-        } finally { this.syncPromise = null; }
+        } finally {
+          this.syncPromise = null;
+        }
       });
       return this.syncPromise;
     }
 
-    fail(error) { this.onError?.(error instanceof Error ? error : Error(String(error))); }
+    fail(error) {
+      this.onError?.(error instanceof Error ? error : Error(String(error)));
+    }
   }
 
   window.SessionKeyboardController = SessionKeyboardController;
