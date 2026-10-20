@@ -32,6 +32,8 @@ import {LoginLimiter} from './http/login-limiter.js';
 import {handleAgentSocket} from './ws/agent-socket.js';
 import {handleTerminalSocket} from './ws/terminal-socket.js';
 import {handleAgentRoutes} from './http/agent-routes.js';
+import {handleMailSettingsRoutes} from './http/mail-settings-routes.js';
+import {handleWorkspaceRoutes} from './http/workspace-routes.js';
 export type ServerOptions = {
   host?: string;
   port?: number;
@@ -624,109 +626,23 @@ export class RemotePiServer {
             mailNotificationsEnabled: this.mailNotifier?.getSettings().enabled ?? false
           }
         });
-      if (req.method === 'GET' && u.pathname === '/api/v1/mail-notifications')
-        return json(res, 200, {
-          data: {available: !!this.mailNotifier, settings: this.mailNotifier?.getSettings() ?? null}
-        });
-      if (req.method === 'POST' && u.pathname === '/api/v1/mail-notifications') {
-        if (!this.mailNotifier)
-          throw Object.assign(new Error('MailDispatch is not configured at server startup'), {
-            code: 'MAIL_NOTIFICATIONS_DISABLED'
-          });
-        const b = await readJsonBody(req),
-          patch: Partial<MailNotificationSettings> = {};
-        if ('enabled' in b) {
-          if (typeof b.enabled !== 'boolean')
-            throw Object.assign(new Error('enabled must be a boolean'), {
-              code: 'INVALID_MAIL_NOTIFICATION_SETTINGS'
-            });
-          patch.enabled = b.enabled;
-        }
-        if ('aggregationDelaySeconds' in b) patch.aggregationDelaySeconds = Number(b.aggregationDelaySeconds);
-        if ('includeResponse' in b) {
-          if (typeof b.includeResponse !== 'boolean')
-            throw Object.assign(new Error('includeResponse must be a boolean'), {
-              code: 'INVALID_MAIL_NOTIFICATION_SETTINGS'
-            });
-          patch.includeResponse = b.includeResponse;
-        }
-        if ('includeSessionDetails' in b) {
-          if (typeof b.includeSessionDetails !== 'boolean')
-            throw Object.assign(new Error('includeSessionDetails must be a boolean'), {
-              code: 'INVALID_MAIL_NOTIFICATION_SETTINGS'
-            });
-          patch.includeSessionDetails = b.includeSessionDetails;
-        }
-        if ('collabEscalations' in b) {
-          if (typeof b.collabEscalations !== 'boolean')
-            throw Object.assign(new Error('collabEscalations must be a boolean'), {
-              code: 'INVALID_MAIL_NOTIFICATION_SETTINGS'
-            });
-          patch.collabEscalations = b.collabEscalations;
-        }
-        const settings = this.mailNotifier.updateSettings(patch);
-        this.metadata.setSetting('mailNotifications', settings);
-        return json(res, 200, {data: {available: true, settings}});
-      }
-      if (req.method === 'GET' && u.pathname === '/api/v1/workspaces')
-        return json(res, 200, {data: this.workspaces.list()});
-      if (req.method === 'POST' && u.pathname === '/api/v1/workspaces') {
-        const b = await readJsonBody(req);
-        if (typeof b.label !== 'string' || typeof b.rootPath !== 'string')
-          return json(res, 400, {
-            error: {code: 'INVALID_REQUEST', message: 'label and rootPath required', requestId}
-          });
-        const workspace = this.workspaces.add(b.label, b.rootPath);
-        this.metadata.saveWorkspace(workspace);
-        return json(res, 201, {data: workspace});
-      }
-      if (parts[2] === 'workspaces' && parts[4] === 'tree' && req.method === 'GET')
-        return json(res, 200, {
-          data: await this.workspaces.tree(parts[3], u.searchParams.get('path') ?? '.')
-        });
-      if (parts[2] === 'workspaces' && parts[4] === 'file' && req.method === 'GET')
-        return json(res, 200, {
-          data: await this.workspaces.file(
-            parts[3],
-            u.searchParams.get('path') ?? '',
-            Number(u.searchParams.get('offset') ?? 0),
-            Number(u.searchParams.get('limit') ?? 1048576)
-          )
-        });
-      if (parts[2] === 'workspaces' && parts[4] === 'stat' && req.method === 'GET')
-        return json(res, 200, {
-          data: await this.workspaces.stat(parts[3], u.searchParams.get('path') ?? '.')
-        });
-      if (req.method === 'GET' && u.pathname === '/api/v1/sessions') {
-        const workspace = this.workspaces.get(u.searchParams.get('workspaceId') ?? '');
-        if (!workspace) throw Object.assign(new Error('Workspace not found'), {code: 'WORKSPACE_NOT_FOUND'});
-        const cwd = await this.workspaces.resolve(workspace, u.searchParams.get('path') ?? '.');
-        await this.ensureSessionIndex(workspace, cwd, u.searchParams.get('refresh') === 'true');
-        const limit = u.searchParams.has('limit') ? Number(u.searchParams.get('limit')) : undefined,
-          offset = Number(u.searchParams.get('offset') ?? 0);
-        return json(res, 200, {data: this.metadata.listSessions(cwd, limit, offset)});
-      }
-      if (req.method === 'GET' && u.pathname === '/api/v1/terminals')
-        return json(res, 200, {data: this.terminals.list()});
-      if (req.method === 'POST' && u.pathname === '/api/v1/terminals') {
-        const b = await readJsonBody(req);
-        const terminal = await this.terminals.create(
-          String(b.workspaceId ?? ''),
-          String(b.relativeCwd ?? '.'),
-          Number(b.cols ?? 80),
-          Number(b.rows ?? 24)
-        );
-        return json(res, 201, {data: terminal});
-      }
-      if (parts[2] === 'terminals') {
-        const id = parts[3];
-        if (req.method === 'GET' && parts.length === 4)
-          return json(res, 200, {data: this.terminals.get(id).record});
-        if (req.method === 'DELETE' && parts.length === 4) {
-          this.terminals.close(id);
-          return json(res, 200, {data: {closed: true}});
-        }
-      }
+      if (
+        await handleMailSettingsRoutes(
+          {mailNotifier: this.mailNotifier, metadata: this.metadata},
+          req,
+          res,
+          u
+        )
+      )
+        return;
+      const workspaceContext = {
+        workspaces: this.workspaces,
+        terminals: this.terminals,
+        metadata: this.metadata,
+        ensureSessionIndex: (workspace: Workspace, cwd: string, force?: boolean) =>
+          this.ensureSessionIndex(workspace, cwd, force)
+      };
+      if (await handleWorkspaceRoutes(workspaceContext, req, res, u, parts, requestId)) return;
       const agentContext = {
         agents: this.agents,
         metadata: this.metadata,
