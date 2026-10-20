@@ -145,7 +145,7 @@ pi2web \
 
 自动命名是独立于语音的功能，**默认开启**：Agent 每次任务结束（`agent_settled`）后，如果 Session 还没有名字，就用一个 OpenAI 兼容的接口生成简短标题并写入 Session。不开语音时只生成标题，不会产生任何语音；开了语音播报时仍然只由命名器负责命名，语音负责朗读摘要。
 
-默认值：`--session-name-base-url http://localhost:8313/`、`--session-name-model gpt-5-mini`、无 API Key。可用参数：
+默认值：`--session-name-base-url http://localhost:8313/`、`--session-name-model gpt-5.4-nano`、无 API Key。可用参数：
 
 ```
 --session-naming <on|off>            关闭或开启自动命名（默认 on）
