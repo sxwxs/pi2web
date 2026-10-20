@@ -170,6 +170,8 @@ npm test
 npm run dev -- --port 11318
 ```
 
+源码格式化目前处于试点：`npm run format` 和 `npm run format:check` 只覆盖 `src/drafts.ts`、`web/backend-state.js`。确认风格后再逐批扩大范围；不要格式化 `dist/` 或网站生成文件 `website/public/`，也不要把纯格式改动与功能修改混在同一次提交。
+
 ## 数据持久化
 
 Remote Pi 的服务端元数据保存在 `~/.pi/remote-pi/remote-pi.db` SQLite 数据库中：

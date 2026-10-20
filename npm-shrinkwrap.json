@@ -33,6 +33,7 @@
         "@types/better-sqlite3": "^7.6.13",
         "@types/node": "^22.0.0",
         "@types/ws": "^8.5.0",
+        "prettier": "3.6.2",
         "tsx": "^4.19.0",
         "typescript": "^5.9.3",
         "vitest": "^3.0.0"
@@ -2906,6 +2907,21 @@
       },
       "engines": {
         "node": ">=10"
+      }
+    },
+    "node_modules/prettier": {
+      "version": "3.6.2",
+      "integrity": "sha1-zNoCoQA+u7K/2m+DoHSXj2CLk5M=",
+      "dev": true,
+      "license": "MIT",
+      "bin": {
+        "prettier": "bin/prettier.cjs"
+      },
+      "engines": {
+        "node": ">=14"
+      },
+      "funding": {
+        "url": "https://github.com/prettier/prettier?sponsor=1"
       }
     },
     "node_modules/proper-lockfile": {
