@@ -7,8 +7,9 @@ import {promisify} from 'node:util';
 import {AuthStore} from '../src/auth.js';
 
 const entry = path.resolve('src/main.ts');
+// Each run cold-starts tsx and the Pi SDK; under a parallel full test run that alone can take over 10s.
 const run = (...args: string[]) =>
-  promisify(execFile)(process.execPath, ['--import', 'tsx', entry, ...args], {timeout: 10_000});
+  promisify(execFile)(process.execPath, ['--import', 'tsx', entry, ...args], {timeout: 30_000});
 
 describe('voice token CLI', () => {
   it('prints a new pairing code to stderr while reserving stdout for the draft token', async () => {
@@ -28,7 +29,7 @@ describe('voice token CLI', () => {
     } finally {
       await rm(dir, {recursive: true, force: true});
     }
-  }, 30_000);
+  }, 70_000);
 });
 
 describe('no-auth CLI options', () => {
@@ -36,19 +37,19 @@ describe('no-auth CLI options', () => {
     const {stdout} = await run('--help');
     expect(stdout).toContain('--allow-insecure-no-auth');
     expect(stdout).toContain('requires --no-auth; DANGEROUS');
-  }, 20_000);
+  }, 40_000);
   it('rejects a non-loopback no-auth bind by default', async () => {
     await expect(run('--host', '0.0.0.0', '--no-auth')).rejects.toMatchObject({
       code: 1,
       stderr: expect.stringContaining('use --allow-insecure-no-auth')
     });
-  }, 20_000);
+  }, 40_000);
   it('rejects the override without --no-auth', async () => {
     await expect(run('--allow-insecure-no-auth')).rejects.toMatchObject({
       code: 1,
       stderr: expect.stringContaining('--allow-insecure-no-auth requires --no-auth')
     });
-  }, 20_000);
+  }, 40_000);
   it('passes the override to the server and warns on startup', async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), 'remote-pi-cli-noauth-'));
     const child = spawn(
@@ -84,7 +85,7 @@ describe('no-auth CLI options', () => {
     });
     try {
       await expect
-        .poll(() => stdout, {timeout: 10_000})
+        .poll(() => stdout, {timeout: 30_000})
         .toMatch(/Remote Pi is ready: http:\/\/0\.0\.0\.0:\d+/);
       const port = stdout.match(/http:\/\/0\.0\.0\.0:(\d+)/)![1];
       const response = await fetch(`http://127.0.0.1:${port}/api/v1/system/status`, {
@@ -99,5 +100,5 @@ describe('no-auth CLI options', () => {
       await closed;
       await rm(dataDir, {recursive: true, force: true});
     }
-  }, 15_000);
+  }, 40_000);
 });
