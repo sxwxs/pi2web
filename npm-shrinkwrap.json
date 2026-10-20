@@ -1,16 +1,22 @@
 {
   "name": "pi2web",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "pi2web",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "license": "MIT",
       "dependencies": {
+        "@earendil-works/chord": "1.1.0",
+        "@earendil-works/pi-agent-core": "1.1.0",
         "@earendil-works/pi-ai": "1.1.0",
+        "@earendil-works/pi-codemode": "1.1.0",
         "@earendil-works/pi-coding-agent": "1.1.0",
+        "@earendil-works/pi-mcp": "1.1.0",
+        "@earendil-works/pi-telemetry": "1.1.0",
+        "@earendil-works/pi-tui": "1.1.0",
         "@xterm/addon-fit": "^0.11.0",
         "@xterm/xterm": "^6.0.0",
         "better-sqlite3": "^12.11.1",

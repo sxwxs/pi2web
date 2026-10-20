@@ -1,6 +1,6 @@
 {
   "name": "pi2web",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Secure remote web client server for Pi coding agent",
   "type": "module",
   "author": "sxwxs",
@@ -18,6 +18,7 @@
   },
   "files": [
     "dist/",
+    "npm-shrinkwrap.json",
     "web/",
     "packages/protocol/",
     "packages/edge-tts-server/src/remote_pi_edge_tts/",
@@ -46,8 +47,14 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-agent-core": "1.1.0",
     "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-codemode": "1.1.0",
     "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-mcp": "1.1.0",
+    "@earendil-works/pi-telemetry": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "better-sqlite3": "^12.11.1",
