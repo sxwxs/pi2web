@@ -1,15 +1,9 @@
-import {execFile, execFileSync, spawn} from 'node:child_process';
-import {createHash, type Hash} from 'node:crypto';
-import {createReadStream} from 'node:fs';
-import path from 'node:path';
+import {execFile, execFileSync} from 'node:child_process';
 import {promisify} from 'node:util';
-import type {Readable} from 'node:stream';
-import type {ChildProcess} from 'node:child_process';
 import {
   COLLAB_ERRORS,
   type CollabEvent,
   type CollabSession,
-  type CollabSubject,
   type Escalation,
   type Issue,
   type Participant,
@@ -17,6 +11,12 @@ import {
   type ScoringPhase
 } from './types.js';
 import {CollabStore, type CreateSessionInput} from './store.js';
+import {gitBaseline, type BaselineResolver, type BaselineSnapshot} from './baseline.js';
+import {similarity} from './similarity.js';
+
+export {gitBaseline, type BaselineResolver, type BaselineSnapshot};
+
+const run = promisify(execFile);
 import {ValidationError, parse, type FieldError} from './validate.js';
 import {
   advanceRequest,
@@ -85,8 +85,6 @@ import {
   type ReviewSnapshot
 } from './review-flow.js';
 
-const run = promisify(execFile);
-
 /**
  * Shared rulebook handed to every seat. A reviewer that does not know the panel size, the vote semantics, or
  * what happens to a contested finding cannot calibrate anything: the first live panels produced one reviewer
@@ -116,108 +114,12 @@ const VOTE_GUIDE = {
 /** How long a queued task may sit undelivered before the human is told that the wake-up is not landing. */
 const UNDELIVERED_TASK_WARNING_MS = 120_000;
 
-export type BaselineSnapshot = {
-  vcs: string;
-  commit?: string;
-  range?: string;
-  rangeResolved?: string;
-  dirtyHash?: string;
-  paths: string[];
-};
-export type BaselineResolver = (input: {
-  cwd: string;
-  subject: CollabSubject;
-  round: number;
-}) => Promise<BaselineSnapshot>;
 export type HubOptions = {
   resolveBaseline?: BaselineResolver;
   now?: () => number;
   agentTokenUsage?: (agentId: string) => Promise<number | undefined>;
   agentStatus?: (agentId: string) => string | undefined;
 };
-
-/** Anchors every round to an immutable code state so round N+1 verdicts are not made against round N's memory. */
-export const gitBaseline: BaselineResolver = async ({cwd, subject}) => {
-  const git = async (args: string[]) => (await run('git', args, {cwd})).stdout;
-  try {
-    const commit = (await git(['rev-parse', 'HEAD'])).trim();
-    let dirtyHash: string | undefined;
-    const status = await git(['status', '--porcelain', '-z']);
-    if (status) {
-      const untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z']))
-        .split('\0')
-        .filter(Boolean)
-        .sort();
-      // Hashed as a stream, never buffered. A working tree diff can be tens of megabytes, and a diff dropped for
-      // exceeding a buffer would leave a hash of nothing but file names - identical before and after an edit to
-      // those same files, which is exactly what `assertBaselineCurrent()` exists to catch.
-      const hash = createHash('sha256').update(status);
-      await hashStream(
-        hash,
-        spawn('git', ['diff', 'HEAD', '--binary'], {cwd, stdio: ['ignore', 'pipe', 'ignore']})
-      );
-      for (const relative of untracked) {
-        hash.update(relative).update('\0');
-        // A file removed during capture is already represented by status.
-        await hashStream(hash, createReadStream(path.join(cwd, relative))).catch(() => {});
-      }
-      dirtyHash = `sha256:${hash.digest('hex')}`;
-    }
-    // A commit range such as `main...feature` is only a name: either endpoint can move while HEAD and the
-    // working tree stay identical, which would silently change the code under review. Resolve both endpoints
-    // so the pinned identity covers the range, not just its spelling.
-    let rangeResolved: string | undefined;
-    if (subject.type === 'commit_range') {
-      const expression = subject.value.trim();
-      const endpoints = expression.includes('...')
-        ? expression.split('...')
-        : expression.includes('..')
-          ? expression.split('..')
-          : [expression];
-      const resolved: string[] = [];
-      for (const endpoint of endpoints) {
-        const name = endpoint.trim();
-        resolved.push(
-          name
-            ? (await git(['rev-parse', '--verify', `${name}^{commit}`]).catch(() => '')).trim() ||
-                `unresolved:${name}`
-            : 'HEAD'
-        );
-      }
-      rangeResolved = resolved.join('...');
-    }
-    return {
-      vcs: 'git',
-      commit,
-      range: subject.type === 'commit_range' ? subject.value : undefined,
-      rangeResolved,
-      dirtyHash,
-      paths:
-        subject.type === 'paths'
-          ? subject.value
-              .split(/[\n,]/)
-              .map(value => value.trim())
-              .filter(Boolean)
-          : []
-    };
-  } catch {
-    // Not a git checkout (or git is missing). The hub still works; it just cannot prove code identity.
-    return {vcs: 'none', paths: []};
-  }
-};
-/** Feeds one stream into a hash, rejecting on failure so a partial read can never pass as "nothing changed". */
-function hashStream(hash: Hash, source: Readable | ChildProcess) {
-  const process = 'stdout' in source ? source : undefined,
-    stream = (process ? process.stdout : source) as Readable | null;
-  return new Promise<void>((resolve, reject) => {
-    if (!stream) return reject(new Error('Stream is not readable'));
-    stream.on('data', chunk => hash.update(chunk));
-    stream.on('error', reject);
-    if (!process) return void stream.on('end', resolve);
-    process.on('error', reject);
-    process.on('close', code => (code === 0 ? resolve() : reject(new Error(`git exited with ${code}`))));
-  });
-}
 
 const fieldError = (path: string, code: string, message: string): FieldError => ({path, code, message});
 
@@ -3782,25 +3684,4 @@ export class CollabHub {
       severity: issue.severity
     };
   }
-}
-
-const words = (value: string) =>
-  new Set(
-    value
-      .toLowerCase()
-      .split(/[^a-z0-9\u4e00-\u9fff]+/)
-      .filter(token => token.length > 1)
-  );
-function similarity(a: Issue, b: Issue) {
-  const overlapping =
-    a.location.path === b.location.path &&
-    (a.location.startLine === undefined ||
-      b.location.startLine === undefined ||
-      Math.max(a.location.startLine, b.location.startLine) <=
-        Math.min(a.location.endLine ?? a.location.startLine, b.location.endLine ?? b.location.startLine));
-  const left = words(`${a.title} ${a.suggestion ?? ''}`),
-    right = words(`${b.title} ${b.suggestion ?? ''}`);
-  const shared = [...left].filter(token => right.has(token)).length,
-    union = new Set([...left, ...right]).size;
-  return (overlapping ? 0.5 : 0) + (union ? 0.5 * (shared / union) : 0);
 }
