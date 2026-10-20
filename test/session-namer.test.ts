@@ -25,7 +25,9 @@ describe('SessionNamer',()=>{
     await settle();
     expect(applied).toEqual(['修复会话命名']);
     expect(calls[0].url).toBe('http://localhost:8313/v1/chat/completions');
-    expect(calls[0].body.model).toBe('gpt-5-mini');
+    expect(calls[0].body.model).toBe('gpt-5.4-nano');
+    // Reasoning models reject `temperature`, so the naming request must not send it.
+    expect('temperature' in calls[0].body).toBe(false);
     expect(JSON.parse(calls[0].body.messages[1].content).userPrompt).toBe('修一下自动命名');
   });
 
