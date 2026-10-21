@@ -86,3 +86,9 @@
 .mcp-info{flex:1;min-width:0}
 .mcp-info small{display:block;margin-top:3px;white-space:pre-wrap;word-break:break-word}
 .mcp-error{color:var(--red);white-space:pre-wrap;word-break:break-word}
+.template-tag{flex:0 0 auto;max-width:110px;padding:2px 7px;border:1px solid #b48ead;border-radius:999px;background:#3a3443;color:#e5d4ef;font:700 10px/1.4 system-ui,sans-serif;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prompt-text{white-space:pre-wrap;word-break:break-word;max-height:45vh;overflow:auto;margin:6px 0;padding:8px;background:#20232b;border:1px solid var(--line);border-radius:5px;font:12px/1.45 ui-monospace,monospace}
+.prompt-editor{min-height:140px;max-height:45vh;resize:vertical;font:12px/1.45 ui-monospace,monospace}
+.prompt-preview{margin:10px 0}.prompt-preview summary{cursor:pointer;color:var(--blue)}.prompt-preview>small{display:block;margin-top:6px;word-break:break-all}
+.template-row{display:flex;align-items:center;gap:6px;padding:7px 0;border-bottom:1px solid var(--line)}.template-info{flex:1;min-width:0}.template-info b,.template-info small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.template-row button{padding:4px 8px}
+.template-editor{margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:6px;background:#262a33}

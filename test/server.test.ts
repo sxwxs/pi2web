@@ -80,7 +80,7 @@ describe('HTTP server', () => {
     await server.auth.init();
     await server.start();
     expect(server.workspaces.list()).toEqual([]);
-    expect(await import('node:fs/promises').then(fs => fs.stat(path.join(dir, 'remote-pi.db')))).toBeTruthy();
+    expect(await import('node:fs/promises').then(fs => fs.stat(path.join(dir, 'pi2web.db')))).toBeTruthy();
   });
   it('restores workspace and agent metadata after restart', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'remote-pi-')),
@@ -195,7 +195,7 @@ describe('HTTP server', () => {
     ]);
     expect((await post(`/api/v1/agents/${agent.agentId}/archive`)).status).toBe(200);
     expect((await (await fetch(base + '/api/v1/agents', {headers})).json()).data).toEqual([]);
-    expect(await import('node:fs/promises').then(fs => fs.stat(path.join(dir, 'remote-pi.db')))).toBeTruthy();
+    expect(await import('node:fs/promises').then(fs => fs.stat(path.join(dir, 'pi2web.db')))).toBeTruthy();
     await expect(
       import('node:fs/promises').then(fs => fs.access(path.join(dir, 'agents_archive.json')))
     ).rejects.toThrow();

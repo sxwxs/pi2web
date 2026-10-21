@@ -19,7 +19,7 @@ npm 包名为 `pi2web`，全局命令同名（`pi2web`）。安装时会准备 `
 
 ```bash
 pi2web --host 127.0.0.1 --port 11318
-pi2web --data-dir ~/.pi/remote-pi
+pi2web --data-dir ~/.pi/pi2web     # 默认值；也可用环境变量 PI2WEB_DIR
 pi2web --rotate-access-token   # 旧配对码立即失效，输出新配对码
 pi2web --set-access-token <token>          # 手动设置配对码（16–128 位 URL-safe 字符）
 pi2web --set-access-token-env MY_TOKEN_ENV # 从环境变量读取配对码，推荐方式
@@ -174,11 +174,22 @@ npm run dev -- --port 11318
 
 ## 数据持久化
 
-Remote Pi 的服务端元数据保存在 `~/.pi/remote-pi/remote-pi.db` SQLite 数据库中：
+pi2web 的服务端数据目录是 `~/.pi/pi2web`（`--data-dir` 或 `PI2WEB_DIR` 可覆盖）。旧版本使用的 `~/.pi/remote-pi` 不再读取，请在停止服务后运行一次迁移脚本：
+
+```bash
+python scripts/migrate_data_dir.py --dry-run   # 查看计划
+python scripts/migrate_data_dir.py             # 复制 ~/.pi/remote-pi -> ~/.pi/pi2web，remote-pi.db 改名为 pi2web.db
+```
+
+脚本使用 SQLite backup API（包含 WAL 中尚未落盘的数据），不修改源目录；目标目录已有同名文件时会中止，`--force` 会先把它们移到 `pre-migration-<时间>/`。
+
+元数据保存在 `~/.pi/pi2web/pi2web.db` SQLite 数据库中：
 
 - `workspaces`：Workspace ID、名称、根目录和创建时间。
 - `agents`：Agent 与 Workspace/Session 的映射、cwd、状态、创建/最后活动时间以及 Archive 状态。
 - `sessions`：用于 Session 列表、排序和分页的轻量索引，包括名称、文件路径、消息数量、文件 mtime/size 和最后活动时间。
+- `agents.template`：Agent 创建时选定的 System Prompt 模板快照（JSON），之后不可修改。
+- `agent-templates/*.md`：可分享的 Agent 模板文件，见下文「System Prompt 与 Agent 模板」。
 - `auth.json`：配对码的 SHA-256 hash、创建和轮换时间；认证数据仍单独保存，不保存配对码明文，文件权限为 `0600`。
 
 数据库使用 WAL、短事务、部分索引和批量延迟更新。Session 活动时间不会随每个 streaming token 写入，而是在完整消息、Agent 完成和 Session 信息变化时合并持久化。旧版 `workspaces.json`、`agents.json` 和 `agents_archive.json` 不会被读取、迁移或继续写入。
@@ -329,6 +340,10 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET /api/v1/sessions`
 - `GET/POST /api/v1/agents`（创建时可带 `profile`：`default`（默认）或 `collab`；`collab` 会加载协作工具，供协作看板占座使用）
 - `GET/DELETE /api/v1/agents/:id`
+- `POST /api/v1/agents` 可带 `templateId` 选择 Agent 模板；`GET /api/v1/agents/:id/system-prompt` 返回该 Agent 当前生效的 System Prompt、模板快照及来源文件。
+- `GET/PUT /api/v1/system-prompt`：读取 / 写入 Pi 全局 `~/.pi/agent/SYSTEM.md`、`APPEND_SYSTEM.md`（`{kind: "system"|"append", content}`，空内容即删除文件）。
+- `GET /api/v1/system-prompt/preview?workspaceId=&relativeCwd=&templateId=&source=pi-default`：生成指定 cwd 下的有效 System Prompt；`source=pi-default` 忽略 SYSTEM.md / APPEND_SYSTEM.md，显示 Pi 内置 Prompt。
+- `GET /api/v1/agent-templates`、`GET/PUT/DELETE /api/v1/agent-templates/:id`：管理 Agent 模板文件。
 - `GET/POST /api/v1/collab/sessions`、`/sessions/:id`、`/participants`（含 `/participants/:pid/binding`、`/participants/:pid/budget`）、`/advance`、`/ready`、`/recheck`（**仅人**，重开时轮换每个座位的 token 并在响应 `participantTokens` 里返回一次）、`/policy`、`/events`（`?since=` 游标或 `?tail=` 取最新若干条）、`/digest`、`/issues`、`/findings`、`/issue-votes`、`/merge-votes`、`/issue-discussions`、`/review-consensus`、`/review-rounds`（**仅人**）、`/retry-waiting`、`/escalations`、`/report`（**仅人**），以及 scoring 场景的 `/nominations`、`/votes`、`/criteria`、`/scores`、`/analysis`、`/debates`、`/finalize`（**仅人**，且只在 `awaiting_human` 阶段接受，必须为每个争议维度给一个合刻度的分数）
 - `GET /api/v1/collab/escalations`、`POST /api/v1/collab/escalations/:id/resolve`
 - `GET/POST /api/v1/terminals`
@@ -340,6 +355,27 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET /api/v1/agents/:id/commands` 返回该 Agent cwd 下可用的 prompt template 和 skill（`{name, description, argumentHint, source}`）。`prompt` 接口本身会展开 `/命令`、skill 和 prompt template。
 - `POST /api/v1/agents/:id/bash` 在 Agent Session 内执行命令（`{command, excludeFromContext}`），输出通过 `bash_execution_update` 事件流式推送并记录到 Session；`POST /api/v1/agents/:id/bash-abort` 取消。
 - WebSocket `/api/v1/ws` 支持 sequence、replay、snapshot、`fromNow` 和 Agent command；`subscribe_collab` 推送协作事件。
+
+## System Prompt 与 Agent 模板
+
+Web UI「配置 → 管理 System Prompt…」可以：
+
+- 预览当前 Workspace / 工作路径下 Agent 实际会使用的 System Prompt，或忽略全局文件的 Pi 内置 Prompt；
+- 编辑 Pi 自己的全局 `~/.pi/agent/SYSTEM.md`（替换 Pi 基础 Prompt）和 `APPEND_SYSTEM.md`（追加），这两个文件同样作用于 Pi CLI；受信任项目的 `.pi/SYSTEM.md`、`.pi/APPEND_SYSTEM.md` 优先；
+- 管理 Agent 模板。
+
+Agent 模板是 `~/.pi/pi2web/agent-templates/<id>.md` 文件，直接复制即可分享，手动放进目录的文件会立即出现：
+
+```markdown
+---
+name: Code reviewer
+description: 只审查，不修改文件
+mode: append        # append：追加在 Pi Prompt 之后；replace：替换 Pi 基础 Prompt（等同 SYSTEM.md）
+---
+You are a meticulous code reviewer. ...
+```
+
+新建 Agent 时可选择模板（默认是 Pi 自己的 Prompt）。模板内容在创建时复制到 Agent 记录中，**之后不能更改**：修改或删除模板文件不影响已有 Agent，Fork 出的 Agent 沿用同一模板。两种模式下 Pi 仍会加上 AGENTS.md 等项目上下文、skills 和 cwd；`replace` 会去掉 Pi 内置的工具说明、规则和文档段落，`APPEND_SYSTEM.md` 仍然生效。Agent 工具栏的「Prompt」按钮显示该 Agent 当前生效的完整 System Prompt。
 
 运行时使用真实 `@earendil-works/pi-coding-agent` SDK，并复用 Pi CLI 的 `~/.pi/agent` 模型、认证和设置。`MockBackend` 只用于自动化测试。
 

@@ -43,7 +43,7 @@ describe('MailNotifier', () => {
       to: ['owner@example.com'],
       subject: '[Remote Pi] 登录修复已完成',
       purpose: 'transactional',
-      metadata: {source: 'remote-pi', task_count: 1}
+      metadata: {source: 'pi2web', task_count: 1}
     });
     expect(payload.text).toContain('Session：登录修复');
     expect(payload.text).toContain('路径：/workspace/remote-pi');
