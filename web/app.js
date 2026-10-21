@@ -2871,6 +2871,7 @@
           relativeCwd: c.value.trim() || '.',
           templateId: t.value
         }));
+        c.addEventListener('input', () => preview.reset());
         t.onchange = () => preview.reset();
         return () => ({
           cwd: c.value.trim() || '.',
@@ -2974,6 +2975,7 @@
     });
     return {
       reset() {
+        ++request;
         loaded = false;
         if (box.open) void load();
       }
