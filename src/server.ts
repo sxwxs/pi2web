@@ -8,7 +8,6 @@ import {AgentManager} from './agents.js';
 import {createSdkBackend} from './sdk-backend.js';
 import {TerminalManager} from './terminals.js';
 import {MetadataStore} from './metadata-store.js';
-import {VoiceManager} from './voice.js';
 import {SessionNamer} from './session-namer.js';
 import {MailNotifier, type MailNotificationSettings} from './mail-notifier.js';
 import {CollabHub} from './collab/hub.js';
@@ -21,14 +20,7 @@ import {AgentTemplateStore} from './agent-templates.js';
 import type {CollabAction, CollabToolBridge} from './collab/pi-extension.js';
 import {SessionManager, VERSION as PI_VERSION} from '@earendil-works/pi-coding-agent';
 import pkg from '../package.json' with {type: 'json'};
-import {
-  LOOPBACK_HOSTS,
-  errorStatus,
-  isLoopbackHost,
-  json,
-  readBinaryBody,
-  readJsonBody
-} from './http/utils.js';
+import {LOOPBACK_HOSTS, errorStatus, isLoopbackHost, json, readJsonBody} from './http/utils.js';
 import {serveWebAsset} from './http/web-assets.js';
 import {LoginLimiter} from './http/login-limiter.js';
 import {handleAgentSocket} from './ws/agent-socket.js';
@@ -46,7 +38,6 @@ export type ServerOptions = {
   workspaces?: WorkspaceStore;
   agents?: AgentManager;
   terminals?: TerminalManager;
-  voice?: VoiceManager;
   sessionNamer?: SessionNamer;
   mailNotifier?: MailNotifier;
 };
@@ -77,7 +68,6 @@ export class RemotePiServer {
   private sessionIndexTimes = new Map<string, number>();
   private sessionIndexJobs = new Map<string, Promise<void>>();
   private agentIndexJobs = new Map<string, Promise<void>>();
-  private voice?: VoiceManager;
   private sessionNamer?: SessionNamer;
   private mailNotifier?: MailNotifier;
   private loginLimiter = new LoginLimiter();
@@ -90,7 +80,6 @@ export class RemotePiServer {
     this.metadata = new MetadataStore(this.dataDir);
     this.templates = new AgentTemplateStore(path.join(this.dataDir, AGENT_TEMPLATES_DIR));
     this.workspaces = options.workspaces ?? new WorkspaceStore();
-    this.voice = options.voice;
     this.sessionNamer = options.sessionNamer;
     this.mailNotifier = options.mailNotifier;
     this.collab = new CollabHub(new CollabStore(() => this.metadata.connection), {
@@ -140,7 +129,6 @@ export class RemotePiServer {
             agents: this.agents,
             drafts: this.drafts,
             collab: this.collab,
-            voice: this.voice,
             sessionNamer: this.sessionNamer,
             clients: this.clients
           },
@@ -197,14 +185,9 @@ export class RemotePiServer {
         await this.agents.setSessionName(agentId, name);
         this.metadata.saveAgent(this.agents.get(agentId).record);
       };
-      // The namer owns naming whenever it is enabled, so the voice summary never races it for the same name.
       this.sessionNamer?.handleAgentEvent(agentId, event.event, {
         sessionName: record.sessionName,
         setSessionName: applyName
-      });
-      this.voice?.handleAgentEvent(agentId, event.event, {
-        sessionName: record.sessionName,
-        ...(this.sessionNamer ? {} : {setSessionName: applyName})
       });
       this.mailNotifier?.handleAgentEvent(agentId, event.event, {
         sessionName: record.sessionName,
@@ -379,7 +362,6 @@ export class RemotePiServer {
     this.collab.shutdown();
     this.unsubscribeMetadata?.();
     this.unsubscribeMetadata = undefined;
-    this.voice?.close();
     this.sessionNamer?.close();
     await this.mailNotifier?.close();
     await Promise.allSettled([...this.sessionIndexJobs.values(), ...this.agentIndexJobs.values()]);
@@ -625,8 +607,6 @@ export class RemotePiServer {
             agentCount: this.agents.list().length,
             terminalCount: this.terminals.list().length,
             webSocketConnections: this.clients.size,
-            voiceEnabled: !!this.voice,
-            voiceCapabilities: this.voice?.capabilities() ?? {tts: false, stt: false},
             sessionNamingEnabled: !!this.sessionNamer,
             mailNotificationsConfigured: !!this.mailNotifier,
             mailNotificationsEnabled: this.mailNotifier?.getSettings().enabled ?? false
@@ -664,13 +644,11 @@ export class RemotePiServer {
         templates: this.templates,
         metadata: this.metadata,
         workspaces: this.workspaces,
-        voice: this.voice,
         sessionNamer: this.sessionNamer,
         ensureSessionIndex: (workspace: Workspace, cwd: string, force?: boolean) =>
           this.ensureSessionIndex(workspace, cwd, force),
         indexAgentSession: (agentId: string) => this.indexAgentSession(agentId),
-        body: () => readJsonBody(req),
-        binaryBody: () => readBinaryBody(req)
+        body: () => readJsonBody(req)
       };
       if (await handleAgentRoutes(agentContext, req, res, u, parts)) return;
       return json(res, 404, {error: {code: 'NOT_FOUND', message: 'Not found', requestId}});

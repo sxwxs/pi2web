@@ -1,4 +1,4 @@
-{% extends "blog_article.html" %}{% block kicker %}INSTALL & CONFIGURE{% endblock %}{% block deck %}pi2web 通过一个 npm 包提供服务端、Web UI 和 API。这篇指南从环境要求讲到命令行选项、配对码管理、数据目录、可选的邮件与语音功能，以及常见故障排查。{% endblock %}{% block toc %}<a href="#requirements">环境要求</a><a href="#install">安装</a><a href="#first-run">首次启动与配对</a><a href="#options">命令行选项</a><a href="#data">数据与持久化</a><a href="#workspace">Workspace 与 Agent</a><a href="#optional">邮件与语音</a><a href="#remote">远程访问</a><a href="#upgrade">升级与卸载</a><a href="#troubleshooting">故障排查</a>{% endblock %}{% block article %}
+{% extends "blog_article.html" %}{% block kicker %}INSTALL & CONFIGURE{% endblock %}{% block deck %}pi2web 通过一个 npm 包提供服务端、Web UI 和 API。这篇指南从环境要求讲到命令行选项、配对码管理、数据目录、可选的邮件功能与 Sotto 草稿接口，以及常见故障排查。{% endblock %}{% block toc %}<a href="#requirements">环境要求</a><a href="#install">安装</a><a href="#first-run">首次启动与配对</a><a href="#options">命令行选项</a><a href="#data">数据与持久化</a><a href="#workspace">Workspace 与 Agent</a><a href="#optional">邮件与 Sotto</a><a href="#remote">远程访问</a><a href="#upgrade">升级与卸载</a><a href="#troubleshooting">故障排查</a>{% endblock %}{% block article %}
 <h2 id="requirements">1. 环境要求</h2>
 <p>pi2web 是 Pi Coding Agent 的远程外壳：它在你的开发机上启动真实的 <code>@earendil-works/pi-coding-agent</code> SDK，并把能力通过 HTTP/WebSocket 暴露给浏览器和 Android 客户端。因此，运行前需要先确认三件事。</p>
 <ul>
@@ -33,14 +33,10 @@ pi2web --version</code></pre></div>
 <tr><td><code>--maildispatch-api-key-env &lt;name&gt;</code></td><td>关闭</td><td>存放 MailDispatch API key 的环境变量名。</td></tr>
 <tr><td><code>--maildispatch-notify-to &lt;email&gt;</code></td><td>关闭</td><td>接收 Agent 完成通知的邮箱。</td></tr>
 <tr><td><code>--maildispatch-sender-id &lt;id&gt;</code></td><td>可选</td><td>指定 MailDispatch sender；省略时由服务端按 API key 选择。</td></tr>
-<tr><td><code>--voice-base-url &lt;url&gt;</code></td><td>关闭</td><td>OpenAI 兼容语音服务地址；不配置则语音功能完全关闭。</td></tr>
-<tr><td><code>--voice-tts-model</code> / <code>--voice-tts-voice</code></td><td>—</td><td>启用语音时必填的 TTS 模型与音色。</td></tr>
-<tr><td><code>--voice-stt-model &lt;id&gt;</code></td><td>可选</td><td>配置后 Web UI 才显示麦克风按钮。</td></tr>
-<tr><td><code>--voice-summary-base-url</code> / <code>--voice-summary-model</code></td><td>—</td><td>生成播报摘要的 LLM endpoint 与模型。</td></tr>
-<tr><td><code>--voice-request-timeout &lt;ms&gt;</code></td><td><code>120000</code></td><td>语音与摘要请求超时，超时后降级为文本提示。</td></tr>
+<tr><td><code>--create-voice-token</code></td><td>可选</td><td>为 Sotto 创建仅能提交草稿的受限 token。</td></tr>
 <tr><td><code>--version</code> / <code>--help</code></td><td>—</td><td>打印版本或帮助。</td></tr>
 </tbody></table>
-<p>MailDispatch 的三个选项必须同时提供，否则 pi2web 会拒绝启动。语音相关选项只有在配置了 <code>--voice-base-url</code> 时才会被校验。所有 API key 都通过<strong>环境变量名</strong>传入，避免密钥出现在命令行参数和进程列表中。</p>
+<p>MailDispatch 的三个选项必须同时提供，否则 pi2web 会拒绝启动。旧版 <code>--voice-*</code> TTS/STT 选项已移除。所有 API key 都通过<strong>环境变量名</strong>传入，避免密钥出现在命令行参数和进程列表中。</p>
 
 <h2 id="data">5. 数据与持久化</h2>
 <p>服务端元数据保存在 <code>~/.pi/remote-pi/remote-pi.db</code> 这个 SQLite 数据库中（WAL 模式）：</p>
@@ -65,25 +61,17 @@ pi2web --data-dir ~/pi2web-data</code></pre></div>
 </ul>
 <p>Agent 元数据保存在 SQLite 中，服务重启后状态为 <code>unloaded</code>，不会立即创建 Pi <code>AgentSession</code>。只有读取消息、Session、能力或发送命令时才按需启动，并发请求共享同一次启动。“停止 Agent”只释放运行中的 Session，元数据仍然保留。详见 <a href="/zh/blog/web-ui/">Web UI 使用说明</a>。</p>
 
-<h2 id="optional">7. 可选功能：邮件与语音</h2>
+<h2 id="optional">7. 可选功能：邮件与 Sotto</h2>
 <p>两项功能默认关闭，都需要显式配置。</p>
 <div class="article-code"><div><span>Shell · 邮件通知</span><button type="button" data-copy="export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'"><span class="copy-label">复制</span></button></div><pre><code>export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
 pi2web \
   --maildispatch-endpoint https://mail.example.com/api/v1/messages \
   --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
   --maildispatch-notify-to owner@example.com</code></pre></div>
-<div class="article-code"><div><span>Shell · 语音播报</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:5050/v1"><span class="copy-label">复制</span></button></div><pre><code>export SUMMARY_API_KEY=...
-pi2web \
-  --voice-base-url http://127.0.0.1:5050/v1 \
-  --voice-tts-model edge-tts \
-  --voice-tts-voice zh-CN-XiaoxiaoNeural \
-  --voice-tts-format mp3 \
-  --voice-summary-base-url https://llm.example.com/v1 \
-  --voice-summary-model &lt;summary-model-id&gt; \
-  --voice-summary-api-key-env SUMMARY_API_KEY</code></pre></div>
+<p>语音交互请使用 Sotto。运行 <code>pi2web --create-voice-token</code> 创建受限 token，让 Sotto 向当前 Backend 的 <code>POST /api/v1/draft</code> 投递文字；pi2web 不处理音频。</p>
 <div class="guide-link-grid">
   <a href="/zh/blog/mail-notifications/"><strong>邮件通知完整配置 →</strong><span>聚合等待时间、正文开关与失败处理</span></a>
-  <a href="/zh/blog/voice/"><strong>语音摘要与语音输入 →</strong><span>Speaches 与 Edge TTS 两种方案</span></a>
+  <a href="/zh/blog/voice/"><strong>Sotto 语音草稿 →</strong><span>受限 token 与投递流程</span></a>
 </div>
 
 <h2 id="remote">8. 从其他设备访问</h2>

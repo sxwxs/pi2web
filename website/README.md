@@ -39,7 +39,7 @@ make serve      # 构建后在 http://127.0.0.1:8080 预览
 | `/{lang}/blog/install-and-configure/` | **安装与配置指南**（核心配置文档） |
 | `/{lang}/blog/web-ui/` | Web UI 使用说明 |
 | `/{lang}/blog/remote-access/` | 安全远程访问 |
-| `/{lang}/blog/voice/` | 语音摘要与语音输入 |
+| `/{lang}/blog/voice/` | Sotto 语音草稿投递 |
 | `/{lang}/blog/mail-notifications/` | Agent 完成邮件通知 |
 | `/{lang}/blog/android-client/` | Android 客户端 |
 | `/{lang}/faq/` | 常见问题（含 FAQPage 结构化数据） |

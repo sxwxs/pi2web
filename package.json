@@ -21,11 +21,7 @@
     "npm-shrinkwrap.json",
     "web/",
     "packages/protocol/",
-    "packages/edge-tts-server/src/remote_pi_edge_tts/",
-    "packages/edge-tts-server/pyproject.toml",
-    "packages/edge-tts-server/README.md",
     "README.md",
-    "VOICE_SERVER_SETUP.md",
     "LICENSE"
   ],
   "publishConfig": {

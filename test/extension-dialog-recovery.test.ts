@@ -6,7 +6,7 @@ const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
 // Exercise the real event handler and dialog renderer without booting unrelated UI.
 const dialogSource = source.slice(
   source.indexOf('  function extensionRequest('),
-  source.indexOf('  function stopVoiceAudio(')
+  source.indexOf('  const handledDrafts = new Set();')
 );
 const handlerSource = source.slice(
   source.indexOf('  function handleAgentEvent('),

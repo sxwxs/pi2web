@@ -1,4 +1,4 @@
-{% extends "blog_article.html" %}{% block kicker %}INSTALL & CONFIGURE{% endblock %}{% block deck %}pi2web ships the server, the web UI, and the API in a single npm package. This guide covers requirements, CLI options, pairing codes, the data directory, optional email and voice features, and troubleshooting.{% endblock %}{% block toc %}<a href="#requirements">Requirements</a><a href="#install">Installation</a><a href="#first-run">First run and pairing</a><a href="#options">CLI options</a><a href="#data">Data and persistence</a><a href="#workspace">Workspaces and agents</a><a href="#optional">Email and voice</a><a href="#remote">Remote access</a><a href="#upgrade">Upgrade and uninstall</a><a href="#troubleshooting">Troubleshooting</a>{% endblock %}{% block article %}
+{% extends "blog_article.html" %}{% block kicker %}INSTALL & CONFIGURE{% endblock %}{% block deck %}pi2web ships the server, the web UI, and the API in a single npm package. This guide covers requirements, CLI options, pairing codes, the data directory, optional email and Sotto integration, and troubleshooting.{% endblock %}{% block toc %}<a href="#requirements">Requirements</a><a href="#install">Installation</a><a href="#first-run">First run and pairing</a><a href="#options">CLI options</a><a href="#data">Data and persistence</a><a href="#workspace">Workspaces and agents</a><a href="#optional">Email and Sotto</a><a href="#remote">Remote access</a><a href="#upgrade">Upgrade and uninstall</a><a href="#troubleshooting">Troubleshooting</a>{% endblock %}{% block article %}
 <h2 id="requirements">1. Requirements</h2>
 <p>pi2web is a remote shell around Pi Coding Agent: it starts the real <code>@earendil-works/pi-coding-agent</code> SDK on your development machine and exposes it over HTTP/WebSocket to browsers and the Android client. Three things must be in place first.</p>
 <ul>
@@ -33,14 +33,10 @@ pi2web --version</code></pre></div>
 <tr><td><code>--maildispatch-api-key-env &lt;name&gt;</code></td><td>disabled</td><td>Name of the environment variable holding the MailDispatch API key.</td></tr>
 <tr><td><code>--maildispatch-notify-to &lt;email&gt;</code></td><td>disabled</td><td>Recipient for agent completion notifications.</td></tr>
 <tr><td><code>--maildispatch-sender-id &lt;id&gt;</code></td><td>optional</td><td>Explicit MailDispatch sender; otherwise chosen by API key and service config.</td></tr>
-<tr><td><code>--voice-base-url &lt;url&gt;</code></td><td>disabled</td><td>OpenAI-compatible speech endpoint. Without it, voice stays off entirely.</td></tr>
-<tr><td><code>--voice-tts-model</code> / <code>--voice-tts-voice</code></td><td>—</td><td>Required when voice is enabled.</td></tr>
-<tr><td><code>--voice-stt-model &lt;id&gt;</code></td><td>optional</td><td>Enables the microphone button in the web UI.</td></tr>
-<tr><td><code>--voice-summary-base-url</code> / <code>--voice-summary-model</code></td><td>—</td><td>LLM endpoint and model used to write the spoken summary.</td></tr>
-<tr><td><code>--voice-request-timeout &lt;ms&gt;</code></td><td><code>120000</code></td><td>Timeout for speech and summary requests; on timeout the announcement degrades to text.</td></tr>
+<tr><td><code>--create-voice-token</code></td><td>optional</td><td>Create a restricted draft-only token for Sotto.</td></tr>
 <tr><td><code>--version</code> / <code>--help</code></td><td>—</td><td>Print version or help.</td></tr>
 </tbody></table>
-<p>The three MailDispatch options must be provided together or pi2web refuses to start. Voice options are validated only when <code>--voice-base-url</code> is set. Every API key is passed by <strong>environment variable name</strong> so secrets never appear in command lines or process listings.</p>
+<p>The three MailDispatch options must be provided together or pi2web refuses to start. Legacy <code>--voice-*</code> TTS/STT flags have been removed. Every API key is passed by <strong>environment variable name</strong> so secrets never appear in command lines or process listings.</p>
 
 <h2 id="data">5. Data and persistence</h2>
 <p>Server metadata lives in the SQLite database at <code>~/.pi/remote-pi/remote-pi.db</code> (WAL mode):</p>
@@ -65,25 +61,17 @@ pi2web --data-dir ~/pi2web-data</code></pre></div>
 </ul>
 <p>Agent metadata is stored in SQLite. After a restart agents are <code>unloaded</code> and no Pi <code>AgentSession</code> is created until you read messages, sessions, capabilities, or send a command; concurrent requests share a single startup. "Stop agent" releases the running session but keeps the metadata. See the <a href="/en/blog/web-ui/">web UI guide</a> for details.</p>
 
-<h2 id="optional">7. Optional: email and voice</h2>
+<h2 id="optional">7. Optional: email and Sotto</h2>
 <p>Both features are off by default and must be configured explicitly.</p>
 <div class="article-code"><div><span>Shell · email</span><button type="button" data-copy="export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'"><span class="copy-label">Copy</span></button></div><pre><code>export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
 pi2web \
   --maildispatch-endpoint https://mail.example.com/api/v1/messages \
   --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
   --maildispatch-notify-to owner@example.com</code></pre></div>
-<div class="article-code"><div><span>Shell · voice</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:5050/v1"><span class="copy-label">Copy</span></button></div><pre><code>export SUMMARY_API_KEY=...
-pi2web \
-  --voice-base-url http://127.0.0.1:5050/v1 \
-  --voice-tts-model edge-tts \
-  --voice-tts-voice en-US-AriaNeural \
-  --voice-tts-format mp3 \
-  --voice-summary-base-url https://llm.example.com/v1 \
-  --voice-summary-model &lt;summary-model-id&gt; \
-  --voice-summary-api-key-env SUMMARY_API_KEY</code></pre></div>
+<p>Use Sotto for voice interaction. Run <code>pi2web --create-voice-token</code> to create a restricted token, then let Sotto submit text to <code>POST /api/v1/draft</code> on the selected backend. pi2web does not process audio.</p>
 <div class="guide-link-grid">
   <a href="/en/blog/mail-notifications/"><strong>Email notification guide →</strong><span>Aggregation window, body options, failure handling</span></a>
-  <a href="/en/blog/voice/"><strong>Voice guide →</strong><span>Speaches and Edge TTS setups</span></a>
+  <a href="/en/blog/voice/"><strong>Sotto dictation guide →</strong><span>Restricted token and draft delivery</span></a>
 </div>
 
 <h2 id="remote">8. Reaching the service from other devices</h2>

@@ -103,6 +103,11 @@ describe('draft-only voice client API', () => {
     second.ws.close();
   });
 
+  it('does not expose the removed audio transcription API', async () => {
+    const {call, fullToken} = await setup();
+    expect((await call(fullToken, 'POST', '/api/v1/agents/a1/transcribe', {text: 'audio'})).status).toBe(404);
+  });
+
   it('rejects targeted drafts and keeps voice tokens out of Agent controls and WebSockets', async () => {
     const {call, voiceToken, fullToken, base} = await setup();
     for (const payload of [

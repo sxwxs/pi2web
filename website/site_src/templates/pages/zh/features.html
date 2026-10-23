@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="page-hero section-pad"><div class="content-shell narrow reveal"><span class="section-kicker">PRODUCT CAPABILITIES</span><h1>远程操作 Pi Agent<br><span>需要的一切能力。</span></h1><p>pi2web 覆盖会话控制、文件浏览、终端、通知、语音与持久化，并且全部运行在你自己的机器上。</p><div class="page-hero-actions"><a class="button button-primary" href="/zh/blog/install-and-configure/">安装与配置指南</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub ↗</a></div><p class="updated-note">当前版本 0.2.0 · MIT License</p></div></section>
+<section class="page-hero section-pad"><div class="content-shell narrow reveal"><span class="section-kicker">PRODUCT CAPABILITIES</span><h1>远程操作 Pi Agent<br><span>需要的一切能力。</span></h1><p>pi2web 覆盖会话控制、文件浏览、终端、通知与持久化；语音交互交给 Sotto。</p><div class="page-hero-actions"><a class="button button-primary" href="/zh/blog/install-and-configure/">安装与配置指南</a><a class="button button-secondary" href="https://github.com/sxwxs/pi2web" rel="noreferrer">GitHub ↗</a></div><p class="updated-note">当前版本 0.2.0 · MIT License</p></div></section>
 
 <section class="section-pad feature-detail"><div class="content-shell">
   <div class="detail-heading reveal"><span class="detail-number">01</span><div><span class="section-kicker">AGENT CONTROL</span><h2>完整的 Agent 生命周期控制。</h2><p>pi2web 使用真实的 Pi SDK 启动 Agent，因此浏览器里能做的事情，和你在终端里使用 Pi 时基本一致。</p></div></div>
@@ -22,15 +22,15 @@
 </div></section>
 
 <section class="section-pad feature-detail workspace-detail"><div class="content-shell">
-  <div class="detail-heading reveal"><span class="detail-number">04</span><div><span class="section-kicker">NOTIFICATIONS</span><h2>Agent 结束时，用你在意的方式提醒。</h2><p>浏览器通知、语音播报和邮件通知可以按需组合。语音和邮件默认关闭，需要显式配置才启用。</p></div></div>
-  <div class="workspace-detail-grid"><article><span>WEB PUSH</span><h3>浏览器通知</h3><p>授权后对所有已知 Agent 提供完成通知；需要 HTTPS 安全上下文（<code>localhost</code> 例外）。</p></article><article><span>SUMMARY</span><h3>语音摘要</h3><p>摘要 LLM 把最终输出压缩成短播报，按句子流式 TTS，多个 Session 排队播放不重叠。</p></article><article><span>STT</span><h3>语音输入</h3><p>配置 <code>--voice-stt-model</code> 后 Web UI 显示麦克风按钮；识别结果只插入输入框，不会自动发送。</p></article><article><span>MAILDISPATCH</span><h3>邮件通知</h3><p>Agent settle 后通过 MailDispatch 提交事务邮件，返回 <code>202</code> 即进入其持久队列。</p></article><article><span>AGGREGATION</span><h3>聚合等待</h3><p>首个任务完成后可等待若干秒，把期间完成的其他任务合并进同一封邮件。</p></article><article><span>CONTENT</span><h3>正文可控</h3><p>可选择是否包含 Agent 最终回复、Session 名称与工作路径；设置保存在服务端数据库。</p></article></div>
+  <div class="detail-heading reveal"><span class="detail-number">04</span><div><span class="section-kicker">NOTIFICATIONS</span><h2>Agent 结束时，用你在意的方式提醒。</h2><p>浏览器通知和邮件通知可以按需组合；语音交互交给 Sotto。邮件通知需显式配置。</p></div></div>
+  <div class="workspace-detail-grid"><article><span>WEB PUSH</span><h3>浏览器通知</h3><p>授权后对所有已知 Agent 提供完成通知；需要 HTTPS 安全上下文（<code>localhost</code> 例外）。</p></article><article><span>SOTTO</span><h3>语音交互</h3><p>Sotto 负责录音、识别与播报，pi2web 接收其文字草稿，不处理音频。</p></article><article><span>MAILDISPATCH</span><h3>邮件通知</h3><p>Agent settle 后通过 MailDispatch 提交事务邮件，返回 <code>202</code> 即进入其持久队列。</p></article><article><span>AGGREGATION</span><h3>聚合等待</h3><p>首个任务完成后可等待若干秒，把期间完成的其他任务合并进同一封邮件。</p></article><article><span>CONTENT</span><h3>正文可控</h3><p>可选择是否包含 Agent 最终回复、Session 名称与工作路径；设置保存在服务端数据库。</p></article></div>
 </div></section>
 
 <section class="section-pad feature-detail"><div class="content-shell">
   <div class="detail-heading reveal"><span class="detail-number">05</span><div><span class="section-kicker">API & CLIENTS</span><h2>Web UI 之外，还有 API 和 Android 客户端。</h2><p>除静态资源、<code>/health</code> 和登录接口外，所有请求都需要 <code>Authorization: Bearer &lt;token&gt;</code>，响应统一为 <code>{ data }</code> 或 <code>{ error }</code>。</p></div></div>
   <div class="protocol-layout reveal">
     <div class="protocol-list"><article><span class="protocol-status stable">REST</span><code>/api/v1/workspaces · /agents · /sessions</code><h3>资源管理</h3><p>创建与查询 Workspace、Agent 与 Session，浏览目录、读取文件与 stat 信息。</p></article><article><span class="protocol-status stable">REST</span><code>/api/v1/agents/:id/prompt · steer · abort</code><h3>Agent 命令</h3><p>发送指令、切换模型与 Thinking level、命名 Session、Fork、Compact、响应扩展 UI。</p></article><article><span class="protocol-status stable">WS</span><code>/api/v1/ws</code><h3>事件流</h3><p>支持 sequence、replay、snapshot、<code>fromNow</code> 与 Agent command 下发。</p></article><article><span class="protocol-status stable">WS</span><code>/api/v1/terminals/:id/ws</code><h3>终端通道</h3><p>输入、窗口 resize、输出快照与退出事件。</p></article></div>
-    <aside class="capability-panel"><h3>Android 客户端</h3><ul class="check-list"><li>Kotlin + Jetpack Compose 原生应用</li><li>与 Web UI 共用同一套 API 与配对码</li><li>Session、Agent 与流式对话</li><li>构建说明见仓库 <code>android/README.md</code></li><li>流式 PCM 播放与录音尚未接入</li></ul><p class="panel-note">完整能力列表见仓库中的 <code>ANDROID_APP_FEATURES.md</code>。</p></aside>
+    <aside class="capability-panel"><h3>Android 客户端</h3><ul class="check-list"><li>Kotlin + Jetpack Compose 原生应用</li><li>与 Web UI 共用同一套 API 与配对码</li><li>Session、Agent 与流式对话</li><li>构建说明见仓库 <code>android/README.md</code></li><li>语音交互由 Sotto 负责</li></ul><p class="panel-note">完整能力列表见仓库中的 <code>ANDROID_APP_FEATURES.md</code>。</p></aside>
   </div>
 </div></section>
 

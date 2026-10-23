@@ -19,11 +19,11 @@ PAGES = {
         "modified": "2026-07-25",
         "zh": {
             "title": "pi2web — 用浏览器和 Android 手机远程操作 Pi Coding Agent",
-            "description": "pi2web 在开发机上运行 Pi Coding Agent，并通过配对码保护的 HTTP/WebSocket 服务提供 Web UI、Android 客户端、终端、语音播报和邮件通知。npm install -g pi2web 即可启动。",
+            "description": "pi2web 在开发机上运行 Pi Coding Agent，并通过配对码保护的 HTTP/WebSocket 服务提供 Web UI、Android 客户端、终端、Sotto 语音交互和邮件通知。npm install -g pi2web 即可启动。",
         },
         "en": {
             "title": "pi2web — Run Pi Coding Agent remotely from your browser or Android phone",
-            "description": "pi2web runs Pi Coding Agent on your dev machine and exposes a pairing-code protected HTTP/WebSocket service with a web UI, Android client, terminals, voice summaries, and email notifications.",
+            "description": "pi2web runs Pi Coding Agent on your dev machine and exposes a pairing-code protected HTTP/WebSocket service with a web UI, Android client, terminals, Sotto text drafts, and email notifications.",
         },
     },
     "features": {
@@ -31,11 +31,11 @@ PAGES = {
         "modified": "2026-07-25",
         "zh": {
             "title": "产品能力 — pi2web 远程 Pi Agent 服务器",
-            "description": "了解 pi2web 的 Web UI、Terminal、Workspace 文件浏览、Session 管理、配对码鉴权与限流、语音摘要、邮件通知、SQLite 持久化和 Android 原生客户端。",
+            "description": "了解 pi2web 的 Web UI、Terminal、Workspace 文件浏览、Session 管理、配对码鉴权与限流、Sotto 草稿、邮件通知、SQLite 持久化和 Android 原生客户端。",
         },
         "en": {
             "title": "Features — pi2web remote Pi Agent server",
-            "description": "Explore the pi2web web UI, terminals, workspace file browsing, session management, pairing-code auth, voice summaries, email notifications, SQLite persistence, and Android client.",
+            "description": "Explore the pi2web web UI, terminals, workspace file browsing, session management, pairing-code auth, Sotto text drafts, email notifications, SQLite persistence, and Android client.",
         },
     },
     "blog": {
@@ -43,11 +43,11 @@ PAGES = {
         "modified": "2026-07-25",
         "zh": {
             "title": "pi2web 使用指南与文档",
-            "description": "pi2web 中文指南：安装配置、Web UI 使用、安全远程访问、语音摘要与语音输入、Agent 完成邮件通知，以及 Android 客户端构建。",
+            "description": "pi2web 中文指南：安装配置、Web UI 使用、安全远程访问、Sotto 语音草稿、Agent 完成邮件通知，以及 Android 客户端构建。",
         },
         "en": {
             "title": "pi2web guides and documentation",
-            "description": "Practical pi2web guides: installation and configuration, using the web UI, secure remote access, voice summaries and speech input, email notifications, and the Android client.",
+            "description": "Practical pi2web guides: installation and configuration, using the web UI, secure remote access, Sotto dictation, email notifications, and the Android client.",
         },
     },
     "blog_setup": {
@@ -56,11 +56,11 @@ PAGES = {
         "published": "2026-07-25",
         "zh": {
             "title": "pi2web 安装与配置指南",
-            "description": "从 npm install -g pi2web 开始，完整配置 pi2web：命令行选项、配对码、数据目录、Workspace、Terminal、邮件与语音开关、反向代理与故障排查。",
+            "description": "从 npm install -g pi2web 开始，完整配置 pi2web：命令行选项、配对码、数据目录、Workspace、Terminal、邮件和 Sotto 草稿接口、反向代理与故障排查。",
         },
         "en": {
             "title": "Install and configure pi2web",
-            "description": "Configure pi2web end to end: npm installation, CLI options, pairing code, data directory, workspaces, terminals, email and voice switches, reverse proxy, and troubleshooting.",
+            "description": "Configure pi2web end to end: npm installation, CLI options, pairing code, data directory, workspaces, terminals, email and Sotto drafts, reverse proxy, and troubleshooting.",
         },
     },
     "blog_webui": {
@@ -94,12 +94,12 @@ PAGES = {
         "article": True,
         "published": "2026-07-25",
         "zh": {
-            "title": "配置 pi2web 的语音摘要与语音输入",
-            "description": "为 pi2web 配置摘要 LLM 与 OpenAI 兼容语音服务：Speaches 全功能方案、Edge TTS 轻量方案、命令行参数、播报队列与常见问题。",
+            "title": "Sotto 与 pi2web 语音草稿",
+            "description": "使用 Sotto 进行语音交互，向 pi2web 投递文字草稿；配置受限 token 并了解会话边界。",
         },
         "en": {
-            "title": "Configure voice summaries and speech input in pi2web",
-            "description": "Connect a summary LLM and an OpenAI-compatible speech service to pi2web: the full Speaches setup, the lightweight Edge TTS server, CLI flags, playback queueing, and troubleshooting.",
+            "title": "Sotto dictation with pi2web",
+            "description": "Use Sotto for voice interaction and submit text drafts to pi2web with a restricted token.",
         },
     },
     "blog_mail": {
@@ -164,7 +164,7 @@ FAQ_ITEMS = {
         ("pi2web 会提供模型或额度吗？", "不会。pi2web 只是 Pi Coding Agent 的远程外壳，模型配置、Provider 认证和额度全部复用本机 ~/.pi/agent 中的 Pi 设置。"),
         ("数据保存在什么地方？", "服务端元数据保存在 ~/.pi/remote-pi/remote-pi.db（SQLite），完整对话由 Pi 的 SessionManager 以 JSONL 保存在 ~/.pi/agent/sessions/ 下。pi2web 不会把会话上传到任何第三方。"),
         ("支持哪些平台？", "服务端支持 Linux、macOS 和 Windows 上的 Node.js 20.10+。客户端支持现代浏览器，以及仓库中的 Kotlin + Jetpack Compose Android 应用。"),
-        ("语音播报和邮件通知是必须的吗？", "不是。两者默认关闭：只有配置 --voice-base-url 才启用语音，只有同时配置 MailDispatch endpoint、API key 环境变量和收件人才启用邮件通知。"),
+        ("Sotto 语音交互和邮件通知是必须的吗？", "不是。语音交互由 Sotto 处理；邮件通知需要同时配置 MailDispatch endpoint、API key 环境变量和收件人。"),
     ],
     "en": [
         ("What is pi2web?", "pi2web is a server that runs Pi Coding Agent on your development machine and exposes it through a pairing-code protected HTTP/WebSocket API, so a browser or the Android app can drive the same coding session."),
@@ -174,7 +174,7 @@ FAQ_ITEMS = {
         ("Does pi2web provide models or credits?", "No. pi2web is only a remote shell around Pi Coding Agent; model configuration, provider authentication, and quota all come from your local ~/.pi/agent Pi settings."),
         ("Where is my data stored?", "Server metadata lives in ~/.pi/remote-pi/remote-pi.db (SQLite) and full conversations are stored as JSONL by the Pi SessionManager under ~/.pi/agent/sessions/. pi2web never uploads sessions to a third party."),
         ("Which platforms are supported?", "The server runs on Node.js 20.10+ on Linux, macOS, and Windows. Clients include modern browsers and the Kotlin + Jetpack Compose Android app in the repository."),
-        ("Are voice and email notifications required?", "No. Both are off by default: voice is enabled only when --voice-base-url is set, and email requires the MailDispatch endpoint, API key environment variable, and recipient to be configured together."),
+        ("Are Sotto and email notifications required?", "No. Sotto handles voice interaction; email requires the MailDispatch endpoint, API key environment variable, and recipient to be configured together."),
     ],
 }
 

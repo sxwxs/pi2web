@@ -59,23 +59,6 @@
     messagePageStart: 0,
     messageTotal: 0,
     messagePageSize: 25,
-    voiceEnabled: false,
-    voiceSttEnabled: false,
-    voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true',
-    voiceAudio: {
-      context: null,
-      nextTime: 0,
-      playbackId: null,
-      backendId: null,
-      sources: new Set(),
-      decodeChain: Promise.resolve(),
-      generation: 0
-    },
-    mediaRecorder: null,
-    mediaChunks: [],
-    mediaStream: null,
-    mediaTimer: null,
-    mediaAgentId: null,
     mailBackendId: null,
     mailRequest: 0,
     mailNotificationsAvailable: false,
@@ -235,25 +218,7 @@
     $('workspaceHeading').textContent = 'Workspace';
   }
 
-  function cancelVoiceRecording(backendId) {
-    if (!state.mediaAgentId) return;
-    if (backendId && splitResourceKey(state.mediaAgentId).backendId !== backendId) return;
-    clearTimeout(state.mediaTimer);
-    if (state.mediaRecorder) {
-      state.mediaRecorder.onstop = null;
-      if (state.mediaRecorder.state === 'recording') state.mediaRecorder.stop();
-    }
-    state.mediaStream?.getTracks().forEach(track => track.stop());
-    state.mediaRecorder = null;
-    state.mediaStream = null;
-    state.mediaChunks = [];
-    state.mediaAgentId = null;
-    $('voiceInput').textContent = '🎙';
-    $('voiceInput').classList.remove('recording');
-  }
-
   function clearAgentSelection(backendId) {
-    cancelVoiceRecording(backendId);
     if (backendId && state.agent?.backendId !== backendId) return;
     state.agent = null;
     localStorage.removeItem('rpAgentId');
@@ -285,7 +250,6 @@
 
   function deactivateBackendState(backend, status, error = '') {
     closeBackendSocket(backend);
-    if (state.voiceAudio.backendId === backend.id) stopVoiceAudio();
     backendRegistry.deactivate(backend, status, error);
     clearWorkspaceSelection(backend.id);
     clearAgentSelection(backend.id);
@@ -295,7 +259,6 @@
   async function deactivateBackend(backend, {status = 'off', error = ''} = {}) {
     deactivateBackendState(backend, status, error);
     syncSessionLists();
-    updateVoiceAvailability();
     updateHeaderStatus();
     renderBackendList();
     renderBackendFilter();
@@ -310,7 +273,6 @@
     clearAgentSelection();
     clearTerminalSelection();
     syncSessionLists();
-    updateVoiceAvailability();
     updateHeaderStatus();
     renderBackendList();
     renderBackendFilter();
@@ -323,15 +285,6 @@
     }
   }
 
-  function updateVoiceAvailability() {
-    const backends = connectedBackends();
-    state.voiceEnabled = backends.some(backend => backend.voiceEnabled);
-    state.voiceSttEnabled = backends.some(backend => backend.voiceSttEnabled);
-    $('voicePlayback').hidden = !state.voiceEnabled;
-    $('voiceInput').hidden = !state.voiceSttEnabled;
-    if (!state.voiceEnabled) stopVoiceAudio();
-    updateVoiceButton();
-  }
   async function connectBackend(entry, {confirmSave = true, pair = true} = {}) {
     const base =
       String(entry.base || '')
@@ -371,9 +324,7 @@
       statusInfo,
       authRequired,
       serverInfo: `v${statusInfo.version} · Pi ${statusInfo.piVersion}`,
-      reconnectAttempt: 0,
-      voiceEnabled: Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled),
-      voiceSttEnabled: Boolean(statusInfo.voiceCapabilities?.stt ?? statusInfo.voiceEnabled)
+      reconnectAttempt: 0
     });
 
     try {
@@ -395,7 +346,6 @@
     }
     persistConnections();
     connectSocket(backend);
-    updateVoiceAvailability();
     updateHeaderStatus();
     renderBackendList();
     renderBackendFilter();
@@ -555,7 +505,6 @@
             localStorage.removeItem('rpBackendFilter');
           }
           syncSessionLists();
-          updateVoiceAvailability();
           updateHeaderStatus();
           renderBackendFilter();
           await renderWorkspaces();
@@ -1589,7 +1538,7 @@
   // The transcript only shows what a human reads linearly: prompts, answers, thinking, dialogs and errors.
   // Everything else (tool calls, bash output, retries, extension chatter) is folded into one collapsed
   // activity group per stretch of activity, whose summary tracks the most recent item while it streams.
-  const TRANSCRIPT_KINDS = new Set(['user', 'assistant', 'thinking', 'dialog', 'voice', 'error']);
+  const TRANSCRIPT_KINDS = new Set(['user', 'assistant', 'thinking', 'dialog', 'error']);
   function activityGroup(target) {
     const last = target.lastElementChild;
     if (last?.classList?.contains('activity-group')) return last;
@@ -2057,198 +2006,6 @@
     }
     for (const request of requests) extensionRequest(agentId, request);
   }
-  function stopVoiceAudio() {
-    state.voiceAudio.generation++;
-    for (const source of state.voiceAudio.sources) {
-      try {
-        source.stop();
-      } catch {}
-    }
-    state.voiceAudio.sources.clear();
-    state.voiceAudio.nextTime = 0;
-    state.voiceAudio.playbackId = null;
-    state.voiceAudio.backendId = null;
-  }
-  async function ensureAudioContext() {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) throw Error('当前浏览器不支持音频播放');
-    state.voiceAudio.context ??= new AudioContext();
-    if (state.voiceAudio.context.state === 'suspended') await state.voiceAudio.context.resume();
-    return state.voiceAudio.context;
-  }
-  function playVoiceChunk(event, backendId) {
-    if (!state.voicePlaybackEnabled || !event.audio) return;
-    const generation = state.voiceAudio.generation;
-    state.voiceAudio.decodeChain = state.voiceAudio.decodeChain
-      .then(async () => {
-        const context = await ensureAudioContext();
-        if (generation !== state.voiceAudio.generation) return;
-        state.voiceAudio.playbackId = event.playbackId;
-        state.voiceAudio.backendId = backendId;
-        const raw = atob(event.audio),
-          bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
-        let buffer;
-        if (event.encoding === 'mp3') buffer = await context.decodeAudioData(bytes.buffer.slice(0));
-        else {
-          const samples = new Float32Array(Math.floor(bytes.length / 2));
-          for (let i = 0; i < samples.length; i++) {
-            let value = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
-            if (value & 0x8000) value -= 0x10000;
-            samples[i] = value / 32768;
-          }
-          const rate = Number(event.sampleRate || 24000);
-          buffer = context.createBuffer(1, samples.length, rate);
-          buffer.copyToChannel(samples, 0);
-        }
-        if (generation !== state.voiceAudio.generation || state.voiceAudio.playbackId !== event.playbackId)
-          return;
-        const source = context.createBufferSource();
-        source.buffer = buffer;
-        source.connect(context.destination);
-        const start = Math.max(context.currentTime + 0.03, state.voiceAudio.nextTime || 0);
-        source.start(start);
-        state.voiceAudio.nextTime = start + buffer.duration;
-        state.voiceAudio.sources.add(source);
-        source.onended = () => state.voiceAudio.sources.delete(source);
-      })
-      .catch(error => toast(`语音播放失败：${error.message}`));
-  }
-  function handleVoiceEvent(message) {
-    const ev = message.event || {},
-      selected = state.selectedKind === 'agent' && state.agent?.agentId === message.agentId,
-      key = `voice-${resourceKey(message.backendId, ev.playbackId || message.agentId)}`;
-    if (ev.type === 'voice_start') {
-      if (state.voicePlaybackEnabled) void ensureAudioContext().catch(() => {});
-      if (selected) {
-        const c = ensureStream(key, '语音摘要', 'voice');
-        c.content = '';
-        renderCardBody(c.body, '正在生成语音摘要…', false);
-      }
-    } else if (ev.type === 'voice_summary_delta') {
-      if (selected) {
-        const c = ensureStream(key, '语音摘要', 'voice');
-        c.content += ev.text || '';
-        renderCardBody(c.body, c.content, false);
-        c.summaryText.textContent = '语音摘要';
-      }
-    } else if (ev.type === 'voice_audio_chunk')
-      playVoiceChunk({...ev, playbackId: resourceKey(message.backendId, ev.playbackId)}, message.backendId);
-    else if (ev.type === 'voice_cancelled') {
-      stopVoiceAudio();
-    } else if (ev.type === 'voice_error') {
-      if (selected) addCard('语音服务', ev.message || '语音生成失败', 'error', true);
-    } else if (ev.type === 'voice_end') {
-      if (selected) state.streams.delete(key);
-    }
-  }
-  function updateVoiceButton() {
-    const button = $('voicePlayback');
-    button.textContent = state.voicePlaybackEnabled ? '语音已启用' : '启用语音';
-    button.title = state.voicePlaybackEnabled ? '点击关闭 Agent 语音摘要' : '点击启用 Agent 语音摘要播放';
-  }
-  async function toggleVoicePlayback() {
-    state.voicePlaybackEnabled = !state.voicePlaybackEnabled;
-    localStorage.rpVoicePlayback = String(state.voicePlaybackEnabled);
-    updateVoiceButton();
-    if (state.voicePlaybackEnabled) {
-      try {
-        await ensureAudioContext();
-        toast('Agent 完成后将播放语音摘要');
-      } catch (error) {
-        state.voicePlaybackEnabled = false;
-        localStorage.rpVoicePlayback = 'false';
-        updateVoiceButton();
-        toast(error.message);
-      }
-    } else stopVoiceAudio();
-  }
-  async function toggleVoiceInput() {
-    if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
-    if (!state.agent) return toast('请先选择 Agent');
-    if (state.mediaRecorder && state.mediaRecorder.state === 'recording') {
-      state.mediaRecorder.stop();
-      return;
-    }
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder)
-      return toast('当前浏览器不支持麦克风录音');
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({audio: true}),
-        preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find(type =>
-          MediaRecorder.isTypeSupported(type)
-        );
-      state.mediaStream = stream;
-      state.mediaChunks = [];
-      state.mediaRecorder = new MediaRecorder(stream, preferred ? {mimeType: preferred} : undefined);
-      state.mediaRecorder.ondataavailable = event => {
-        if (event.data.size) state.mediaChunks.push(event.data);
-      };
-      state.mediaAgentId = state.agent.agentId;
-      state.mediaRecorder.onstop = () => void transcribeVoice();
-      state.mediaRecorder.start(250);
-      $('voiceInput').textContent = '■';
-      $('voiceInput').title = '停止并识别';
-      $('voiceInput').classList.add('recording');
-      state.mediaTimer = setTimeout(
-        () => state.mediaRecorder?.state === 'recording' && state.mediaRecorder.stop(),
-        60000
-      );
-    } catch (error) {
-      toast(`无法录音：${error.message}`);
-    }
-  }
-  async function transcribeVoice() {
-    clearTimeout(state.mediaTimer);
-    const recorder = state.mediaRecorder,
-      mime = recorder?.mimeType || 'audio/webm',
-      blob = new Blob(state.mediaChunks, {type: mime}),
-      agentId = state.mediaAgentId;
-    state.mediaStream?.getTracks().forEach(track => track.stop());
-    state.mediaRecorder = null;
-    state.mediaStream = null;
-    state.mediaChunks = [];
-    state.mediaAgentId = null;
-    $('voiceInput').textContent = '…';
-    $('voiceInput').classList.remove('recording');
-    if (!agentId) {
-      $('voiceInput').textContent = '🎙';
-      return;
-    }
-    const {backendId, remoteId} = splitResourceKey(agentId),
-      transcribeBackend = backendOf(backendId);
-    if (!transcribeBackend) {
-      $('voiceInput').textContent = '🎙';
-      return toast('该 Session 的 backend 已断开');
-    }
-    try {
-      const response = await fetch(
-        transcribeBackend.base + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${transcribeBackend.token}`,
-            'Content-Type': mime,
-            'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'
-          },
-          body: blob
-        }
-      );
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw Error(body.error?.message || `HTTP ${response.status}`);
-      const text = body.data?.text?.trim();
-      if (text) {
-        const input = $('input'),
-          prefix = input.value && !/\s$/.test(input.value) ? ' ' : '';
-        input.value += prefix + text;
-        input.focus();
-        toast('语音已转换为文字');
-      } else toast('没有识别到语音');
-    } catch (error) {
-      toast(`语音识别失败：${error.message}`);
-    } finally {
-      $('voiceInput').textContent = '🎙';
-      $('voiceInput').title = '开始语音输入';
-    }
-  }
   const handledDrafts = new Set();
   function handleDraftEvent(message) {
     const draft = message.draft,
@@ -2285,10 +2042,6 @@
       return;
     }
     if (message.type === 'subscribed_drafts') return;
-    if (message.type === 'voice_event') {
-      handleVoiceEvent(message);
-      return;
-    }
     if (message.type === 'subscribed') {
       const key = `rpSeq:${message.agentId}`,
         saved = Number(localStorage[key] || 0),
@@ -3476,8 +3229,6 @@
   $('keyboardDisconnect').onclick = () =>
     sessionKeyboard.disconnect().catch(error => toast(`键盘断开失败：${error.message}`));
   $('notifications').onclick = enableNotifications;
-  $('voicePlayback').onclick = toggleVoicePlayback;
-  $('voiceInput').onclick = toggleVoiceInput;
   $('disconnectAll').onclick = () => void disconnectAll();
   $('backendFilter').onchange = () => {
     state.backendFilter = $('backendFilter').value;
@@ -3790,8 +3541,6 @@
   window.addEventListener('beforeunload', () => {
     for (const backend of state.backends) closeBackendSocket(backend);
     state.terminalWs?.close();
-    cancelVoiceRecording();
-    stopVoiceAudio();
   });
   window.addEventListener('focus', updateNotificationButton);
   setMobileView('home', {replace: true});

@@ -6,12 +6,10 @@ import {
   deadline,
   endpoint,
   prepareSummaryInput
-} from './voice.js';
+} from './text-utils.js';
 
 /**
- * Automatic session naming. Deliberately independent from the voice announcer: naming only needs a
- * small text completion, so it stays on by default even when TTS is disabled. When voice IS enabled
- * the announcer just speaks the summary; the name still comes from here.
+ * Automatic session naming using a small text completion, independent of external voice services.
  */
 export type SessionNamerConfig = {
   baseUrl?: string;

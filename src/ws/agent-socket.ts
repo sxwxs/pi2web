@@ -3,13 +3,11 @@ import type {AgentManager} from '../agents.js';
 import type {CollabHub} from '../collab/hub.js';
 import type {DraftHub} from '../drafts.js';
 import type {SessionNamer} from '../session-namer.js';
-import type {VoiceManager} from '../voice.js';
 
 export type AgentSocketContext = {
   agents: AgentManager;
   drafts: DraftHub;
   collab: CollabHub;
-  voice?: VoiceManager;
   sessionNamer?: SessionNamer;
   /** Every open socket, so the server can count and close them. */
   clients: Set<WebSocket>;
@@ -67,9 +65,6 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
     }
     if (!deltaTimer) deltaTimer = setTimeout(flushDelta, 40);
   };
-  const unsubscribeVoice = ctx.voice?.subscribe((agentId, event) => {
-    if (subscriptions.has('*') || subscriptions.has(agentId)) send({type: 'voice_event', agentId, event});
-  });
   const unsubscribeNamer = ctx.sessionNamer?.subscribe((agentId, event) => {
     if (subscriptions.has('*') || subscriptions.has(agentId))
       send({type: 'session_namer_event', agentId, event});
@@ -78,7 +73,6 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
     if (deltaTimer) clearTimeout(deltaTimer);
     pendingDelta = undefined;
     ctx.clients.delete(ws);
-    unsubscribeVoice?.();
     unsubscribeNamer?.();
     for (const unsubscribe of subscriptions.values()) unsubscribe();
   });
@@ -202,7 +196,6 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
         }
         if (['prompt', 'steer', 'follow-up', 'abort'].includes(m.type)) {
           if (m.type !== 'abort') {
-            ctx.voice?.recordUserPrompt(m.agentId, String(m.message ?? ''));
             ctx.sessionNamer?.recordUserPrompt(m.agentId, String(m.message ?? ''));
           }
           const disposition = await ctx.agents.command(m.agentId, m.type, m.message);

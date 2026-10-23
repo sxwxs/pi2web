@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>pi2web 安装与配置指南</title>
-  <meta name="description" content="从 npm install -g pi2web 开始，完整配置 pi2web：命令行选项、配对码、数据目录、Workspace、Terminal、邮件与语音开关、反向代理与故障排查。">
+  <meta name="description" content="从 npm install -g pi2web 开始，完整配置 pi2web：命令行选项、配对码、数据目录、Workspace、Terminal、邮件和 Sotto 草稿接口、反向代理与故障排查。">
   <meta name="theme-color" content="#f6f9fc">
   <meta name="author" content="sxwxs">
 <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
@@ -15,7 +15,7 @@
   <meta property="og:type" content="article">
   <meta property="og:site_name" content="pi2web">
   <meta property="og:title" content="pi2web 安装与配置指南">
-  <meta property="og:description" content="从 npm install -g pi2web 开始，完整配置 pi2web：命令行选项、配对码、数据目录、Workspace、Terminal、邮件与语音开关、反向代理与故障排查。">
+  <meta property="og:description" content="从 npm install -g pi2web 开始，完整配置 pi2web：命令行选项、配对码、数据目录、Workspace、Terminal、邮件和 Sotto 草稿接口、反向代理与故障排查。">
   <meta property="og:url" content="https://pi2web.es2q.com/zh/blog/install-and-configure/">
   <meta property="og:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
   <meta property="og:locale" content="zh_CN">
@@ -24,11 +24,11 @@
   <meta property="article:modified_time" content="2026-07-25">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="pi2web 安装与配置指南">
-  <meta name="twitter:description" content="从 npm install -g pi2web 开始，完整配置 pi2web：命令行选项、配对码、数据目录、Workspace、Terminal、邮件与语音开关、反向代理与故障排查。">
+  <meta name="twitter:description" content="从 npm install -g pi2web 开始，完整配置 pi2web：命令行选项、配对码、数据目录、Workspace、Terminal、邮件和 Sotto 草稿接口、反向代理与故障排查。">
   <meta name="twitter:image" content="https://pi2web.es2q.com/assets/icons/og-cover.svg">
   <link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/assets/icons/favicon.svg">
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"pi2web \u5b89\u88c5\u4e0e\u914d\u7f6e\u6307\u5357","description":"\u4ece npm install -g pi2web \u5f00\u59cb\uff0c\u5b8c\u6574\u914d\u7f6e pi2web\uff1a\u547d\u4ee4\u884c\u9009\u9879\u3001\u914d\u5bf9\u7801\u3001\u6570\u636e\u76ee\u5f55\u3001Workspace\u3001Terminal\u3001\u90ae\u4ef6\u4e0e\u8bed\u97f3\u5f00\u5173\u3001\u53cd\u5411\u4ee3\u7406\u4e0e\u6545\u969c\u6392\u67e5\u3002","url":"https://pi2web.es2q.com/zh/blog/install-and-configure/","inLanguage":"zh-CN","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"},"datePublished":"2026-07-25","dateModified":"2026-07-25","author":{"@type":"Person","name":"sxwxs"},"publisher":{"@type":"Organization","name":"pi2web"},"about":{"@type":"SoftwareApplication","name":"pi2web","applicationCategory":"DeveloperApplication"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"pi2web \u5b89\u88c5\u4e0e\u914d\u7f6e\u6307\u5357","description":"\u4ece npm install -g pi2web \u5f00\u59cb\uff0c\u5b8c\u6574\u914d\u7f6e pi2web\uff1a\u547d\u4ee4\u884c\u9009\u9879\u3001\u914d\u5bf9\u7801\u3001\u6570\u636e\u76ee\u5f55\u3001Workspace\u3001Terminal\u3001\u90ae\u4ef6\u548c Sotto \u8349\u7a3f\u63a5\u53e3\u3001\u53cd\u5411\u4ee3\u7406\u4e0e\u6545\u969c\u6392\u67e5\u3002","url":"https://pi2web.es2q.com/zh/blog/install-and-configure/","inLanguage":"zh-CN","isPartOf":{"@type":"WebSite","name":"pi2web","url":"https://pi2web.es2q.com/"},"datePublished":"2026-07-25","dateModified":"2026-07-25","author":{"@type":"Person","name":"sxwxs"},"publisher":{"@type":"Organization","name":"pi2web"},"about":{"@type":"SoftwareApplication","name":"pi2web","applicationCategory":"DeveloperApplication"}}</script>
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"pi2web","item":"https://pi2web.es2q.com/zh/"},{"@type":"ListItem","position":2,"name":"\u4f7f\u7528\u6307\u5357","item":"https://pi2web.es2q.com/zh/blog/"},{"@type":"ListItem","position":3,"name":"pi2web \u5b89\u88c5\u4e0e\u914d\u7f6e\u6307\u5357","item":"https://pi2web.es2q.com/zh/blog/install-and-configure/"}]}</script>
   <link rel="stylesheet" href="/assets/css/site.css">
   <script src="/assets/js/site.js" defer></script>
@@ -57,8 +57,8 @@
 
   <main id="main">
 <article class="article-page">
-<header class="article-hero section-pad"><div class="content-shell article-shell reveal"><nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/zh/">pi2web</a><span>/</span><a href="/zh/blog/">使用指南</a></nav><span class="section-kicker">INSTALL & CONFIGURE</span><h1>pi2web 安装与配置指南</h1><p class="article-deck">pi2web 通过一个 npm 包提供服务端、Web UI 和 API。这篇指南从环境要求讲到命令行选项、配对码管理、数据目录、可选的邮件与语音功能，以及常见故障排查。</p><div class="article-meta"><time datetime="2026-07-25">2026-07-25</time><span>pi2web</span><span>实践指南</span></div></div></header>
-<div class="content-shell article-layout"><aside class="article-toc"><strong>本文目录</strong><a href="#requirements">环境要求</a><a href="#install">安装</a><a href="#first-run">首次启动与配对</a><a href="#options">命令行选项</a><a href="#data">数据与持久化</a><a href="#workspace">Workspace 与 Agent</a><a href="#optional">邮件与语音</a><a href="#remote">远程访问</a><a href="#upgrade">升级与卸载</a><a href="#troubleshooting">故障排查</a></aside><div class="article-body"><h2 id="requirements">1. 环境要求</h2>
+<header class="article-hero section-pad"><div class="content-shell article-shell reveal"><nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/zh/">pi2web</a><span>/</span><a href="/zh/blog/">使用指南</a></nav><span class="section-kicker">INSTALL & CONFIGURE</span><h1>pi2web 安装与配置指南</h1><p class="article-deck">pi2web 通过一个 npm 包提供服务端、Web UI 和 API。这篇指南从环境要求讲到命令行选项、配对码管理、数据目录、可选的邮件功能与 Sotto 草稿接口，以及常见故障排查。</p><div class="article-meta"><time datetime="2026-07-25">2026-07-25</time><span>pi2web</span><span>实践指南</span></div></div></header>
+<div class="content-shell article-layout"><aside class="article-toc"><strong>本文目录</strong><a href="#requirements">环境要求</a><a href="#install">安装</a><a href="#first-run">首次启动与配对</a><a href="#options">命令行选项</a><a href="#data">数据与持久化</a><a href="#workspace">Workspace 与 Agent</a><a href="#optional">邮件与 Sotto</a><a href="#remote">远程访问</a><a href="#upgrade">升级与卸载</a><a href="#troubleshooting">故障排查</a></aside><div class="article-body"><h2 id="requirements">1. 环境要求</h2>
 <p>pi2web 是 Pi Coding Agent 的远程外壳：它在你的开发机上启动真实的 <code>@earendil-works/pi-coding-agent</code> SDK，并把能力通过 HTTP/WebSocket 暴露给浏览器和 Android 客户端。因此，运行前需要先确认三件事。</p>
 <ul>
 <li><strong>Node.js 20.10 或更高版本</strong>，用 <code>node -v</code> 检查。</li>
@@ -92,14 +92,10 @@ pi2web --version</code></pre></div>
 <tr><td><code>--maildispatch-api-key-env &lt;name&gt;</code></td><td>关闭</td><td>存放 MailDispatch API key 的环境变量名。</td></tr>
 <tr><td><code>--maildispatch-notify-to &lt;email&gt;</code></td><td>关闭</td><td>接收 Agent 完成通知的邮箱。</td></tr>
 <tr><td><code>--maildispatch-sender-id &lt;id&gt;</code></td><td>可选</td><td>指定 MailDispatch sender；省略时由服务端按 API key 选择。</td></tr>
-<tr><td><code>--voice-base-url &lt;url&gt;</code></td><td>关闭</td><td>OpenAI 兼容语音服务地址；不配置则语音功能完全关闭。</td></tr>
-<tr><td><code>--voice-tts-model</code> / <code>--voice-tts-voice</code></td><td>—</td><td>启用语音时必填的 TTS 模型与音色。</td></tr>
-<tr><td><code>--voice-stt-model &lt;id&gt;</code></td><td>可选</td><td>配置后 Web UI 才显示麦克风按钮。</td></tr>
-<tr><td><code>--voice-summary-base-url</code> / <code>--voice-summary-model</code></td><td>—</td><td>生成播报摘要的 LLM endpoint 与模型。</td></tr>
-<tr><td><code>--voice-request-timeout &lt;ms&gt;</code></td><td><code>120000</code></td><td>语音与摘要请求超时，超时后降级为文本提示。</td></tr>
+<tr><td><code>--create-voice-token</code></td><td>可选</td><td>为 Sotto 创建仅能提交草稿的受限 token。</td></tr>
 <tr><td><code>--version</code> / <code>--help</code></td><td>—</td><td>打印版本或帮助。</td></tr>
 </tbody></table>
-<p>MailDispatch 的三个选项必须同时提供，否则 pi2web 会拒绝启动。语音相关选项只有在配置了 <code>--voice-base-url</code> 时才会被校验。所有 API key 都通过<strong>环境变量名</strong>传入，避免密钥出现在命令行参数和进程列表中。</p>
+<p>MailDispatch 的三个选项必须同时提供，否则 pi2web 会拒绝启动。旧版 <code>--voice-*</code> TTS/STT 选项已移除。所有 API key 都通过<strong>环境变量名</strong>传入，避免密钥出现在命令行参数和进程列表中。</p>
 
 <h2 id="data">5. 数据与持久化</h2>
 <p>服务端元数据保存在 <code>~/.pi/remote-pi/remote-pi.db</code> 这个 SQLite 数据库中（WAL 模式）：</p>
@@ -124,25 +120,17 @@ pi2web --data-dir ~/pi2web-data</code></pre></div>
 </ul>
 <p>Agent 元数据保存在 SQLite 中，服务重启后状态为 <code>unloaded</code>，不会立即创建 Pi <code>AgentSession</code>。只有读取消息、Session、能力或发送命令时才按需启动，并发请求共享同一次启动。“停止 Agent”只释放运行中的 Session，元数据仍然保留。详见 <a href="/zh/blog/web-ui/">Web UI 使用说明</a>。</p>
 
-<h2 id="optional">7. 可选功能：邮件与语音</h2>
+<h2 id="optional">7. 可选功能：邮件与 Sotto</h2>
 <p>两项功能默认关闭，都需要显式配置。</p>
 <div class="article-code"><div><span>Shell · 邮件通知</span><button type="button" data-copy="export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'"><span class="copy-label">复制</span></button></div><pre><code>export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
 pi2web \
   --maildispatch-endpoint https://mail.example.com/api/v1/messages \
   --maildispatch-api-key-env REMOTE_PI_MAILDISPATCH_KEY \
   --maildispatch-notify-to owner@example.com</code></pre></div>
-<div class="article-code"><div><span>Shell · 语音播报</span><button type="button" data-copy="pi2web --voice-base-url http://127.0.0.1:5050/v1"><span class="copy-label">复制</span></button></div><pre><code>export SUMMARY_API_KEY=...
-pi2web \
-  --voice-base-url http://127.0.0.1:5050/v1 \
-  --voice-tts-model edge-tts \
-  --voice-tts-voice zh-CN-XiaoxiaoNeural \
-  --voice-tts-format mp3 \
-  --voice-summary-base-url https://llm.example.com/v1 \
-  --voice-summary-model &lt;summary-model-id&gt; \
-  --voice-summary-api-key-env SUMMARY_API_KEY</code></pre></div>
+<p>语音交互请使用 Sotto。运行 <code>pi2web --create-voice-token</code> 创建受限 token，让 Sotto 向当前 Backend 的 <code>POST /api/v1/draft</code> 投递文字；pi2web 不处理音频。</p>
 <div class="guide-link-grid">
   <a href="/zh/blog/mail-notifications/"><strong>邮件通知完整配置 →</strong><span>聚合等待时间、正文开关与失败处理</span></a>
-  <a href="/zh/blog/voice/"><strong>语音摘要与语音输入 →</strong><span>Speaches 与 Edge TTS 两种方案</span></a>
+  <a href="/zh/blog/voice/"><strong>Sotto 语音草稿 →</strong><span>受限 token 与投递流程</span></a>
 </div>
 
 <h2 id="remote">8. 从其他设备访问</h2>

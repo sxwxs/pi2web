@@ -50,14 +50,14 @@
 
 <h2 id="notify">7. Notifications and voice</h2>
 <p>The "settings" dialog in the navigation bar toggles email notifications and configures the aggregation window, whether to include the agent's final reply, and whether to include the session name and working path. These settings live in the server database and apply to every client.</p>
-<p>Browser notifications require permission and a secure context (<code>localhost</code> excepted); once granted, every known agent can notify you. If the server has voice configured, an "enable voice" button appears and plays the PCM16 or MP3 audio pushed by the server. With an STT model configured, a microphone button appears as well; transcripts are inserted into the composer and never sent automatically.</p>
+<p>Browser notifications require permission and a secure context (<code>localhost</code> excepted); once granted, every known agent can notify you. Sotto handles voice interaction; its dictated text is inserted into the currently displayed composer and never sent automatically.</p>
 <div class="guide-link-grid">
-  <a href="/en/blog/voice/"><strong>Configure voice →</strong><span>Summary LLM, TTS/STT services, playback queue</span></a>
+  <a href="/en/blog/voice/"><strong>Sotto dictation →</strong><span>Deliver text to the web composer</span></a>
   <a href="/en/blog/mail-notifications/"><strong>Configure email →</strong><span>MailDispatch options and message body</span></a>
 </div>
 
 <h2 id="recovery">8. Reconnect behaviour</h2>
 <p>The web UI receives events over WebSocket and de-duplicates them by sequence. After a disconnect it reconnects with exponential backoff and requests an incremental replay or a snapshot based on the stored cursor, so a brief network drop, a Wi-Fi switch, or a sleeping phone does not lose output.</p>
-<div class="article-callout"><strong>Browser and Android differences.</strong><p>Custom Pi TUI components cannot be rendered generically in a browser, and the Android client does not yet implement streaming PCM playback or recording UI.</p></div>
+<div class="article-callout"><strong>Browser and Android differences.</strong><p>Custom Pi TUI components cannot be rendered generically in a browser, and the Android client has no built-in pi2web recording or playback.</p></div>
 <p class="article-source">Reference: <a href="https://github.com/sxwxs/pi2web#readme" rel="noreferrer">pi2web README ↗</a></p>
 {% endblock %}

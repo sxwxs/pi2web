@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {assistantText} from './voice.js';
+import {assistantText} from './text-utils.js';
 
 export type MailNotifierConfig = {
   endpoint: string;

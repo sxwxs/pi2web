@@ -32,6 +32,15 @@ describe('voice token CLI', () => {
   }, 70_000);
 });
 
+describe('removed built-in voice options', () => {
+  it('rejects legacy TTS/STT flags rather than silently disabling announcements', async () => {
+    await expect(run('--voice-base-url', 'http://localhost:8000/v1')).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('has been removed; use Sotto')
+    });
+  }, 40_000);
+});
+
 describe('no-auth CLI options', () => {
   it('documents the insecure override in help', async () => {
     const {stdout} = await run('--help');

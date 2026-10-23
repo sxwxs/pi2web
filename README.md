@@ -63,7 +63,7 @@ pi2web --host 0.0.0.0 --no-auth --allow-insecure-no-auth
 
 ## Agent 完成邮件通知（MailDispatch）
 
-如果启动时同时配置 MailDispatch 消息 API endpoint、API key 环境变量和通知邮箱，Pi 发出 `agent_settled`（不会再自动重试、自动 compact 或执行排队的 follow-up）后，Remote Pi 可以提交事务邮件。被用户取消的运行（`agent_settled` 带 `aborted`）会写成"已中断"而不是"已完成"，语音播报则直接跳过。MailDispatch 返回 `202` 后邮件进入其持久队列；实际投递由 MailDispatch worker 完成。
+如果启动时同时配置 MailDispatch 消息 API endpoint、API key 环境变量和通知邮箱，Pi 发出 `agent_settled`（不会再自动重试、自动 compact 或执行排队的 follow-up）后，Remote Pi 可以提交事务邮件。被用户取消的运行（`agent_settled` 带 `aborted`）会写成"已中断"而不是"已完成"。MailDispatch 返回 `202` 后邮件进入其持久队列；实际投递由 MailDispatch worker 完成。
 
 ```bash
 export REMOTE_PI_MAILDISPATCH_KEY='md_live_...'
@@ -84,66 +84,13 @@ pi2web \
 
 如果后两项都关闭，邮件正文只说明一个或多个 Agent 任务已经完成。邮件设置保存在 Remote Pi 的 SQLite 元数据数据库中，对所有浏览器客户端和 Agent 生效，服务重启后继续保留。
 
-## 本地语音摘要与语音输入（实验性）
+## 语音交互：Sotto
 
-Windows 下的 Speaches 中文语音服务器启动、模型下载和故障排查见 [`VOICE_SERVER_SETUP.md`](VOICE_SERVER_SETUP.md)。只需要在线 TTS 时，也可以使用 [`packages/edge-tts-server`](packages/edge-tts-server/README.md) 中的原生 Python 服务，不需要 Docker。
-
-Remote Pi 可以连接两个 OpenAI-compatible 服务：一个 LLM endpoint 把 Agent 最终输出压缩成适合朗读的短摘要，一个语音 endpoint 负责 TTS，并可选提供 STT。语音默认关闭，只有配置 `--voice-base-url` 才会启用；`--voice-stt-model` 是可选项。
-
-```bash
-# 示例模型 ID 需要替换为 Speaches 中实际下载的模型
-export SUMMARY_API_KEY=...
-pi2web \
-  --voice-base-url http://127.0.0.1:8000/v1 \
-  --voice-stt-model <stt-model-id> \
-  --voice-tts-model <tts-model-id> \
-  --voice-tts-voice <voice-id> \
-  --voice-summary-base-url https://llm.example.com/v1 \
-  --voice-summary-model <summary-model-id> \
-  --voice-summary-api-key-env SUMMARY_API_KEY \
-  --voice-language zh-CN
-```
-
-工作方式：
-
-- Pi 发出 `agent_settled` 后，Remote Pi 取得最后一条 Assistant 文本，移除代码块、长链接和 Markdown，再限制摘要输入长度。
-- 摘要 LLM 使用流式 Chat Completions；Remote Pi 在完整句子出现后立即调用流式 TTS，因此无需等待整段摘要完成。
-- Web UI 中点击“启用语音”后，会播放服务端推送的 PCM16 或 MP3 音频；新的 Agent 运行会取消该 Agent 尚未完成的播报。
-- 多个 Session 接近同时完成时，语音摘要会进入全局队列依次播放，不会重叠；有 Session 名称时以“会话{name}已完成：”开头。
-- 只有配置 `--voice-stt-model` 时，Web UI 才显示麦克风按钮；识别文字只插入输入框，不会自动发送。
-- API key 通过 `--voice-api-key-env` 和 `--voice-summary-api-key-env` 指定环境变量名，避免把密钥放入命令行参数。
-
-语音流目前通过已认证的 Agent WebSocket 发送，只会实时投递，不写入 Session 或事件 replay。浏览器麦克风通常要求 HTTPS 安全上下文（`localhost` 例外）。
-
-### Edge TTS（仅语音合成）
-
-项目提供了一个基于 Python `edge-tts` 和 `aiohttp` 的轻量本地服务。它直接返回 MP3，不需要 Docker 或 FFmpeg：
-
-```bash
-cd packages/edge-tts-server
-python -m venv .venv
-# Windows: .venv\\Scripts\\Activate.ps1
-# Linux/macOS: source .venv/bin/activate
-python -m pip install -e .
-remote-pi-edge-tts
-
-pi2web \
-  --voice-base-url http://127.0.0.1:5050/v1 \
-  --voice-tts-model edge-tts \
-  --voice-tts-voice zh-CN-XiaoxiaoNeural \
-  --voice-tts-format mp3 \
-  --voice-summary-base-url https://llm.example.com/v1 \
-  --voice-summary-model <summary-model-id> \
-  --voice-summary-api-key-env SUMMARY_API_KEY
-```
-
-语音摘要、语音合成和语音识别的每次请求都有超时保护，默认 120000 毫秒，可用 `--voice-request-timeout <ms>` 调整；超时后播报会降级为文本提示，不会阻塞后续 Agent 的播报队列。
-
-该模式不配置 `--voice-stt-model`，因此只启用 Agent 摘要播报，不启用语音识别。Edge TTS 使用非官方消费者服务，适合本地和实验性使用。
+pi2web 不再内置录音、语音识别、语音摘要或 TTS 播报。使用 [Sotto](https://github.com/sxwxs/Sotto) 进行语音交互；pi2web 只负责接收 Sotto 投递的文字草稿，详情见下文「外部语音听写到输入框」。服务端不处理音频。
 
 ## 自动 Session 命名
 
-自动命名是独立于语音的功能，**默认开启**：Agent 每次任务结束（`agent_settled`）后，如果 Session 还没有名字，就用一个 OpenAI 兼容的接口生成简短标题并写入 Session。不开语音时只生成标题，不会产生任何语音；开了语音播报时仍然只由命名器负责命名，语音负责朗读摘要。
+自动命名**默认开启**：Agent 每次任务结束（`agent_settled`）后，如果 Session 还没有名字，就用一个 OpenAI 兼容的接口生成简短标题并写入 Session。该功能只生成标题，不处理语音。
 
 默认值：`--session-name-base-url http://localhost:8313/`、`--session-name-model gpt-5.4-nano`、无 API Key。可用参数：
 
