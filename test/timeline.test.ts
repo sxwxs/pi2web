@@ -71,14 +71,26 @@ describe('buildTimeline', () => {
     expect(thinking.body).toBeUndefined();
   });
 
-  it('tells running tool calls from ones the conversation moved past', () => {
-    const running = items([message({role: 'assistant', content: [call('c1')]})]);
-    expect(running[0]).toMatchObject({status: 'pending', toolCallId: 'c1'});
-    const abandoned = items([
-      message({role: 'assistant', content: [call('c1')]}),
-      message({role: 'user', content: 'never mind'})
+  it('marks a call without a result running only while it executes or its run is about to execute it', () => {
+    const entries = [message({role: 'assistant', content: [call('c1'), call('c2')]})];
+    const status = (runtime: {active: boolean; running: string[]}) =>
+      buildTimeline(entries, {active: runtime.active, running: new Set(runtime.running)}).map(r => [
+        r.item.status,
+        r.item.toolCallId
+      ]);
+    expect(status({active: true, running: ['c1']})).toEqual([
+      ['pending', 'c1'],
+      ['pending', 'c2']
     ]);
-    expect(abandoned[0].status).toBe('cancelled');
+    // Interrupted, restored after a restart, or the session moved back to this call: nothing runs it.
+    expect(status({active: false, running: []})).toEqual([
+      ['cancelled', undefined],
+      ['cancelled', undefined]
+    ]);
+    expect(items(entries)[0].status).toBe('cancelled');
+    // In a run that moved past the call, it is not about to execute.
+    const moved = [...entries, message({role: 'user', content: 'never mind'})];
+    expect(buildTimeline(moved, {active: true, running: new Set()})[0].item.status).toBe('cancelled');
   });
 
   it('shows errors, shell commands, compaction and nested tool calls', () => {
@@ -147,7 +159,7 @@ describe('buildTimeline', () => {
       message({role: 'user', content: 'b'}),
       message({role: 'assistant', content: [call('c1')]})
     ];
-    const records = buildTimeline(entries);
+    const records = buildTimeline(entries, {active: true, running: new Set(['c1'])});
     expect(pageTimeline(records, 2)).toMatchObject({start: 1, total: 3, hasMore: true});
     expect(pageTimeline(records, 2, records[1].item.id)?.items.map(i => i.body)).toEqual(['a']);
     expect(pageTimeline(records, 2, 'missing')).toBeUndefined();
@@ -170,15 +182,22 @@ describe('AgentFeed', () => {
         entries: () => [...entries]
       }),
       sent: DetailMessage[] = [],
-      agentFeed = new AgentFeed(source, message => sent.push(message));
-    return {entries, sent, feed: agentFeed, switchSession: (id: string) => (sessionId = id)};
+      runtime = {active: false, running: new Set<string>()},
+      agentFeed = new AgentFeed(
+        source,
+        message => sent.push(message),
+        () => runtime
+      );
+    return {entries, sent, runtime, feed: agentFeed, switchSession: (id: string) => (sessionId = id)};
   }
 
   it('publishes appended items once and a finished tool as an update', () => {
     vi.useFakeTimers();
     try {
-      const {entries, sent, feed: agentFeed} = feed();
+      const {entries, sent, runtime, feed: agentFeed} = feed();
+      runtime.active = true;
       entries.push(message({role: 'assistant', content: [call('c1')]}));
+      runtime.running.add('c1');
       agentFeed.handle({type: 'tool_execution_start', toolCallId: 'c1'});
       agentFeed.handle({
         type: 'tool_execution_update',
@@ -188,17 +207,19 @@ describe('AgentFeed', () => {
       vi.runAllTimers();
       expect(agentFeed.output('c1')).toBe('half');
       entries.push(result('c1', 'all'));
+      runtime.running.delete('c1');
       agentFeed.handle({type: 'tool_execution_end', toolCallId: 'c1'});
       vi.runAllTimers();
       agentFeed.handle({type: 'turn_end'});
       vi.runAllTimers();
       const batches = sent.filter(m => m.type === 'items') as any[];
       expect(
-        batches.map(m => [m.items.map((i: any) => i.status), m.updated?.map((i: any) => i.status)])
+        batches.map(m => [m.version, m.items.map((i: any) => i.status), m.updated?.map((i: any) => i.status)])
       ).toEqual([
-        [['pending'], undefined],
-        [[], ['ok']]
+        [1, ['pending'], undefined],
+        [2, [], ['ok']]
       ]);
+      expect(agentFeed.currentVersion()).toBe(2);
       expect(agentFeed.output('c1')).toBeUndefined();
     } finally {
       vi.useRealTimers();
@@ -211,7 +232,20 @@ describe('AgentFeed', () => {
     agentFeed.sync();
     entries.pop();
     agentFeed.sync();
-    expect(sent.at(-1)).toEqual({type: 'timeline_reset', sessionId: 's1'});
+    expect(sent.at(-1)).toEqual({type: 'timeline_reset', sessionId: 's1', version: 2});
+  });
+
+  it('updates a call when it stops running without a result, though the leaf did not move', () => {
+    const {entries, sent, runtime, feed: agentFeed} = feed();
+    runtime.active = true;
+    runtime.running.add('c1');
+    entries.push(message({role: 'assistant', content: [call('c1')]}));
+    agentFeed.sync();
+    runtime.active = false;
+    runtime.running.clear();
+    agentFeed.handle({type: 'agent_end'});
+    agentFeed.sync();
+    expect(sent.at(-1)).toMatchObject({type: 'items', items: [], updated: [{status: 'cancelled'}]});
   });
 
   it('resets viewers when the branch or session changes', () => {
@@ -220,9 +254,9 @@ describe('AgentFeed', () => {
     agentFeed.sync();
     entries.pop();
     agentFeed.sync();
-    expect(sent.at(-1)).toEqual({type: 'timeline_reset', sessionId: 's1'});
+    expect(sent.at(-1)).toEqual({type: 'timeline_reset', sessionId: 's1', version: 2});
     switchSession('s2');
     agentFeed.sync();
-    expect(sent.at(-1)).toEqual({type: 'timeline_reset', sessionId: 's2'});
+    expect(sent.at(-1)).toEqual({type: 'timeline_reset', sessionId: 's2', version: 3});
   });
 });

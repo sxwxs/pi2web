@@ -126,6 +126,8 @@ function setup(pages: any[] = []) {
     return {body: `full body of ${url.split('/').pop()}`};
   });
   const sendFocused = vi.fn(),
+    // No socket unless a test says so: loading then does not wait for focus_state.
+    sendFocus = vi.fn(() => false),
     restoreExtensionRequests = vi.fn(),
     renderTranscriptEvent = vi.fn();
   const api = runInNewContext(
@@ -136,9 +138,11 @@ function setup(pages: any[] = []) {
       window: {},
       requestAgent,
       sendFocused,
+      sendFocus,
       restoreExtensionRequests,
       renderTranscriptEvent,
       toast: vi.fn(),
+      setTimeout,
       requestAnimationFrame: (callback: () => void) => setTimeout(callback, 0),
       cancelAnimationFrame: (id: any) => clearTimeout(id),
       document: {
@@ -151,12 +155,20 @@ function setup(pages: any[] = []) {
   const card = (id: string) => messages.descendants().find(el => el.dataset.itemId === id)!;
   const summary = (id: string) => card(id).querySelector('.summary-text')!.textContent;
   const body = (id: string) => card(id).querySelector('.msg-content')!.textContent;
-  const detail = (message: any) => api.handleDetail({agentId: 'bk:agent-a', ...message});
+  // Timeline changes are numbered from the page's version (0 in these pages) unless a test sets one.
+  let version = 0;
+  const detail = (message: any) =>
+    api.handleDetail({
+      agentId: 'bk:agent-a',
+      ...(['items', 'timeline_reset'].includes(message.type) ? {version: ++version} : {}),
+      ...message
+    });
   return {
     messages,
     state,
     requestAgent,
     sendFocused,
+    sendFocus,
     restoreExtensionRequests,
     renderTranscriptEvent,
     card,
@@ -169,6 +181,7 @@ function setup(pages: any[] = []) {
 
 const page = (items: any[], extra = {}) => ({
   sessionId: 's1',
+  version: 0,
   items,
   total: items.length,
   start: 0,
@@ -361,5 +374,71 @@ describe('timeline rendering', () => {
     expect(ui.restoreExtensionRequests.mock.invocationCallOrder[0]).toBeLessThan(
       ui.renderTranscriptEvent.mock.invocationCallOrder[0]
     );
+  });
+
+  it('reads the page only after the server confirmed the focus', async () => {
+    const ui = setup([page([user])]);
+    ui.sendFocus.mockReturnValue(true);
+    const loading = ui.loadTimeline(ui.state.agent);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(ui.requestAgent).not.toHaveBeenCalled();
+    ui.detail({type: 'focus_state', version: 0, live: null});
+    await loading;
+    expect(ui.requestAgent).toHaveBeenCalledOnce();
+    expect(ui.body('e1')).toBe('hi');
+  });
+
+  it('applies only timeline changes after the page, and still drops their streamed text', async () => {
+    let release!: (value: unknown) => void;
+    const ui = setup();
+    ui.requestAgent.mockImplementationOnce(() => new Promise(resolve => (release = resolve)));
+    const loading = ui.loadTimeline(ui.state.agent);
+    ui.detail({type: 'focus_state', live: {text: 'Hello', thinking: ''}});
+    // Recorded before the page was read: the page has it, so it must not be appended again.
+    ui.detail({
+      type: 'items',
+      version: 7,
+      sessionId: 's1',
+      clearLive: true,
+      items: [{id: 'e2', kind: 'assistant', size: 5, body: 'Hello'}]
+    });
+    ui.detail({
+      type: 'items',
+      version: 8,
+      sessionId: 's1',
+      items: [{id: 'e3', kind: 'user', size: 4, body: 'next'}]
+    });
+    release(page([user, {id: 'e2', kind: 'assistant', size: 5, body: 'Hello'}], {version: 7}));
+    await loading;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(ui.messages.children.map(el => el.dataset.itemId)).toEqual(['e1', 'e2', 'e3']);
+    expect(ui.state.timeline.version).toBe(8);
+  });
+
+  it('reloads after a gap in timeline changes', async () => {
+    const ui = setup([
+      page([user]),
+      page([user, {id: 'e5', kind: 'user', size: 1, body: 'x'}], {version: 5})
+    ]);
+    await ui.loadTimeline(ui.state.agent);
+    ui.detail({
+      type: 'items',
+      version: 3,
+      sessionId: 's1',
+      items: [{id: 'e4', kind: 'user', size: 1, body: 'y'}]
+    });
+    await vi.waitFor(() => expect(ui.state.timeline.version).toBe(5));
+    expect(ui.messages.children.map(el => el.dataset.itemId)).toEqual(['e1', 'e5']);
+  });
+
+  it('extends a watched tool output with appended parts', async () => {
+    const ui = setup([page([running])]);
+    await ui.loadTimeline(ui.state.agent);
+    ui.card('e2.0').open = true;
+    ui.detail({type: 'tool_output', toolCallId: 'call-1', output: 'one'});
+    ui.detail({type: 'tool_output', toolCallId: 'call-1', append: ' two'});
+    expect(ui.body('e2.0')).toBe('{"command": "npm test"}\n\n— 输出 —\none two');
+    ui.detail({type: 'tool_output', toolCallId: 'call-1', output: 'tail only'});
+    expect(ui.body('e2.0')).toBe('{"command": "npm test"}\n\n— 输出 —\ntail only');
   });
 });

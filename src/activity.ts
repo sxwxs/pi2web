@@ -21,6 +21,8 @@ export type ActivityPhase =
   | {kind: 'compacting'; since: number; reason?: string}
   | {kind: 'stopping'; since: number};
 export type RunningTool = {toolCallId: string; toolName: string; summary?: string; since: number};
+/** Whether a run is going on, and which tool calls are executing right now. */
+export type ToolRuntime = {active: boolean; running: Set<string>};
 export type Activity = {
   /** The current LLM run, from agent_start until it ends. */
   run: {startedAt: number} | null;
@@ -62,6 +64,15 @@ export class ActivityTracker {
 
   snapshot(): Activity {
     return structuredClone(this.state);
+  }
+
+  /** What the timeline needs to tell a running tool call from an unfinished one. */
+  runtime(): ToolRuntime {
+    const phase = this.state.phase;
+    return {
+      active: !!this.state.run,
+      running: new Set(phase.kind === 'running_tools' ? phase.tools.map(tool => tool.toolCallId) : [])
+    };
   }
 
   /** Forget everything, e.g. when the backend is unloaded. Returns whether anything changed. */
@@ -153,7 +164,8 @@ export class ActivityTracker {
         if (e.willRetry === true) return false;
         return this.endRun();
       case 'agent_settled':
-        return this.endRun();
+        // Settled: nothing of the run is left, compaction included. Shell commands and dialogs stay.
+        return this.endRun(true);
       case 'bash_execution_start':
       case 'bash_execution_update': {
         const id = str(e.id);
@@ -182,11 +194,11 @@ export class ActivityTracker {
     }
   }
 
-  private endRun() {
+  private endRun(settled = false) {
     const hadRun = !!this.state.run;
     this.state.run = null;
-    // Compaction may continue after the run has ended; agent_settled will close it.
-    if (this.state.phase.kind === 'compacting') return hadRun;
+    // Compaction may continue after the run has ended; agent_settled closes it.
+    if (this.state.phase.kind === 'compacting' && !settled) return hadRun;
     return this.setPhase({kind: 'idle'}) || hadRun;
   }
 

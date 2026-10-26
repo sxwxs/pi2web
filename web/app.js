@@ -1558,8 +1558,6 @@
     state.commands = [];
     state.commandsAgentId = null;
     renderQueueBar();
-    // Focus before loading, so no change between the two is missed: it waits for the timeline.
-    sendFocus(true);
     try {
       await loadTimeline(agent);
       await loadSessionIdentity();
@@ -1829,10 +1827,11 @@
   function renderToolOutput(card) {
     renderCardBody(card.body, `${card.args ? `${card.args}\n\n` : ''}— 输出 —\n${card.output}`);
   }
+  /** The server sends a tool's whole output, then only what was appended (until it no longer extends). */
   function applyToolOutput(message) {
     for (const card of state.timeline.cards.values())
       if (card.item.toolCallId === message.toolCallId && isRunningTool(card.item)) {
-        card.output = message.output;
+        card.output = message.append !== undefined ? (card.output || '') + message.append : message.output;
         if (card.loaded) renderToolOutput(card);
       }
   }
@@ -1876,18 +1875,22 @@
       : !items.length;
   /**
    * Show an Agent's timeline: the cached copy at once, then the newest page from the server.
-   * Detail messages arriving meanwhile wait in `queue` and apply in order once it is shown.
+   * The page is read only after the server confirmed the focus (focus_state), so every timeline
+   * change after the page's version reaches this client. Detail messages arriving meanwhile wait
+   * in `queue`; then those after the page's version apply, in arrival order.
    */
   async function loadTimeline(agent) {
     const timeline = {
       agentId: agent.agentId,
       backendId: agent.backendId,
       sessionId: null,
+      version: 0,
       cards: new Map(),
       items: [],
       start: 0,
       ready: false,
-      queue: []
+      queue: [],
+      focused: null
     };
     state.timeline = timeline;
     discardStreams();
@@ -1898,15 +1901,16 @@
       renderTimelinePage(cached, false);
       box.scrollTop = box.scrollHeight;
     }
+    const focused = new Promise(resolve => (timeline.focused = resolve));
+    // Without a socket there is nothing to wait for; reconnecting loads the timeline again.
+    if (sendFocus(true)) await Promise.race([focused, new Promise(resolve => setTimeout(resolve, 5000))]);
+    if (state.timeline !== timeline) return;
     let page;
     try {
       page = await requestAgent(agent.agentId, `/timeline?limit=${TIMELINE_PAGE}`);
     } catch (error) {
       // Nothing more to wait for: let queued events (dialogs, shell output) show.
-      if (state.timeline === timeline) {
-        timeline.ready = true;
-        for (const message of timeline.queue.splice(0)) handleDetail(message);
-      }
+      if (state.timeline === timeline) flushTimelineQueue(timeline);
       throw error;
     }
     if (state.timeline !== timeline) return;
@@ -1915,10 +1919,15 @@
       timeline.sessionId = page.sessionId;
       renderTimelinePage(page, false);
     }
-    timeline.ready = true;
-    for (const message of timeline.queue.splice(0)) handleDetail(message);
+    timeline.version = page.version;
+    flushTimelineQueue(timeline);
     saveTimelineCache();
     box.scrollTop = box.scrollHeight;
+  }
+  /** Apply what waited for the page; handleDetail skips the timeline changes it already includes. */
+  function flushTimelineQueue(timeline) {
+    timeline.ready = true;
+    for (const message of timeline.queue.splice(0)) handleDetail(message);
   }
   function reloadTimeline() {
     if (state.selectedKind !== 'agent' || !state.agent) return;
@@ -2027,9 +2036,20 @@
   function handleDetail(message) {
     const timeline = state.timeline;
     if (!timeline || timeline.agentId !== message.agentId || state.selectedKind !== 'agent') return;
+    if (message.type === 'focus_state') timeline.focused?.();
     if (!timeline.ready) {
       timeline.queue.push(message);
       return;
+    }
+    if (message.type === 'items' || message.type === 'timeline_reset') {
+      // Already in the page (it can arrive after the page's response): only its streamed text must go.
+      if (message.version <= timeline.version) {
+        if (message.clearLive) clearLiveCards();
+        return;
+      }
+      // Timeline changes are consecutive; a gap means one was missed, so start over from a fresh page.
+      if (message.version !== timeline.version + 1) return void reloadTimeline();
+      timeline.version = message.version;
     }
     if (message.type === 'focus_state') {
       applyLive(message.live);
@@ -2444,7 +2464,13 @@
     const ev = message.event || {},
       selected = state.selectedKind === 'agent' && state.agent?.agentId === message.agentId;
     let eventAgent = state.agents.find(x => x.agentId === message.agentId);
-    if (eventAgent && Number(message.timestamp) > 0)
+    // Viewing an Agent loads its backend; that is not activity and must not reorder the list.
+    if (
+      eventAgent &&
+      Number(message.timestamp) > 0 &&
+      ev.type !== 'agent_loaded' &&
+      ev.type !== 'agent_unloaded'
+    )
       eventAgent.lastActiveAt = new Date(Number(message.timestamp)).toISOString();
     // Every event carries the authoritative status, including dialog waits.
     if (message.status) eventAgent = setAgentStatus(message.agentId, message.status) || eventAgent;
@@ -2555,16 +2581,24 @@
     );
   }
 
-  /** Tell each backend which of its Agents this page views, so only that one streams details. */
+  /**
+   * Tell each backend which of its Agents this page views, so only that one streams details.
+   * `force` resends it for the viewed Agent, which answers with a fresh focus_state. Returns whether
+   * the viewed Agent's backend was told.
+   */
   function sendFocus(force = false) {
     const agent = state.selectedKind === 'agent' ? state.agent : null;
+    let sent = false;
     for (const backend of connectedBackends()) {
       const target = agent?.backendId === backend.id ? agent.remoteId : null;
-      if (backend.ws?.readyState !== WebSocket.OPEN || (backend.focused === target && !(force && target)))
-        continue;
-      backend.ws.send(JSON.stringify({type: 'focus', agentId: target}));
-      backend.focused = target;
+      if (backend.ws?.readyState !== WebSocket.OPEN) continue;
+      if (backend.focused !== target || (force && target)) {
+        backend.ws.send(JSON.stringify({type: 'focus', agentId: target}));
+        backend.focused = target;
+      }
+      if (target) sent = true;
     }
+    return sent;
   }
   function sendFocused(message) {
     const backend = backendOf(state.agent?.backendId);
@@ -2591,9 +2625,9 @@
       ws.send(JSON.stringify({type: 'subscribe_drafts'}));
       // Nothing is replayed: refocus and reload what may have changed while disconnected.
       backend.focused = undefined;
-      sendFocus();
       if (state.selectedKind === 'agent' && state.agent?.backendId === backend.id)
         loadTimeline(state.agent).catch(error => toast(`加载消息失败：${error.message}`));
+      else sendFocus();
     };
     ws.onmessage = event => {
       if (ws !== backend.ws) return;

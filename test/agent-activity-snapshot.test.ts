@@ -152,14 +152,19 @@ describe('WebSocket schema', () => {
   it('accepts the detail messages', () => {
     const item = {id: 'e1.0', kind: 'tool', status: 'pending', toolCallId: 't', size: 2, body: '{}'};
     for (const message of [
-      {type: 'focus_state', agentId: 'a', sessionId: 's', live: {text: 'hi', thinking: ''}},
+      {type: 'focus_state', agentId: 'a', sessionId: 's', version: 0, live: {text: 'hi', thinking: ''}},
       {type: 'delta', agentId: 'a', kind: 'text', delta: 'hi'},
-      {type: 'items', agentId: 'a', sessionId: 's', items: [item], clearLive: true},
-      {type: 'timeline_reset', agentId: 'a', sessionId: 's'},
-      {type: 'tool_output', agentId: 'a', toolCallId: 't', output: 'line'}
+      {type: 'items', agentId: 'a', sessionId: 's', version: 1, items: [], updated: [item], clearLive: true},
+      {type: 'timeline_reset', agentId: 'a', sessionId: 's', version: 2},
+      {type: 'tool_output', agentId: 'a', toolCallId: 't', output: 'line'},
+      {type: 'tool_output', agentId: 'a', toolCallId: 't', append: ' more'}
     ])
       expect(Check(schema, message)).toBe(true);
-    expect(Check(schema, {type: 'items', agentId: 'a', sessionId: 's', items: [{id: 'x'}]})).toBe(false);
+    expect(Check(schema, {type: 'items', agentId: 'a', sessionId: 's', version: 1, items: [{id: 'x'}]})).toBe(
+      false
+    );
+    // Timeline changes must be numbered.
+    expect(Check(schema, {type: 'items', agentId: 'a', sessionId: 's', items: []})).toBe(false);
   });
 });
 
@@ -254,6 +259,20 @@ describe('overview stream', () => {
     expect(client.messages.some(m => ['delta', 'items'].includes(m.type))).toBe(false);
   });
 
+  it('reports an Agent loaded on demand, so its status leaves unloaded', async () => {
+    const {agents, agent, connect} = await setup();
+    await agents.dispose(agent.agentId);
+    const observer = await connect();
+    observer.send({type: 'subscribe_all'});
+    await observer.wait(m => m.type === 'subscribed_all');
+    const before = agents.get(agent.agentId).record.lastActiveAt;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await agents.timeline(agent.agentId);
+    expect(await observer.wait(m => m.event?.type === 'agent_loaded')).toMatchObject({status: 'idle'});
+    // Viewing is not activity: the list order must not change.
+    expect(agents.get(agent.agentId).record.lastActiveAt).toBe(before);
+  });
+
   it('broadcasts unloading so other clients can clear activity without reconnecting', async () => {
     const {agents, agent, publish, connect, unload, backends} = await setup();
     const observer = await connect();
@@ -301,6 +320,7 @@ describe('detail stream of the focused Agent', () => {
       type: 'items',
       agentId: agent.agentId,
       sessionId: focus.sessionId,
+      version: focus.version + 1,
       clearLive: true,
       items: [
         expect.objectContaining({id: `${entryId}.0`, kind: 'thinking', body: 'hmm '}),
@@ -364,6 +384,40 @@ describe('detail stream of the focused Agent', () => {
     expect(other.messages.some(m => m.type === 'items' && m.updated?.[0].status === 'ok')).toBe(true);
   });
 
+  it('sends a watched tool output once, then only what was appended, batched', async () => {
+    const {agent, backend, publish, connect} = await setup();
+    const client = await connect();
+    client.send({type: 'focus', agentId: agent.agentId});
+    await client.wait(m => m.type === 'focus_state');
+    publish({type: 'agent_start'});
+    backend.record({role: 'assistant', content: [{type: 'toolCall', id: 'c', name: 'bash', arguments: {}}]});
+    publish({type: 'tool_execution_start', toolCallId: 'c', toolName: 'bash', args: {}});
+    client.send({type: 'watch', toolCallId: 'c'});
+    await client.barrier();
+    let output = '';
+    const update = (text: string) =>
+      publish({
+        type: 'tool_execution_update',
+        toolCallId: 'c',
+        partialResult: {content: [{type: 'text', text}]}
+      });
+    for (let i = 0; i < 50; i++) update((output += `line ${i}\n`));
+    await client.wait(m => m.type === 'tool_output' && (m.output ?? m.append).includes('line 49'));
+    const frames = client.messages.filter(m => m.type === 'tool_output');
+    // Fifty cumulative updates within one window become one frame carrying the output once.
+    expect(frames).toEqual([{type: 'tool_output', agentId: agent.agentId, toolCallId: 'c', output}]);
+    update(output + 'more\n');
+    expect(await client.wait(m => m.type === 'tool_output' && m.append)).toEqual({
+      type: 'tool_output',
+      agentId: agent.agentId,
+      toolCallId: 'c',
+      append: 'more\n'
+    });
+    // Output that no longer extends the previous one (a truncated tail) is sent whole.
+    update('tail only');
+    expect(await client.wait(m => m.output === 'tail only')).toMatchObject({type: 'tool_output'});
+  });
+
   it('stops details when the focus moves away and resets the timeline when the branch changes', async () => {
     const {agents, agent, backend, publish, connect} = await setup();
     const client = await connect();
@@ -380,7 +434,8 @@ describe('detail stream of the focused Agent', () => {
     expect(await client.wait(m => m.type === 'timeline_reset')).toEqual({
       type: 'timeline_reset',
       agentId: agent.agentId,
-      sessionId: focus.sessionId
+      sessionId: focus.sessionId,
+      version: focus.version + 2
     });
     client.send({type: 'focus', agentId: null});
     await client.barrier();

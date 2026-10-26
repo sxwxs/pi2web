@@ -230,18 +230,20 @@ describe('agent manager', () => {
     await vi.waitFor(() => expect(details).toHaveLength(3));
     const sessionId = m.detailState(a.agentId).sessionId;
     expect(details).toEqual([
-      {type: 'items', sessionId, items: [expect.objectContaining({kind: 'user', body: 'hello'})]},
+      {type: 'items', sessionId, version: 1, items: [expect.objectContaining({kind: 'user', body: 'hello'})]},
       {type: 'delta', kind: 'text', delta: 'Mock response: hello'},
       {
         type: 'items',
         sessionId,
+        version: 2,
         items: [expect.objectContaining({kind: 'assistant', body: 'Mock response: hello'})],
         clearLive: true
       }
     ]);
     for (let i = 0; i < 29; i++) await m.command(a.agentId, 'prompt', `message-${i}`);
     const page = await m.timeline(a.agentId, 5);
-    expect(page).toMatchObject({sessionId, total: 60, start: 55, hasMore: true});
+    // The page reports the version of the last timeline change it includes.
+    expect(page).toMatchObject({sessionId, version: 60, total: 60, start: 55, hasMore: true});
     const older = await m.timeline(a.agentId, 5, page.items[0].id);
     expect(older).toMatchObject({start: 50, items: expect.any(Array)});
     expect(older.items.at(-1).id).not.toBe(page.items[0].id);

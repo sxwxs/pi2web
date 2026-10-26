@@ -107,6 +107,25 @@ describe('ActivityTracker', () => {
     expect(t.snapshot()).toMatchObject({run: null, phase: {kind: 'idle'}});
   });
 
+  it('ends compaction when the agent settles, even without compaction_end', () => {
+    const {t, apply, phase} = tracker();
+    apply('agent_start');
+    apply('compaction_start', {reason: 'overflow'});
+    apply('agent_end');
+    expect(phase().kind).toBe('compacting');
+    apply('bash_execution_start', {id: 'b'});
+    expect(apply('agent_settled')).toBe(true);
+    expect(t.snapshot()).toMatchObject({run: null, phase: {kind: 'idle'}, bash: [{id: 'b'}]});
+  });
+
+  it('tells the timeline which tool calls are executing', () => {
+    const {t, apply} = tracker();
+    expect(t.runtime()).toEqual({active: false, running: new Set()});
+    apply('agent_start');
+    apply('tool_execution_start', {toolCallId: 'a', toolName: 'bash'});
+    expect(t.runtime()).toEqual({active: true, running: new Set(['a'])});
+  });
+
   it('tracks dialogs and user shell commands independently of runs', () => {
     const {t, apply} = tracker();
     apply('bash_execution_start', {id: 'one', command: 'ls'});

@@ -322,6 +322,7 @@ type AgentEntry = {
 const toStringList = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
 const emptyQueue = (): AgentQueue => ({steering: [], followUp: []});
+const LIFECYCLE_ONLY = new Set(['agent_loaded', 'agent_unloaded']);
 /** A pending dialog blocks the run until a human answers it, which is a different wait than streaming. */
 const runStatus = (entry: AgentEntry, streaming: boolean): AgentState['status'] =>
   entry.dialogRequests.size ? 'waiting_for_user' : streaming ? 'streaming' : 'idle';
@@ -401,7 +402,8 @@ export class AgentManager {
         () => backend.timeline(),
         message => {
           for (const listener of this.detailListeners.get(agentId) ?? []) listener(message);
-        }
+        },
+        () => entry.activity.runtime()
       );
     entry.feed = feed;
     backend.subscribe(event => {
@@ -432,9 +434,10 @@ export class AgentManager {
   private publishActivity(entry: AgentEntry) {
     this.publish(entry, {type: 'activity_changed', activity: entry.activity.snapshot()});
   }
+  /** Loading or unloading a backend is not activity: it must not reorder the Agent list. */
   private publish(entry: AgentEntry, event: AgentEvent) {
     const record = entry.record;
-    record.lastActiveAt = new Date().toISOString();
+    if (!LIFECYCLE_ONLY.has(event.type)) record.lastActiveAt = new Date().toISOString();
     // Every event carries the authoritative status, so clients never have to derive it from event types.
     const item = {timestamp: Date.now(), status: record.status, event};
     for (const listener of this.globalListeners) listener(record.agentId, item);
@@ -518,6 +521,8 @@ export class AgentManager {
           status: state.status === 'stopped' ? 'idle' : state.status
         };
         this.connect(entry, backend);
+        // The status moved from unloaded to idle without a Pi event; tell clients.
+        this.publish(entry, {type: 'agent_loaded'});
         return backend;
       } catch (error) {
         entry.record.status = 'error';
@@ -577,6 +582,7 @@ export class AgentManager {
     const entry = this.get(id);
     return {
       sessionId: entry.feed?.sessionId(),
+      version: entry.feed?.currentVersion() ?? 0,
       live: entry.feed?.liveState() ?? null,
       // Dialog controls live in the transcript, which a viewer replaces when it starts viewing.
       dialogRequests: [...entry.dialogRequests.values()]
@@ -623,18 +629,27 @@ export class AgentManager {
       record = this.get(id).record;
     return {...state, status: record.status, sessionName: state.sessionName?.trim() || record.sessionName};
   }
-  /** A page of the session's timeline: the newest items, or those before `before`. */
+  /**
+   * A page of the session's timeline: the newest items, or those before `before`. `version` is the
+   * detail stream's version this page reflects: viewers apply only timeline changes after it.
+   */
   async timeline(id: string, limit?: number, before?: string) {
-    const source = (await this.ensureLoaded(id)).timeline(),
-      page = pageTimeline(buildTimeline(source.entries()), limit, before);
+    const backend = await this.ensureLoaded(id),
+      entry = this.get(id);
+    // Publish pending changes first, so the page and its version describe the same state.
+    entry.feed?.sync();
+    const source = backend.timeline(),
+      page = pageTimeline(buildTimeline(source.entries(), entry.activity.runtime()), limit, before);
     if (!page) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
-    return {sessionId: source.sessionId, ...page};
+    return {sessionId: source.sessionId, version: entry.feed?.currentVersion() ?? 0, ...page};
   }
   /** The full body of one timeline item of the given session, at revision `rev` (see TimelineItem.rev). */
   async item(id: string, sessionId: string, itemId: string, rev?: string) {
     const source = (await this.ensureLoaded(id)).timeline(),
       detail =
-        source.sessionId === sessionId ? itemDetail(buildTimeline(source.entries()), itemId, rev) : undefined;
+        source.sessionId === sessionId
+          ? itemDetail(buildTimeline(source.entries(), this.get(id).activity.runtime()), itemId, rev)
+          : undefined;
     if (!detail) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
     return detail;
   }

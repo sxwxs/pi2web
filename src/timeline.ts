@@ -1,4 +1,4 @@
-import {toolSummary} from './activity.js';
+import {toolSummary, type ToolRuntime} from './activity.js';
 
 /**
  * The Web UI's view of a session: the current branch's persisted entries projected into
@@ -163,10 +163,15 @@ function toolRecord(
   );
 }
 
-/** Project a branch (root to leaf) into display items. */
-export function buildTimeline(entries: TimelineEntry[]): ItemRecord[] {
+const IDLE: ToolRuntime = {active: false, running: new Set()};
+
+/**
+ * Project a branch (root to leaf) into display items. A tool call without a result is only
+ * `pending` if it is executing, or about to as part of the newest message of a run going on;
+ * otherwise it never finished (interrupted, or the session moved back to it): `cancelled`.
+ */
+export function buildTimeline(entries: TimelineEntry[], runtime: ToolRuntime = IDLE): ItemRecord[] {
   const results = new Map<string, any>();
-  // A call without a result is still running unless the conversation moved on past it.
   let lastConversationIndex = -1;
   entries.forEach((entry, index) => {
     const message = entry.type === 'message' ? (entry as any).message : undefined;
@@ -284,9 +289,9 @@ export function buildTimeline(entries: TimelineEntry[]): ItemRecord[] {
           ? result.message.isError
             ? 'error'
             : 'ok'
-          : index < lastConversationIndex
-            ? 'cancelled'
-            : 'pending';
+          : runtime.running.has(String(part.id)) || (runtime.active && index >= lastConversationIndex)
+            ? 'pending'
+            : 'cancelled';
         records.push(toolRecord(id, part, result, timestamp, status));
       }
     });
