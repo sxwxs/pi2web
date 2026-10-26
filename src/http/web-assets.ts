@@ -15,6 +15,7 @@ const webFiles: Record<string, {file: string; type: string}> = {
   '/app.js': {file: 'app.js', type: 'text/javascript; charset=utf-8'},
   '/backend-state.js': {file: 'backend-state.js', type: 'text/javascript; charset=utf-8'},
   '/hid-keyboard.js': {file: 'hid-keyboard.js', type: 'text/javascript; charset=utf-8'},
+  '/activity-view.js': {file: 'activity-view.js', type: 'text/javascript; charset=utf-8'},
   '/collab': {file: 'collab.html', type: 'text/html; charset=utf-8'},
   '/collab.html': {file: 'collab.html', type: 'text/html; charset=utf-8'},
   '/collab.js': {file: 'collab.js', type: 'text/javascript; charset=utf-8'},

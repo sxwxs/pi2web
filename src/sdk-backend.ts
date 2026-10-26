@@ -17,6 +17,8 @@ import type {
   QueuedInputDisposition
 } from './agents.js';
 import type {AgentTemplateSnapshot} from './agent-templates.js';
+import type {TimelineSource} from './agent-feed.js';
+import type {TimelineEntry} from './timeline.js';
 
 export type BackendOptions = {
   /** System prompt template copied onto the Agent at creation time. */
@@ -128,8 +130,13 @@ export class SdkBackend implements AgentBackend {
       status: this.disposed ? 'stopped' : this.session.isStreaming ? 'streaming' : 'idle'
     };
   }
-  async getMessages(): Promise<unknown[]> {
-    return [...this.session.state.messages];
+  timeline(): TimelineSource {
+    const manager = this.session.sessionManager;
+    return {
+      sessionId: this.session.sessionId,
+      leafId: manager.getLeafId(),
+      entries: () => manager.getBranch() as unknown as TimelineEntry[]
+    };
   }
   /** The effective system prompt Pi will send next, plus the prompt files that contributed to it. */
   async getSystemPrompt() {

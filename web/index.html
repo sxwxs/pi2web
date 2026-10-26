@@ -60,6 +60,7 @@
     <div id="widgets"></div>
     <div id="messages" aria-live="polite"><div class="empty">选择或创建 Agent 开始对话</div></div>
     <form id="prompt">
+      <div id="activityBar" hidden></div>
       <div id="queueBar" hidden><span id="queueText"></span><button type="button" id="queueClear" title="清空队列并把消息放回输入框">清空队列</button></div>
       <div id="mentionPicker" hidden><div class="picker-head"><button type="button" id="mentionUp">↑</button><b id="mentionPath">.</b><button type="button" id="mentionClose">×</button></div><div id="mentionItems"></div></div>
       <div id="commandPicker" hidden><div class="picker-head"><b>命令 · prompt template / skill</b><button type="button" id="commandClose">×</button></div><div id="commandItems"></div></div>
@@ -81,6 +82,7 @@
 <script src="/vendor/marked.js"></script>
 <script src="/vendor/dompurify.js"></script>
 <script src="/hid-keyboard.js"></script>
+<script src="/activity-view.js"></script>
 <script src="/backend-state.js"></script>
 <script src="/app.js"></script>
 </body>

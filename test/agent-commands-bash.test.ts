@@ -30,21 +30,30 @@ describe('slash commands and session bash', () => {
     ).data;
     expect(commands).toEqual([{name: 'mock', description: 'Mock prompt template', source: 'prompt'}]);
     const events: AgentEvent[] = [];
-    agents.subscribe(agent.agentId, stored => events.push(stored.event));
+    agents.subscribeAll((agentId, published) => agentId === agent.agentId && events.push(published.event));
     const result = (await (await post(`/api/v1/agents/${agent.agentId}/bash`, {command: 'echo hi'})).json())
       .data;
     expect(result).toMatchObject({output: 'Mock bash: echo hi', exitCode: 0, cancelled: false});
     expect(events.map(event => event.type)).toEqual([
       'bash_execution_start',
+      'activity_changed',
       'bash_execution_update',
-      'bash_execution_end'
+      'bash_execution_end',
+      'activity_changed'
     ]);
+    expect((events[1] as any).activity.bash).toEqual([
+      {id: result.id, command: 'echo hi', since: expect.any(Number)}
+    ]);
+    expect((events[4] as any).activity.bash).toEqual([]);
     expect(events[0]).toMatchObject({id: result.id, command: 'echo hi'});
     expect(events.some(event => event.type === 'bash_execution_update' && event.id === result.id)).toBe(true);
     expect(events.some(event => event.type === 'bash_execution_end' && event.id === result.id)).toBe(true);
     // Both ! and !! are recorded; !! only excludes the message from model context.
-    let messages = (await (await fetch(base + `/api/v1/agents/${agent.agentId}/messages`, {headers})).json())
-      .data;
+    const recorded = async () =>
+      (
+        await (await fetch(base + `/api/v1/agents/${agent.agentId}/session`, {headers})).json()
+      ).data.entries.map((entry: any) => entry.message);
+    let messages = await recorded();
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       role: 'bashExecution',
@@ -52,9 +61,14 @@ describe('slash commands and session bash', () => {
       output: 'Mock bash: echo hi',
       excludeFromContext: false
     });
+    const timeline = (
+      await (await fetch(base + `/api/v1/agents/${agent.agentId}/timeline`, {headers})).json()
+    ).data;
+    expect(timeline.items).toEqual([
+      expect.objectContaining({kind: 'bash', title: 'echo hi', status: 'ok', body: 'Mock bash: echo hi'})
+    ]);
     await post(`/api/v1/agents/${agent.agentId}/bash`, {command: 'echo hidden', excludeFromContext: true});
-    messages = (await (await fetch(base + `/api/v1/agents/${agent.agentId}/messages`, {headers})).json())
-      .data;
+    messages = await recorded();
     expect(messages).toHaveLength(2);
     expect(messages[1]).toMatchObject({
       role: 'bashExecution',

@@ -1,5 +1,6 @@
 import {WebSocket} from 'ws';
 import type {AgentManager} from '../agents.js';
+import type {DetailMessage} from '../agent-feed.js';
 import type {CollabHub} from '../collab/hub.js';
 import type {DraftHub} from '../drafts.js';
 import type {SessionNamer} from '../session-namer.js';
@@ -15,15 +16,58 @@ export type AgentSocketContext = {
   clients: Set<WebSocket>;
 };
 
-/** Serves `/api/v1/ws`: Agent event subscriptions with replay, commands, drafts and collab events. */
+export const PROTOCOL_VERSION = 2;
+
+/**
+ * Events every client sees for every Agent: what it is doing, not what it produced.
+ * Transcript content reaches only clients viewing the Agent (`focus`), as timeline items.
+ */
+const OVERVIEW_EVENTS = new Set([
+  'agent_start',
+  'agent_end',
+  'agent_settled',
+  'activity_changed',
+  'queue_update',
+  'session_info_changed',
+  'agent_unloaded',
+  'agent_loaded',
+  'auto_retry_start',
+  'auto_retry_end',
+  'summarization_retry_scheduled',
+  'summarization_retry_attempt_start',
+  'summarization_retry_finished',
+  'extension_ui_request',
+  'extension_ui_response',
+  'extension_ui_notify',
+  'extension_ui_status',
+  'extension_ui_widget',
+  'extension_ui_title',
+  'extension_ui_working_message'
+]);
+
+/** Delay before sending streamed text or tool output, so one frame carries many updates. */
+const BATCH_WINDOW_MS = 100;
+
+/**
+ * Serves `/api/v1/ws`.
+ * - `subscribe_all`: the state of every Agent, then their overview events.
+ * - `focus {agentId, limit}`: a snapshot of the Agent being viewed (newest timeline page, streamed
+ *   text, dialogs), then in order on this socket: streamed text, appended items, user shell output.
+ * - `watch`/`unwatch {toolCallId}`: output of a running tool the client has expanded.
+ * Nothing is replayed: on (re)connect a client gets current state again. HTTP serves only what
+ * never changes: older timeline pages and item bodies.
+ */
 export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
   ctx.clients.add(ws);
   const subscriptions = new Map<string, () => void>();
-  // Pi providers may emit one delta per character. Sending every delta as its own
-  // WebSocket frame is especially expensive over a high-latency/low-bandwidth
-  // link: agent_end gets stuck behind thousands of tiny frames. Coalesce adjacent
-  // text/thinking deltas while preserving their sequence cursor and event order.
-  let pendingDelta: any, deltaTimer: ReturnType<typeof setTimeout> | undefined;
+  let focused: string | undefined;
+  /** Running tools whose card this client has expanded. */
+  const watched = new Set<string>();
+  // Providers emit one delta per token, and tools report their whole output so far on every update.
+  // Both wait for a short window: adjacent deltas merge, and only a tool's latest output is sent.
+  let pendingDelta: {type: 'delta'; agentId: string; kind: string; delta: string} | undefined,
+    batchTimer: ReturnType<typeof setTimeout> | undefined;
+  const pendingOutputs = new Map<string, {agentId: string; output: string}>();
   const sendNow = (message: unknown) => {
     if (ws.readyState !== WebSocket.OPEN) return;
     if (ws.bufferedAmount > 2 * 1024 * 1024) {
@@ -32,51 +76,71 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
     }
     ws.send(JSON.stringify(message));
   };
-  const flushDelta = () => {
-    if (deltaTimer) clearTimeout(deltaTimer);
-    deltaTimer = undefined;
+  const flushBatch = () => {
+    if (batchTimer) clearTimeout(batchTimer);
+    batchTimer = undefined;
     if (pendingDelta) {
       const message = pendingDelta;
       pendingDelta = undefined;
       sendNow(message);
     }
+    for (const [toolCallId, {agentId, output}] of pendingOutputs)
+      if (watched.has(toolCallId)) sendNow({type: 'tool_output', agentId, toolCallId, output});
+    pendingOutputs.clear();
   };
+  const scheduleBatch = () => {
+    if (!batchTimer) batchTimer = setTimeout(flushBatch, BATCH_WINDOW_MS);
+  };
+  /** Everything goes through here so a held delta or output is never overtaken by a later message. */
   const send = (message: any) => {
-    const update =
-        message?.type === 'agent_event' && message.event?.type === 'message_update'
-          ? message.event.assistantMessageEvent
-          : undefined,
-      isDelta =
-        update &&
-        (update.type === 'text_delta' || update.type === 'thinking_delta') &&
-        typeof update.delta === 'string';
-    if (!isDelta) {
-      flushDelta();
+    if (message?.type !== 'delta') {
+      flushBatch();
       sendNow(message);
       return;
     }
-    const previous = pendingDelta?.event?.assistantMessageEvent;
-    if (pendingDelta && pendingDelta.agentId === message.agentId && previous?.type === update.type) {
-      previous.delta += update.delta;
-      pendingDelta.eventId = message.eventId;
-      pendingDelta.sequence = message.sequence;
-      pendingDelta.timestamp = message.timestamp;
-    } else {
-      flushDelta();
-      pendingDelta = {...message, event: {...message.event, assistantMessageEvent: {...update}}};
+    if (pendingDelta && pendingDelta.agentId === message.agentId && pendingDelta.kind === message.kind)
+      pendingDelta.delta += message.delta;
+    else {
+      flushBatch();
+      pendingDelta = {...message};
     }
-    if (!deltaTimer) deltaTimer = setTimeout(flushDelta, 40);
+    scheduleBatch();
+  };
+  const forwardDetail = (agentId: string, message: DetailMessage) => {
+    if (message.type === 'tool_output') {
+      if (!watched.has(message.toolCallId)) return;
+      pendingOutputs.set(message.toolCallId, {agentId, output: message.output});
+      scheduleBatch();
+    } else if (message.type === 'event')
+      send({
+        type: 'agent_event',
+        agentId,
+        timestamp: Date.now(),
+        status: ctx.agents.get(agentId).record.status,
+        event: message.event
+      });
+    else send({...message, agentId});
+  };
+  let focusRequest = 0;
+  const unfocus = () => {
+    focusRequest++;
+    subscriptions.get('focus')?.();
+    subscriptions.delete('focus');
+    focused = undefined;
+    watched.clear();
+    pendingOutputs.clear();
   };
   const unsubscribeVoice = ctx.voice?.subscribe((agentId, event) => {
-    if (subscriptions.has('*') || subscriptions.has(agentId)) send({type: 'voice_event', agentId, event});
+    if (subscriptions.has('*')) send({type: 'voice_event', agentId, event});
   });
   const unsubscribeNamer = ctx.sessionNamer?.subscribe((agentId, event) => {
-    if (subscriptions.has('*') || subscriptions.has(agentId))
-      send({type: 'session_namer_event', agentId, event});
+    if (subscriptions.has('*')) send({type: 'session_namer_event', agentId, event});
   });
   ws.on('close', () => {
-    if (deltaTimer) clearTimeout(deltaTimer);
+    focusRequest++; // A focus still loading is for a socket that no longer exists.
+    if (batchTimer) clearTimeout(batchTimer);
     pendingDelta = undefined;
+    pendingOutputs.clear();
     ctx.clients.delete(ws);
     unsubscribeVoice?.();
     unsubscribeNamer?.();
@@ -111,92 +175,62 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
         }
         if (m.type === 'subscribe_all') {
           subscriptions.get('*')?.();
-          const forward = (agentId: string, e: any) =>
-            !subscriptions.has(agentId) &&
-            send({
-              type: 'agent_event',
-              agentId,
-              eventId: e.id,
-              sequence: e.sequence,
-              timestamp: e.timestamp,
-              status: e.status,
-              event: e.event
-            });
-          subscriptions.set('*', ctx.agents.subscribeAll(forward));
-          send({type: 'subscribed_all', protocolVersion: 1});
-          return;
-        }
-        if (m.type === 'subscribe') {
-          const agentId = m.agentId,
-            fromNow = m.fromNow === true;
-          subscriptions.get(agentId)?.();
-          const forward = (e: any) =>
-            send({
-              type: 'agent_event',
-              agentId,
-              eventId: e.id,
-              sequence: e.sequence,
-              timestamp: e.timestamp,
-              status: e.status,
-              event: e.event
-            });
-          let ready = false,
-            active = true;
-          const unsubscribe = ctx.agents.subscribe(agentId, e => {
-            if (ready) forward(e);
-          });
-          const stop = () => {
-            active = false;
-            ready = false;
-            unsubscribe();
-          };
-          subscriptions.set(agentId, stop);
-          try {
-            send({
-              type: 'subscribed',
-              agentId,
-              protocolVersion: 1,
-              currentSequence: ctx.agents.currentSequence(agentId)
-            });
-            if (!fromNow) {
-              const last = Number(m.lastSequence ?? 0),
-                replay = ctx.agents.events(agentId, last);
-              if (ctx.agents.hasReplayGap(agentId, last) || replay.length > 250) {
-                const messageLimit = m.messageLimit === undefined ? undefined : Number(m.messageLimit);
-                const snapshot = await ctx.agents.snapshot(
-                  agentId,
-                  Number.isFinite(messageLimit) ? messageLimit : undefined
-                );
-                if (!active) return; // Closed or replaced by a newer subscription while awaiting messages.
-                // Do not forward live events ahead of the snapshot. Catch up from the
-                // existing bounded replay cache instead of maintaining another buffer.
-                const updates = ctx.agents.events(agentId, snapshot.lastSequence);
-                if (
-                  ctx.agents.hasReplayGap(agentId, snapshot.lastSequence) ||
-                  (updates.length && updates[0].sequence !== snapshot.lastSequence + 1)
-                ) {
-                  stop();
-                  ws.close(1013, 'Replay gap during snapshot');
-                  return;
-                }
-                send({type: 'agent_snapshot', agentId, ...snapshot});
-                for (const event of updates) forward(event);
-              } else for (const event of replay) forward(event);
-            }
-            // Refresh/reconnect may already have a saved cursor but no in-memory
-            // activity. Send the current IDs after replay, even if replay was empty.
+          // State first: events that follow are then always newer than what the client holds.
+          for (const agent of ctx.agents.list())
             send({
               type: 'agent_state',
-              agentId,
-              sequence: ctx.agents.currentSequence(agentId),
-              state: ctx.agents.snapshotState(agentId)
+              agentId: agent.agentId,
+              state: ctx.agents.snapshotState(agent.agentId)
             });
-            ready = true;
-          } catch (error) {
-            if (!active) return;
-            stop();
-            if (subscriptions.get(agentId) === stop) subscriptions.delete(agentId);
-            throw error;
+          subscriptions.set(
+            '*',
+            ctx.agents.subscribeAll((agentId, e) => {
+              if (OVERVIEW_EVENTS.has(e.event.type))
+                send({
+                  type: 'agent_event',
+                  agentId,
+                  timestamp: e.timestamp,
+                  status: e.status,
+                  event: e.event
+                });
+            })
+          );
+          // serverTime lets clients correct clock skew when showing how long an activity has been running.
+          send({type: 'subscribed_all', protocolVersion: PROTOCOL_VERSION, serverTime: Date.now()});
+          return;
+        }
+        if (m.type === 'focus') {
+          unfocus();
+          if (m.agentId === null || m.agentId === undefined) return;
+          const agentId = String(m.agentId),
+            request = focusRequest;
+          // Messages emitted while the snapshot is being sent wait for it; they are all newer.
+          let held: DetailMessage[] | undefined = [];
+          const focus = await ctx.agents
+            .focus(agentId, message => (held ? held.push(message) : forwardDetail(agentId, message)), m.limit)
+            .catch(error => {
+              if (request === focusRequest)
+                send({type: 'focus_error', agentId, error: {code: error.code, message: error.message}});
+            });
+          if (!focus) return;
+          if (request !== focusRequest) return focus.unsubscribe(); // Focus moved on while loading.
+          focused = agentId;
+          subscriptions.set('focus', focus.unsubscribe);
+          send({type: 'focus_state', agentId, ...focus.snapshot});
+          const pending = held;
+          held = undefined;
+          for (const message of pending) forwardDetail(agentId, message);
+          return;
+        }
+        if (m.type === 'watch' || m.type === 'unwatch') {
+          const toolCallId = String(m.toolCallId ?? '');
+          if (m.type === 'unwatch') {
+            watched.delete(toolCallId);
+            pendingOutputs.delete(toolCallId);
+          } else if (focused && toolCallId) {
+            watched.add(toolCallId);
+            const output = ctx.agents.toolOutput(focused, toolCallId);
+            if (output !== undefined) send({type: 'tool_output', agentId: focused, toolCallId, output});
           }
           return;
         }

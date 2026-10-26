@@ -77,11 +77,6 @@
     if (selectedAgentId && !selectedAgentId.includes(':')) {
       const compositeId = resourceKey(LEGACY_BACKEND_ID, selectedAgentId);
       storage.rpAgentId = compositeId;
-      const cursorKey = `rpSeq:${selectedAgentId}`;
-      if (storage[cursorKey] !== undefined) {
-        storage[`rpSeq:${compositeId}`] = storage[cursorKey];
-        delete storage[cursorKey];
-      }
     }
     for (const key of ['rpTerminalId', 'rpWorkspaceId']) {
       const value = String(storage[key] || '');

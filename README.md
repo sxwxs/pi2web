@@ -246,7 +246,7 @@ Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Wor
 
 这些约定针对上述 Nozzala 固件，不是所有相同 VID/PID 设备的通用规范。连接前请退出其他控制该键盘的 ChatGPT/Codex App，避免设备占用或灯光互相覆盖。
 
-灯效恢复使用服务器活动快照：`state.activity.bashIds` 表示在途的独立 Shell，`state.activity.dialogIds` 表示待回答的扩展对话框。这些 ID 只保存在服务进程内存中，不写入数据库或 Pi Session；LLM 的 `idle` 不代表它们已结束。回放缺口通过 `agent_snapshot.state` 恢复，随后按序补发快照构建期间的事件。每次订阅在回放完成后、实时事件开始前发送 `agent_state` 当前状态；首次 `fromNow` 订阅或已有游标但无新事件时也会发送，因此刷新页面无需等下一段 Shell 输出才能恢复灯效。旧服务端未提供 `activity` 时仍按普通 Agent 状态降级显示。不支持 WebHID 或安全上下文的浏览器会静默跳过自动连接，配置页保留原因说明。
+灯效直接映射服务器维护的 Agent 活动状态（`state.activity`：当前阶段、在途的独立 Shell、待回答的扩展对话框），连接时随 `agent_state` 下发、变化时以 `activity_changed` 推送；这些状态只保存在服务进程内存中，不写入数据库或 Pi Session，LLM 的 `idle` 不代表独立 Shell 或对话框已结束。不支持 WebHID 或安全上下文的浏览器会静默跳过自动连接，配置页保留原因说明。
 
 活动快照中的 `state.activity.dialogRequests` 还包含待回答对话框的原始请求（不含用户答案），刷新或回放缺口后可恢复回答控件。服务端复用同一份内存请求记录，前端按 request ID 避免重复创建对话框；已结束的请求不会再出现在快照中。
 
@@ -354,7 +354,8 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET /api/v1/agents/:id/mcp` 返回该 Agent cwd 下的 MCP 服务器配置（全局 `mcp.json` 与受信任项目的 `.pi/mcp.json`），`POST` 用 `{name, enabled}` 启用或停用。只有项目被 Pi 显式信任时才会写入项目级覆盖，否则写全局文件。修改在 Agent 下次加载时生效。
 - `GET /api/v1/agents/:id/commands` 返回该 Agent cwd 下可用的 prompt template 和 skill（`{name, description, argumentHint, source}`）。`prompt` 接口本身会展开 `/命令`、skill 和 prompt template。
 - `POST /api/v1/agents/:id/bash` 在 Agent Session 内执行命令（`{command, excludeFromContext}`），输出通过 `bash_execution_update` 事件流式推送并记录到 Session；`POST /api/v1/agents/:id/bash-abort` 取消。
-- WebSocket `/api/v1/ws` 支持 sequence、replay、snapshot、`fromNow` 和 Agent command；`subscribe_collab` 推送协作事件。
+- WebSocket `/api/v1/ws`（协议 v2，不做事件回放）：`subscribe_all` 先下发每个 Agent 的当前状态，再推送所有 Agent 的概览事件（状态、活动、队列、对话框、通知）；`focus` 选定正在查看的 Agent，只为它推送流式文本、时间线条目变化和用户 Shell 输出；`watch` 订阅已展开的运行中工具的输出；`subscribe_collab` 推送协作事件。
+- 会话内容通过 HTTP 时间线读取：`GET /api/v1/agents/:id/timeline?limit&before` 返回条目摘要（正文较小或需要阅读的条目内联），`GET /api/v1/agents/:id/sessions/:sessionId/items/:itemId` 按需返回完整正文；已完成条目永不改变，响应带 `immutable` 缓存头，浏览器可永久缓存。
 
 ## System Prompt 与 Agent 模板
 

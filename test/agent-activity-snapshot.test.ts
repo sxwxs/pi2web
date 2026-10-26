@@ -16,6 +16,10 @@ class ControlledBackend extends MockBackend {
     this.publish = listener;
     return super.subscribe(listener);
   }
+  /** Record a message the way Pi does: after listeners saw it. */
+  record(message: Record<string, unknown>) {
+    return this.append(message);
+  }
 }
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -23,24 +27,24 @@ afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
 });
 
-async function setup() {
-  const dir = await mkdtemp(path.join(tmpdir(), 'pi-activity-snapshot-'));
+/** `reloadGate` holds loading a backend again (after the first) until it resolves. */
+async function setup({reloadGate}: {reloadGate?: Promise<void>} = {}) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'pi-agent-socket-'));
   const workspaceDir = path.join(dir, 'workspace');
   await mkdir(workspaceDir);
   const workspaces = new WorkspaceStore(),
     workspace = workspaces.add('test', workspaceDir);
   const backends: ControlledBackend[] = [];
-  const agents = new AgentManager(workspaces, (id, cwd) => {
+  const agents = new AgentManager(workspaces, async (id, cwd) => {
+    if (backends.length && reloadGate) await reloadGate;
     const backend = new ControlledBackend(id, cwd);
     backends.push(backend);
     return backend;
   });
   const server = new RemotePiServer({port: 0, dataDir: path.join(dir, 'data'), workspaces, agents});
-  const sockets: WebSocket[] = [],
-    releases: Array<() => void> = [];
+  const sockets: WebSocket[] = [];
   cleanup.push(async () => {
     for (const socket of sockets) socket.terminate();
-    for (const release of releases) release();
     await server.stop();
     await rm(dir, {recursive: true, force: true});
   });
@@ -49,17 +53,6 @@ async function setup() {
   const agent = await agents.create(workspace.id),
     backend = backends[0];
   const publish = (event: AgentEvent) => backend.publish(event);
-
-  function blockMessages() {
-    let resolve!: (messages: unknown[]) => void, reject!: (error: Error) => void;
-    const promise = new Promise<unknown[]>((yes, no) => {
-      resolve = yes;
-      reject = no;
-    });
-    backend.getMessages = vi.fn(() => promise);
-    releases.push(() => resolve([]));
-    return {resolve, reject, started: () => vi.waitFor(() => expect(backend.getMessages).toHaveBeenCalled())};
-  }
   async function connect() {
     const socket = new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`, {
       headers: {authorization: `Bearer ${token}`}
@@ -75,19 +68,34 @@ async function setup() {
       async wait(predicate: (message: any) => boolean) {
         await vi.waitFor(() => expect(messages.some(predicate)).toBe(true));
         return messages.find(predicate);
+      },
+      /** Round trip: everything the server sent before this is in `messages`. */
+      async barrier() {
+        const count = messages.filter(m => m.type === 'subscribed_drafts').length;
+        socket.send(JSON.stringify({type: 'subscribe_drafts'}));
+        await vi.waitFor(() =>
+          expect(messages.filter(m => m.type === 'subscribed_drafts')).toHaveLength(count + 1)
+        );
       }
     };
   }
   return {
-    server,
     agents,
     agent,
     backend,
     backends,
     publish,
-    blockMessages,
     connect,
     workspaces,
+    /** Open WebSocket connections, as the server counts them once their close is handled. */
+    connections: async () =>
+      (
+        await (
+          await fetch(`http://127.0.0.1:${address!.port}/api/v1/system/status`, {
+            headers: {authorization: `Bearer ${token}`}
+          })
+        ).json()
+      ).data.webSocketConnections,
     unload: () =>
       fetch(`http://127.0.0.1:${address!.port}/api/v1/agents/${agent.agentId}`, {
         method: 'DELETE',
@@ -108,33 +116,75 @@ const startWork = (publish: (event: AgentEvent) => void) => {
   publish(dialogRequest);
 };
 const emptyQueue = {steering: [], followUp: []};
+const since = expect.any(Number);
 const active = {
-  bashIds: ['bash-1'],
-  dialogIds: ['dialog-1'],
+  run: null,
+  phase: {kind: 'idle', since},
+  bash: [{id: 'bash-1', command: 'sleep 30', since}],
+  dialogs: [{requestId: 'dialog-1', title: 'Confirm', since}],
   dialogRequests: [dialogRequest],
   queue: emptyQueue
 };
-const idle = {bashIds: [], dialogIds: [], dialogRequests: [], queue: emptyQueue};
+const idle = {
+  run: null,
+  phase: {kind: 'idle', since},
+  bash: [],
+  dialogs: [],
+  dialogRequests: [],
+  queue: emptyQueue
+};
+/** `active` with concrete times, for schema checks. */
+const activeValue = {
+  ...active,
+  phase: {kind: 'idle', since: 1},
+  bash: [{id: 'bash-1', command: 'sleep 30', since: 1}],
+  dialogs: [{requestId: 'dialog-1', title: 'Confirm', since: 1}]
+};
 
-describe('WebSocket state schema', () => {
-  it.each(['agent_snapshot', 'agent_state'])(
-    'requires core state fields but accepts older servers without activity: %s',
-    type => {
-      const state = {agentId: 'agent-a', sessionId: 'session-a', cwd: '/workspace', status: 'idle'};
-      const message = {type, agentId: state.agentId, state, sequence: 0, lastSequence: 0, messages: []};
-      expect(Check(schema, message)).toBe(true);
-      expect(Check(schema, {...message, state: {...state, activity: active}})).toBe(true);
-      for (const key of ['agentId', 'sessionId', 'cwd', 'status']) {
-        const incomplete: Record<string, unknown> = {...state};
-        delete incomplete[key];
-        expect(Check(schema, {...message, state: incomplete})).toBe(false);
-      }
-      expect(Check(schema, {...message, state: {...state, status: 'unknown'}})).toBe(false);
+describe('WebSocket schema', () => {
+  it('requires core state fields and validates activity', () => {
+    const state = {agentId: 'agent-a', sessionId: 'session-a', cwd: '/workspace', status: 'idle'};
+    const message = {type: 'agent_state', agentId: state.agentId, state};
+    expect(Check(schema, message)).toBe(true);
+    expect(Check(schema, {...message, state: {...state, activity: activeValue}})).toBe(true);
+    expect(
+      Check(schema, {
+        ...message,
+        state: {...state, activity: {...activeValue, phase: {kind: 'nope', since: 1}}}
+      })
+    ).toBe(false);
+    for (const key of ['agentId', 'sessionId', 'cwd', 'status']) {
+      const incomplete: Record<string, unknown> = {...state};
+      delete incomplete[key];
+      expect(Check(schema, {...message, state: incomplete})).toBe(false);
     }
-  );
+  });
+
+  it('accepts the detail messages', () => {
+    const call = {id: 'e1.0', kind: 'tool_call', title: 'bash', toolCallId: 't', size: 2, body: '{}'};
+    const page = {items: [call], total: 1, start: 0, hasMore: false};
+    for (const message of [
+      {type: 'focus', agentId: 'a', limit: 50},
+      {
+        type: 'focus_state',
+        agentId: 'a',
+        sessionId: 's',
+        page,
+        live: {text: 'hi', thinking: ''},
+        dialogRequests: []
+      },
+      {type: 'focus_error', agentId: 'a', error: {message: 'nope'}},
+      {type: 'delta', agentId: 'a', kind: 'text', delta: 'hi'},
+      {type: 'items', agentId: 'a', sessionId: 's', items: [call], clearLive: true},
+      {type: 'timeline_reset', agentId: 'a', sessionId: 's'},
+      {type: 'tool_output', agentId: 'a', toolCallId: 't', output: 'line'}
+    ])
+      expect(Check(schema, message)).toBe(true);
+    expect(Check(schema, {type: 'items', agentId: 'a', sessionId: 's', items: [{id: 'x'}]})).toBe(false);
+  });
 });
 
-describe('authoritative activity snapshots', () => {
+describe('authoritative activity state', () => {
   it('tracks parallel operations independently of LLM turns and clears them by ID', async () => {
     const {agents, agent, backend, publish} = await setup();
     startWork(publish);
@@ -148,7 +198,12 @@ describe('authoritative activity snapshots', () => {
     // A pending dialog blocks the run, which is reported as waiting_for_user rather than idle.
     expect(agents.snapshotState(agent.agentId)).toMatchObject({
       status: 'waiting_for_user',
-      activity: {bashIds: ['bash-1', 'bash-2'], dialogIds: ['dialog-1', 'dialog-2']}
+      activity: {
+        run: null,
+        phase: {kind: 'idle'},
+        bash: [{id: 'bash-1'}, {id: 'bash-2'}],
+        dialogs: [{requestId: 'dialog-1'}, {requestId: 'dialog-2'}]
+      }
     });
     expect(agents.get(agent.agentId).record).not.toHaveProperty('activity');
     publish({type: 'bash_execution_end', id: 'bash-2'});
@@ -159,55 +214,6 @@ describe('authoritative activity snapshots', () => {
     publish({type: 'extension_ui_response', requestId: 'dialog-1'});
     expect(agents.snapshotState(agent.agentId).activity).toEqual(idle);
   });
-
-  it('sends the current status with every event and with REST state', async () => {
-    const {agents, agent, publish, connect} = await setup();
-    const client = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, fromNow: true});
-    await client.wait(message => message.type === 'agent_state');
-    publish({type: 'agent_start'});
-    expect(await client.wait(message => message.event?.type === 'agent_start')).toMatchObject({
-      status: 'streaming'
-    });
-    // A dialog blocks the run, which live clients must see without deriving it from the event type.
-    publish(dialogRequest);
-    expect(await client.wait(message => message.event?.type === 'extension_ui_request')).toMatchObject({
-      status: 'waiting_for_user'
-    });
-    expect((await agents.state(agent.agentId)).status).toBe('waiting_for_user');
-    publish({type: 'extension_ui_response', requestId: 'dialog-1'});
-    expect(await client.wait(message => message.event?.type === 'extension_ui_response')).toMatchObject({
-      status: 'streaming'
-    });
-    expect((await agents.state(agent.agentId)).status).toBe('streaming');
-  });
-
-  it.each([undefined, 25])(
-    'captures status, IDs and cursor together before reading messages (limit %s)',
-    async limit => {
-      const {agents, agent, publish, blockMessages} = await setup();
-      publish({type: 'agent_start'});
-      startWork(publish);
-      const cursor = agents.currentSequence(agent.agentId),
-        gate = blockMessages();
-      const pending = agents.snapshot(agent.agentId, limit);
-      await gate.started();
-      publish({type: 'bash_execution_end', id: 'bash-1'});
-      publish({type: 'extension_ui_response', requestId: 'dialog-1'});
-      publish({type: 'agent_end'});
-      gate.resolve([]);
-      const snapshot = await pending;
-      expect(snapshot.lastSequence).toBe(cursor);
-      expect(snapshot.state).toMatchObject({status: 'waiting_for_user', activity: active});
-      expect(agents.events(agent.agentId, cursor).map(event => event.sequence)).toEqual([
-        cursor + 1,
-        cursor + 2,
-        cursor + 3
-      ]);
-      expect(agents.snapshotState(agent.agentId)).toMatchObject({status: 'idle', activity: idle});
-      expect(snapshot.state.activity).toEqual(active); // Later events did not mutate the captured arrays.
-    }
-  );
 
   it('drops runtime activity on unload/restore and ignores late events from the old backend', async () => {
     const {agents, agent, publish, workspaces} = await setup();
@@ -224,192 +230,222 @@ describe('authoritative activity snapshots', () => {
   });
 });
 
-describe('WebSocket snapshot ordering', () => {
-  it('broadcasts and replays unloading so other clients can clear activity without reconnecting', async () => {
-    const {agents, agent, publish, connect, unload, backends} = await setup();
-    const client = await connect(),
-      observer = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, fromNow: true});
-    observer.send({type: 'subscribe_all'});
-    await client.wait(message => message.type === 'agent_state');
-    await observer.wait(message => message.type === 'subscribed_all');
-    startWork(publish);
-    await client.wait(message => message.event?.type === 'extension_ui_request');
-    await observer.wait(message => message.event?.type === 'extension_ui_request');
-    const cursor = agents.currentSequence(agent.agentId);
-    expect((await unload()).status).toBe(200);
-    const unloaded = await client.wait(message => message.event?.type === 'agent_unloaded');
-    expect(unloaded).toMatchObject({
-      type: 'agent_event',
-      agentId: agent.agentId,
-      sequence: cursor + 1,
-      event: {type: 'agent_unloaded'}
-    });
-    expect(await observer.wait(message => message.event?.type === 'agent_unloaded')).toEqual(unloaded);
-    expect(agents.snapshotState(agent.agentId)).toMatchObject({status: 'unloaded', activity: idle});
-    publish({type: 'bash_execution_update', id: 'bash-1', delta: 'late output'});
-    expect(agents.currentSequence(agent.agentId)).toBe(cursor + 1);
-
-    const reconnected = await connect();
-    reconnected.send({type: 'subscribe', agentId: agent.agentId, lastSequence: cursor});
-    expect(await reconnected.wait(message => message.type === 'agent_event')).toEqual(unloaded);
-    expect(await reconnected.wait(message => message.type === 'agent_state')).toMatchObject({
-      state: {status: 'unloaded', activity: idle}
-    });
-    expect(backends).toHaveLength(1); // Observing unload must not reload the backend.
-  });
-
-  it('includes current activity in fromNow without replaying the transcript', async () => {
-    const {agent, publish, backend, connect} = await setup();
-    startWork(publish);
-    backend.getMessages = vi.fn(async () => []);
-    const client = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, fromNow: true});
-    const subscribed = await client.wait(message => message.type === 'subscribed');
-    expect(subscribed.currentSequence).toBe(2);
-    const baseline = await client.wait(message => message.type === 'agent_state');
-    expect(baseline).toMatchObject({sequence: 2, state: {status: 'waiting_for_user', activity: active}});
-    expect(backend.getMessages).not.toHaveBeenCalled();
-    publish({type: 'bash_execution_end', id: 'bash-1'});
-    const end = await client.wait(message => message.type === 'agent_event');
-    expect(end.sequence).toBe(3);
-    expect(client.messages.map(message => message.type)).toEqual([
-      'subscribed',
-      'agent_state',
-      'agent_event'
-    ]);
-  });
-
-  it('restores activity when a refreshed page already has an up-to-date saved cursor', async () => {
-    const {agent, publish, backend, connect} = await setup();
-    startWork(publish);
-    backend.getMessages = vi.fn(async () => []);
-    const client = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, lastSequence: 2});
-    const baseline = await client.wait(message => message.type === 'agent_state');
-    expect(baseline).toMatchObject({sequence: 2, state: {status: 'waiting_for_user', activity: active}});
-    expect(client.messages.map(message => message.type)).toEqual(['subscribed', 'agent_state']);
-    expect(backend.getMessages).not.toHaveBeenCalled();
-  });
-
-  it('sends the gap snapshot before every event that occurred during its construction', async () => {
-    const {agents, agent, publish, blockMessages, connect} = await setup();
-    startWork(publish);
-    const cursor = agents.currentSequence(agent.agentId),
-      gate = blockMessages();
-    const client = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, lastSequence: 999});
-    await gate.started();
-    publish({type: 'bash_execution_end', id: 'bash-1'});
-    publish({type: 'extension_ui_response', requestId: 'dialog-1'});
-    publish({type: 'bash_execution_start', id: 'bash-2'});
-    gate.resolve([]);
-    const baseline = await client.wait(message => message.type === 'agent_state');
-    expect(baseline).toMatchObject({
-      sequence: cursor + 3,
-      state: {activity: {bashIds: ['bash-2'], dialogIds: []}}
-    });
-    const snapshot = client.messages.find(message => message.type === 'agent_snapshot');
-    expect(snapshot).toMatchObject({
-      lastSequence: cursor,
-      state: {status: 'waiting_for_user', activity: active}
-    });
-    expect(client.messages.map(message => message.type)).toEqual([
-      'subscribed',
-      'agent_snapshot',
-      'agent_event',
-      'agent_event',
-      'agent_event',
-      'agent_state'
-    ]);
-    expect(
-      client.messages.filter(message => message.type === 'agent_event').map(message => message.sequence)
-    ).toEqual([cursor + 1, cursor + 2, cursor + 3]);
-    expect(agents.snapshotState(agent.agentId).activity).toEqual({
-      bashIds: ['bash-2'],
-      dialogIds: [],
-      dialogRequests: [],
-      queue: emptyQueue
-    });
-  });
-
-  it('recovers pending dialog payloads even after their request events leave the replay cache', async () => {
-    const {agents, agent, publish, connect} = await setup();
-    const request = {...dialogRequest, kind: 'select', options: ['Keep', 'Replace']};
-    publish(request);
-    for (let i = 0; i < 1001; i++) publish({type: 'extension_ui_notify', message: String(i)});
-    expect(agents.events(agent.agentId).some(item => item.event.type === 'extension_ui_request')).toBe(false);
-    const client = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, lastSequence: 1});
-    const snapshot = await client.wait(message => message.type === 'agent_snapshot');
-    expect(snapshot.state.activity.dialogRequests).toEqual([request]);
-    expect(Check(schema, snapshot)).toBe(true);
-    publish({type: 'extension_ui_response', requestId: request.requestId});
-    await client.wait(message => message.event?.type === 'extension_ui_response');
-    expect(agents.snapshotState(agent.agentId).activity.dialogRequests).toEqual([]);
-  });
-
-  it('sends ordinary replay before the current-state baseline, then switches to live events', async () => {
+describe('overview stream', () => {
+  it('starts with the state of every Agent, including pending dialog payloads', async () => {
     const {agent, publish, connect} = await setup();
     startWork(publish);
     const client = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, lastSequence: 0});
-    await client.wait(message => message.type === 'agent_state');
-    expect(client.messages[0].state).toBeUndefined();
-    expect(client.messages.map(message => message.type)).toEqual([
-      'subscribed',
-      'agent_event',
-      'agent_event',
-      'agent_state'
-    ]);
-    publish({type: 'extension_ui_response', requestId: 'dialog-1'});
-    expect((await client.wait(message => message.sequence === 3)).event.type).toBe('extension_ui_response');
-  });
-
-  it('does not deliver an old pending snapshot after a replacement subscription', async () => {
-    const {agent, publish, blockMessages, connect} = await setup();
-    startWork(publish);
-    const gate = blockMessages(),
-      client = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, lastSequence: 999});
-    await gate.started();
-    client.send({type: 'subscribe', agentId: agent.agentId, fromNow: true});
-    await client.wait(message => message.type === 'agent_state');
-    gate.resolve([]);
-    client.send({type: 'subscribe_all'}); // Round-trip barrier after releasing the old snapshot.
-    await client.wait(message => message.type === 'subscribed_all');
-    expect(client.messages.some(message => message.type === 'agent_snapshot')).toBe(false);
-    expect(client.messages.filter(message => message.type === 'agent_state')).toHaveLength(1);
-    publish({type: 'bash_execution_end', id: 'bash-1'});
-    await client.wait(message => message.type === 'agent_event');
-    expect(client.messages.filter(message => message.type === 'agent_event')).toHaveLength(1);
-  });
-
-  it('releases a failed subscription so it cannot block subscribe_all forwarding', async () => {
-    const {agent, publish, blockMessages, connect} = await setup();
-    const gate = blockMessages(),
-      client = await connect();
     client.send({type: 'subscribe_all'});
-    await client.wait(message => message.type === 'subscribed_all');
-    client.send({type: 'subscribe', agentId: agent.agentId, lastSequence: 999});
-    await gate.started();
-    gate.reject(Error('snapshot read failed'));
-    await client.wait(message => message.type === 'command_result' && !message.success);
-    publish({type: 'bash_execution_start', id: 'bash-1'});
-    expect((await client.wait(message => message.type === 'agent_event')).event.id).toBe('bash-1');
+    await client.wait(m => m.type === 'subscribed_all');
+    expect(client.messages.map(m => m.type)).toEqual(['agent_state', 'subscribed_all']);
+    const state = client.messages[0];
+    expect(state).toMatchObject({
+      agentId: agent.agentId,
+      state: {status: 'waiting_for_user', activity: active}
+    });
+    expect(Check(schema, state)).toBe(true);
   });
 
-  it('closes for retry rather than silently dropping events when the replay cache overflows', async () => {
-    const {agent, publish, blockMessages, connect} = await setup();
-    const gate = blockMessages(),
-      client = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, lastSequence: 999});
-    await gate.started();
-    for (let i = 0; i < 1001; i++) publish({type: 'extension_ui_notify', message: String(i)});
-    const closed = once(client.socket, 'close');
-    gate.resolve([]);
-    const [code] = await closed;
-    expect(code).toBe(1013);
-    expect(client.messages.map(message => message.type)).toEqual(['subscribed']);
+  it('sends the current status with every event, and nothing a viewer alone needs', async () => {
+    const {agents, agent, publish, connect} = await setup();
+    const client = await connect();
+    client.send({type: 'subscribe_all'});
+    await client.wait(m => m.type === 'subscribed_all');
+    publish({type: 'agent_start'});
+    expect(await client.wait(m => m.event?.type === 'agent_start')).toMatchObject({status: 'streaming'});
+    publish(dialogRequest);
+    expect(await client.wait(m => m.event?.type === 'extension_ui_request')).toMatchObject({
+      status: 'waiting_for_user'
+    });
+    expect((await agents.state(agent.agentId)).status).toBe('waiting_for_user');
+    publish({type: 'extension_ui_response', requestId: 'dialog-1'});
+    expect(await client.wait(m => m.event?.type === 'extension_ui_response')).toMatchObject({
+      status: 'streaming'
+    });
+    publish({
+      type: 'message_end',
+      message: {role: 'assistant', content: [{type: 'text', text: 'x'.repeat(5000)}]}
+    });
+    publish({type: 'bash_execution_start', id: 'b', command: 'ls'});
+    publish({type: 'tool_execution_start', toolCallId: 't', toolName: 'read', args: {path: 'a'}});
+    await client.barrier();
+    const types = client.messages.filter(m => m.type === 'agent_event').map(m => m.event.type);
+    for (const type of ['message_end', 'bash_execution_start', 'tool_execution_start'])
+      expect(types).not.toContain(type);
+    expect(client.messages.some(m => ['delta', 'items'].includes(m.type))).toBe(false);
+  });
+
+  it('reports an Agent loaded on demand, so its status leaves unloaded', async () => {
+    const {agents, agent, connect} = await setup();
+    await agents.dispose(agent.agentId);
+    const observer = await connect();
+    observer.send({type: 'subscribe_all'});
+    await observer.wait(m => m.type === 'subscribed_all');
+    const before = agents.get(agent.agentId).record.lastActiveAt;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await agents.timeline(agent.agentId);
+    expect(await observer.wait(m => m.event?.type === 'agent_loaded')).toMatchObject({status: 'idle'});
+    // Viewing is not activity: the list order must not change.
+    expect(agents.get(agent.agentId).record.lastActiveAt).toBe(before);
+  });
+
+  it('broadcasts unloading so other clients can clear activity without reconnecting', async () => {
+    const {agents, agent, publish, connect, unload, backends} = await setup();
+    const observer = await connect();
+    observer.send({type: 'subscribe_all'});
+    await observer.wait(m => m.type === 'subscribed_all');
+    startWork(publish);
+    await observer.wait(m => m.event?.type === 'extension_ui_request');
+    expect((await unload()).status).toBe(200);
+    expect(await observer.wait(m => m.event?.type === 'agent_unloaded')).toMatchObject({
+      type: 'agent_event',
+      agentId: agent.agentId,
+      status: 'unloaded'
+    });
+    expect(agents.snapshotState(agent.agentId)).toMatchObject({status: 'unloaded', activity: idle});
+    expect(backends).toHaveLength(1); // Observing unload must not reload the backend.
+  });
+});
+
+describe('detail stream of the focused Agent', () => {
+  it('answers focus with a snapshot, then sends only newer messages, in order', async () => {
+    const {agent, backend, publish, connect} = await setup();
+    backend.record({role: 'user', content: 'published'});
+    publish({type: 'message_start', message: {role: 'assistant'}}); // Publishes what is recorded so far.
+    publish({type: 'message_update', assistantMessageEvent: {type: 'thinking_delta', delta: 'hmm '}});
+    publish({type: 'message_update', assistantMessageEvent: {type: 'text_delta', delta: 'Hel'}});
+    // Recorded but not yet published when the client focuses: the snapshot has it, nothing repeats it.
+    backend.record({role: 'user', content: 'unpublished'});
+    const client = await connect();
+    client.send({type: 'focus', agentId: agent.agentId, limit: 10});
+    const focus = await client.wait(m => m.type === 'focus_state');
+    expect(focus).toMatchObject({
+      agentId: agent.agentId,
+      page: {items: [{body: 'published'}, {body: 'unpublished'}], total: 2},
+      live: {text: 'Hel', thinking: 'hmm '},
+      dialogRequests: []
+    });
+    expect(Check(schema, focus)).toBe(true);
+    publish({type: 'message_update', assistantMessageEvent: {type: 'text_delta', delta: 'lo'}});
+    const answer = {role: 'assistant', content: [{type: 'text', text: 'Hello'}]};
+    publish({type: 'message_end', message: answer});
+    const entryId = backend.record(answer);
+    const items = await client.wait(m => m.type === 'items');
+    expect(items).toEqual({
+      type: 'items',
+      agentId: agent.agentId,
+      sessionId: focus.sessionId,
+      clearLive: true,
+      items: [expect.objectContaining({id: `${entryId}.0`, kind: 'assistant', body: 'Hello'})]
+    });
+    // Nothing older than the snapshot is sent after it.
+    expect(client.messages.map(m => m.type)).toEqual(['focus_state', 'delta', 'items']);
+  });
+
+  it('streams a running tool output only to clients watching it, latest output per window', async () => {
+    const {agent, backend, publish, connect} = await setup();
+    const watcher = await connect(),
+      other = await connect();
+    for (const client of [watcher, other]) {
+      client.send({type: 'focus', agentId: agent.agentId});
+      await client.wait(m => m.type === 'focus_state');
+    }
+    backend.record({role: 'assistant', content: [{type: 'toolCall', id: 'c', name: 'bash', arguments: {}}]});
+    publish({type: 'tool_execution_start', toolCallId: 'c', toolName: 'bash', args: {}});
+    await watcher.wait(m => m.type === 'items');
+    const update = (text: string) =>
+      publish({
+        type: 'tool_execution_update',
+        toolCallId: 'c',
+        partialResult: {content: [{type: 'text', text}]}
+      });
+    update('one');
+    watcher.send({type: 'watch', toolCallId: 'c'});
+    // Watching mid-run starts with the output so far.
+    expect(await watcher.wait(m => m.type === 'tool_output')).toMatchObject({toolCallId: 'c', output: 'one'});
+    for (let i = 0; i < 50; i++) update(`one\nline ${i}`);
+    await watcher.wait(m => m.type === 'tool_output' && m.output.endsWith('line 49'));
+    // Fifty updates within one window become one frame.
+    expect(watcher.messages.filter(m => m.type === 'tool_output')).toHaveLength(2);
+    backend.record({
+      role: 'toolResult',
+      toolCallId: 'c',
+      toolName: 'bash',
+      content: [{type: 'text', text: 'ok'}],
+      isError: false
+    });
+    publish({type: 'tool_execution_end', toolCallId: 'c', toolName: 'bash', isError: false});
+    expect(await watcher.wait(m => m.type === 'items' && m.items[0].kind === 'tool_result')).toMatchObject({
+      items: [{kind: 'tool_result', toolCallId: 'c', status: 'ok'}]
+    });
+    await other.barrier();
+    expect(other.messages.some(m => m.type === 'tool_output')).toBe(false);
+  });
+
+  it('stops details when the focus moves away and resets the timeline when the branch changes', async () => {
+    const {agents, agent, backend, publish, connect} = await setup();
+    const client = await connect();
+    client.send({type: 'focus', agentId: agent.agentId});
+    const focus = await client.wait(m => m.type === 'focus_state');
+    const first = backend.record({role: 'user', content: 'one'});
+    backend.record({role: 'user', content: 'two'});
+    publish({type: 'turn_end'});
+    expect((await client.wait(m => m.type === 'items')).items.map((item: any) => item.body)).toEqual([
+      'one',
+      'two'
+    ]);
+    await agents.navigate(agent.agentId, first);
+    expect(await client.wait(m => m.type === 'timeline_reset')).toEqual({
+      type: 'timeline_reset',
+      agentId: agent.agentId,
+      sessionId: focus.sessionId
+    });
+    client.send({type: 'focus', agentId: null});
+    await client.barrier();
+    const count = client.messages.length;
+    await agents.command(agent.agentId, 'prompt', 'unseen');
+    await client.barrier();
+    expect(client.messages.slice(count).map(m => m.type)).toEqual(['subscribed_drafts']);
+  });
+
+  it('keeps sending appended items to a viewer across an unload and reload of the Agent', async () => {
+    const {agents, agent, connect} = await setup();
+    const client = await connect();
+    client.send({type: 'focus', agentId: agent.agentId});
+    await client.wait(m => m.type === 'focus_state');
+    await agents.dispose(agent.agentId);
+    await agents.command(agent.agentId, 'prompt', 'after reload');
+    const items = await client.wait(
+      m => m.type === 'items' && m.items.some((i: any) => i.body === 'after reload')
+    );
+    expect(items.items[0]).toMatchObject({kind: 'user', body: 'after reload'});
+  });
+
+  it('leaves no listener behind when the socket closes while focus is loading the Agent', async () => {
+    let release!: () => void;
+    const {agents, agent, connect, connections} = await setup({
+      reloadGate: new Promise<void>(resolve => (release = resolve))
+    });
+    await agents.dispose(agent.agentId);
+    const client = await connect();
+    client.send({type: 'focus', agentId: agent.agentId});
+    await vi.waitFor(() => expect(agents.get(agent.agentId).record.status).toBe('starting'));
+    client.socket.close();
+    // The server has handled the close before the Agent finishes loading.
+    await vi.waitFor(async () => expect(await connections()).toBe(0));
+    release();
+    await vi.waitFor(() => expect(agents.isLoaded(agent.agentId)).toBe(true));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect((agents as any).detailListeners.get(agent.agentId)?.size ?? 0).toBe(0);
+  });
+
+  it('reports a focus that cannot load', async () => {
+    const {connect} = await setup();
+    const client = await connect();
+    client.send({type: 'focus', agentId: 'agent-missing'});
+    expect(await client.wait(m => m.type === 'focus_error')).toMatchObject({
+      agentId: 'agent-missing',
+      error: {code: 'AGENT_NOT_FOUND'}
+    });
   });
 });

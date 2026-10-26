@@ -79,14 +79,14 @@ describe('request body handling', () => {
       body: JSON.stringify({message})
     });
     expect(response.status).toBe(200);
-    const messages = (
+    const timeline = (
       await (
-        await fetch(`${base}/api/v1/agents/${agent.agentId}/messages`, {
+        await fetch(`${base}/api/v1/agents/${agent.agentId}/timeline`, {
           headers: {authorization: `Bearer ${token}`}
         })
       ).json()
     ).data;
-    expect(messages[0]).toEqual({role: 'user', content: message});
+    expect(timeline.items[0]).toMatchObject({kind: 'user', body: message});
   });
   it('rejects oversized bodies before buffering the whole request', async () => {
     const {base, token} = await start();

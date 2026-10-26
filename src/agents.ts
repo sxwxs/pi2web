@@ -4,6 +4,9 @@ import {relative as pathRelative} from 'node:path';
 import type {WorkspaceStore} from './workspaces.js';
 import {createSdkBackend, type BackendOptions} from './sdk-backend.js';
 import type {AgentTemplateSnapshot} from './agent-templates.js';
+import {ActivityTracker, type Activity} from './activity.js';
+import {AgentFeed, type DetailMessage, type TimelineSource} from './agent-feed.js';
+import {buildTimeline, itemBody, pageTimeline, type TimelineEntry} from './timeline.js';
 export type AgentState = {
   status:
     | 'unloaded'
@@ -21,12 +24,55 @@ export type AgentState = {
   cwd: string;
 };
 export type AgentEvent = {type: string; [key: string]: unknown};
+
+/**
+ * Reduce a Pi SDK event to the fields server-side consumers and clients use, or drop it.
+ * Heavy SDK events are whitelisted field by field (Pi attaches whole messages to many of
+ * them) so new SDK fields never leak into memory or onto the wire; pi2web's own events pass through.
+ */
+export function slimEvent(event: AgentEvent): AgentEvent | undefined {
+  const e = event as any;
+  switch (event.type) {
+    // Streamed text and running tool output reach viewing clients through AgentFeed, not as events.
+    case 'message_update':
+    case 'tool_execution_update':
+      return undefined;
+    case 'message_start':
+      return {type: 'message_start', role: e.message?.role ?? e.role};
+    case 'turn_start':
+    case 'turn_end':
+      return {type: event.type};
+    case 'message_end':
+      return {type: 'message_end', message: e.message};
+    case 'agent_end':
+      return {type: 'agent_end', willRetry: e.willRetry, aborted: e.aborted};
+    case 'tool_execution_start':
+      return {
+        type: event.type,
+        toolCallId: e.toolCallId,
+        toolName: e.toolName,
+        args: e.args,
+        parentToolCallId: e.parentToolCallId
+      };
+    case 'tool_execution_end':
+      return {
+        type: event.type,
+        toolCallId: e.toolCallId,
+        toolName: e.toolName,
+        parentToolCallId: e.parentToolCallId,
+        result: e.result,
+        isError: e.isError,
+        durationMs: e.durationMs
+      };
+    default:
+      return event;
+  }
+}
 /** Whether a steered or follow-up message reached the running turn or is waiting for it. */
 export type QueuedInputDisposition = 'handled' | 'queued';
 export type AgentQueue = {steering: string[]; followUp: string[]};
-export type AgentActivity = {
-  bashIds: string[];
-  dialogIds: string[];
+/** Live activity plus what clients need to rebuild dialog controls and the queue bar. */
+export type AgentActivity = Activity & {
   dialogRequests: AgentEvent[];
   queue: AgentQueue;
 };
@@ -59,7 +105,8 @@ export interface AgentBackend {
   clearQueue(): Promise<AgentQueue>;
   abort(): Promise<void>;
   getState(): Promise<AgentState>;
-  getMessages(): Promise<unknown[]>;
+  /** The session's current branch, for the timeline. Must be cheap when the leaf has not moved. */
+  timeline(): TimelineSource;
   getSystemPrompt(): Promise<SystemPromptInfo>;
   getCapabilities(): Promise<Record<string, unknown>>;
   getSession(): Promise<Record<string, unknown>>;
@@ -81,7 +128,7 @@ export interface AgentBackend {
 export class MockBackend implements AgentBackend {
   private emitter = new EventEmitter();
   private state: AgentState;
-  private messages: unknown[] = [];
+  private entries: TimelineEntry[] = [];
   private timer?: ReturnType<typeof setTimeout>;
   private queue: AgentQueue = {steering: [], followUp: []};
   constructor(
@@ -95,6 +142,18 @@ export class MockBackend implements AgentBackend {
   private emit(e: AgentEvent) {
     this.emitter.emit('event', e);
   }
+  /** Persist like Pi: append a session entry after listeners have seen the message. */
+  protected append(message: Record<string, unknown>) {
+    const id = randomUUID().slice(0, 8);
+    this.entries.push({
+      type: 'message',
+      id,
+      parentId: this.entries.at(-1)?.id ?? null,
+      timestamp: new Date().toISOString(),
+      message: {timestamp: Date.now(), ...message}
+    });
+    return id;
+  }
   /** The body of a turn. Tests override it to keep a run streaming while they inspect queued input. */
   protected runTurn() {
     return new Promise<void>(r => {
@@ -107,13 +166,15 @@ export class MockBackend implements AgentBackend {
     this.state.status = 'streaming';
     this.emit({type: 'agent_start', message});
     await this.runTurn();
-    this.messages.push({role: 'user', content: message});
-    this.emit({type: 'message_start', role: 'assistant'});
-    this.emit({
-      type: 'message_update',
-      assistantMessageEvent: {type: 'text_delta', delta: `Mock response: ${message}`}
-    });
-    this.emit({type: 'message_end', message: `Mock response: ${message}`});
+    const user = {role: 'user', content: message};
+    this.emit({type: 'message_end', message: user});
+    this.append(user);
+    const text = `Mock response: ${message}`,
+      assistant = {role: 'assistant', content: [{type: 'text', text}]};
+    this.emit({type: 'message_start', message: {role: 'assistant', content: []}});
+    this.emit({type: 'message_update', assistantMessageEvent: {type: 'text_delta', delta: text}});
+    this.emit({type: 'message_end', message: assistant});
+    this.append(assistant);
     this.state.status = 'idle';
     this.emit({type: 'agent_end'});
   }
@@ -153,8 +214,12 @@ export class MockBackend implements AgentBackend {
   async getState() {
     return {...this.state};
   }
-  async getMessages() {
-    return [...this.messages];
+  timeline(): TimelineSource {
+    return {
+      sessionId: this.state.sessionId,
+      leafId: this.entries.at(-1)?.id ?? null,
+      entries: () => [...this.entries]
+    };
   }
   async getSystemPrompt(): Promise<SystemPromptInfo> {
     const template = this.options.piDefaultPrompt ? undefined : this.options.template;
@@ -171,13 +236,13 @@ export class MockBackend implements AgentBackend {
     return {model: null, models: [], thinkingLevel: 'off', thinkingLevels: ['off'], supportsThinking: false};
   }
   async getSession() {
-    return {...(await this.getSessionInfo()), entries: [], tree: []};
+    return {...(await this.getSessionInfo()), entries: [...this.entries], tree: []};
   }
   async getSessionInfo() {
     return {
       sessionId: this.state.sessionId,
       sessionName: this.state.sessionName,
-      stats: {totalMessages: this.messages.length, tokens: {total: 0}, cost: 0},
+      stats: {totalMessages: this.entries.length, tokens: {total: 0}, cost: 0},
       contextUsage: {tokens: null, contextWindow: 0, percent: null}
     };
   }
@@ -190,7 +255,10 @@ export class MockBackend implements AgentBackend {
     this.state.sessionName = name;
     this.emit({type: 'session_info_changed', name});
   }
-  async navigate(_entryId: string) {
+  /** Move the leaf back to an earlier entry, like rewinding a Pi session. */
+  async navigate(entryId: string) {
+    const index = this.entries.findIndex(entry => entry.id === entryId);
+    if (index >= 0) this.entries = this.entries.slice(0, index + 1);
     return {cancelled: false};
   }
   async fork(_entryId: string): Promise<{sessionFile?: string; selectedText?: string}> {
@@ -206,14 +274,13 @@ export class MockBackend implements AgentBackend {
     this.emit({type: 'bash_execution_start', id, command});
     this.emit({type: 'bash_execution_update', id, delta: `${output}\n`});
     const result = {id, output, exitCode: 0, cancelled: false, truncated: false};
-    this.messages.push({
+    this.append({
       role: 'bashExecution',
       command,
       output,
       exitCode: 0,
       cancelled: false,
       truncated: false,
-      timestamp: Date.now(),
       excludeFromContext
     });
     this.emit({type: 'bash_execution_end', command, ...result});
@@ -239,14 +306,15 @@ export type AgentRecord = AgentState & {
   createdAt: string;
   lastActiveAt: string;
 };
-type StoredEvent = {id: string; sequence: number; timestamp: number; event: AgentEvent};
+/** An event as server-side consumers and the overview stream receive it. */
+export type PublishedEvent = {timestamp: number; status: AgentState['status']; event: AgentEvent};
 type AgentEntry = {
   record: AgentRecord;
   backend?: AgentBackend;
   loading?: Promise<AgentBackend>;
-  events: StoredEvent[];
-  nextSequence: number;
-  bashIds: Set<string>;
+  /** Detail stream of the loaded backend: streamed text, timeline changes, tool output. */
+  feed?: AgentFeed;
+  activity: ActivityTracker;
   dialogRequests: Map<string, AgentEvent>;
   queue: AgentQueue;
   streaming?: boolean;
@@ -254,13 +322,14 @@ type AgentEntry = {
 const toStringList = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
 const emptyQueue = (): AgentQueue => ({steering: [], followUp: []});
+const LIFECYCLE_ONLY = new Set(['agent_loaded', 'agent_unloaded']);
 /** A pending dialog blocks the run until a human answers it, which is a different wait than streaming. */
 const runStatus = (entry: AgentEntry, streaming: boolean): AgentState['status'] =>
   entry.dialogRequests.size ? 'waiting_for_user' : streaming ? 'streaming' : 'idle';
 export class AgentManager {
   private agents = new Map<string, AgentEntry>();
-  private listeners = new Map<string, Set<(e: StoredEvent) => void>>();
-  private globalListeners = new Set<(agentId: string, e: StoredEvent) => void>();
+  private detailListeners = new Map<string, Set<(message: DetailMessage) => void>>();
+  private globalListeners = new Set<(agentId: string, e: PublishedEvent) => void>();
   constructor(
     private workspaces: WorkspaceStore,
     private factory: (
@@ -327,6 +396,15 @@ export class AgentManager {
   }
   private connect(entry: AgentEntry, backend: AgentBackend) {
     entry.backend = backend;
+    entry.feed?.close();
+    const agentId = entry.record.agentId,
+      feed = new AgentFeed(
+        () => backend.timeline(),
+        message => {
+          for (const listener of this.detailListeners.get(agentId) ?? []) listener(message);
+        }
+      );
+    entry.feed = feed;
     backend.subscribe(event => {
       if (entry.backend !== backend) return;
       const record = entry.record,
@@ -336,12 +414,8 @@ export class AgentManager {
       else if (type === 'agent_settled') entry.streaming = false;
       if (type === 'queue_update')
         entry.queue = {steering: toStringList(event.steering), followUp: toStringList(event.followUp)};
-      // Standalone shell runs and dialogs outlive LLM turns. Track them with the
-      // event cursor; keep dialog payloads so reconnecting clients can rebuild controls.
-      if (typeof event.id === 'string') {
-        if (type === 'bash_execution_start' || type === 'bash_execution_update') entry.bashIds.add(event.id);
-        else if (type === 'bash_execution_end') entry.bashIds.delete(event.id);
-      }
+      const activityChanged = entry.activity.apply(event);
+      // Keep dialog payloads so reconnecting clients can rebuild their controls.
       if (typeof event.requestId === 'string') {
         if (type === 'extension_ui_request') entry.dialogRequests.set(event.requestId, event);
         else if (type === 'extension_ui_response') entry.dialogRequests.delete(event.requestId);
@@ -350,32 +424,28 @@ export class AgentManager {
       if (type === 'session_info_changed')
         record.sessionName =
           typeof event.name === 'string' && event.name.trim() ? event.name.trim() : undefined;
-      this.publish(entry, event);
+      feed.handle(event);
+      const slim = slimEvent(event);
+      if (slim) this.publish(entry, slim);
+      if (activityChanged) this.publishActivity(entry);
     });
   }
+  private publishActivity(entry: AgentEntry) {
+    this.publish(entry, {type: 'activity_changed', activity: entry.activity.snapshot()});
+  }
+  /** Loading or unloading a backend is not activity: it must not reorder the Agent list. */
   private publish(entry: AgentEntry, event: AgentEvent) {
     const record = entry.record;
-    record.lastActiveAt = new Date().toISOString();
+    if (!LIFECYCLE_ONLY.has(event.type)) record.lastActiveAt = new Date().toISOString();
     // Every event carries the authoritative status, so clients never have to derive it from event types.
-    const item = {
-      id: randomUUID(),
-      sequence: entry.nextSequence++,
-      timestamp: Math.floor(Date.now() / 1000),
-      status: record.status,
-      event
-    };
-    entry.events.push(item);
-    if (entry.events.length > 1000) entry.events.shift();
-    for (const listener of this.listeners.get(record.agentId) ?? []) listener(item);
+    const item = {timestamp: Date.now(), status: record.status, event};
     for (const listener of this.globalListeners) listener(record.agentId, item);
   }
   private attach(id: string, record: AgentRecord, backend: AgentBackend) {
     const entry: AgentEntry = {
       record,
       backend,
-      events: [],
-      nextSequence: 1,
-      bashIds: new Set(),
+      activity: new ActivityTracker(),
       dialogRequests: new Map(),
       queue: emptyQueue()
     };
@@ -406,9 +476,7 @@ export class AgentManager {
         };
         this.agents.set(saved.agentId, {
           record,
-          events: [],
-          nextSequence: 1,
-          bashIds: new Set(),
+          activity: new ActivityTracker(),
           dialogRequests: new Map(),
           queue: emptyQueue()
         });
@@ -452,6 +520,8 @@ export class AgentManager {
           status: state.status === 'stopped' ? 'idle' : state.status
         };
         this.connect(entry, backend);
+        // The status moved from unloaded to idle without a Pi event; tell clients.
+        this.publish(entry, {type: 'agent_loaded'});
         return backend;
       } catch (error) {
         entry.record.status = 'error';
@@ -468,7 +538,10 @@ export class AgentManager {
     if (entry.record.status === 'stopped')
       throw Object.assign(new Error('Agent is not running'), {code: 'AGENT_NOT_RUNNING'});
     const backend = await this.ensureLoaded(id);
-    if (kind === 'abort') return backend.abort();
+    if (kind === 'abort') {
+      if (entry.activity.stopping()) this.publishActivity(entry);
+      return backend.abort();
+    }
     return backend[kind === 'follow-up' ? 'followUp' : kind](message);
   }
   /** Queued steering and follow-up messages waiting for the running turn. */
@@ -485,47 +558,39 @@ export class AgentManager {
     const entry = this.get(id);
     return entry.backend ? entry.backend.clearQueue() : emptyQueue();
   }
-  events(id: string, last = 0) {
-    return this.get(id).events.filter(e => e.sequence > last);
-  }
-  currentSequence(id: string) {
-    return this.get(id).nextSequence - 1;
-  }
   snapshotState(id: string): AgentSnapshotState {
     const a = this.get(id);
     return {
       ...a.record,
       activity: {
-        bashIds: [...a.bashIds],
-        dialogIds: [...a.dialogRequests.keys()],
+        ...a.activity.snapshot(),
         dialogRequests: [...a.dialogRequests.values()],
         queue: {steering: [...a.queue.steering], followUp: [...a.queue.followUp]}
       }
     };
   }
-  async snapshot(id: string, messageLimit?: number) {
-    // Capture state and its cursor before yielding. Events emitted while messages
-    // are being read must be delivered after, not swallowed by, this snapshot.
-    const a = this.get(id),
-      state = this.snapshotState(id),
-      lastSequence = a.nextSequence - 1;
-    const messages = a.backend ? await a.backend.getMessages() : [];
-    if (messageLimit === undefined) return {state, messages, lastSequence};
-    const page = this.paginateMessages(messages, messageLimit);
-    return {state, messages: page.items, messagePage: page, lastSequence};
+  /**
+   * Start viewing an Agent in detail: load it, then subscribe and take a snapshot together, with
+   * nothing in between, so every message the listener gets is newer than the snapshot.
+   */
+  async focus(id: string, listener: (message: DetailMessage) => void, limit?: number) {
+    await this.ensureLoaded(id);
+    const entry = this.get(id);
+    // Snapshot first: it publishes pending changes, which it includes, before this listener exists.
+    const snapshot = {
+      ...entry.feed!.snapshot(limit),
+      // Dialog controls live in the transcript, which a viewer replaces when it starts viewing.
+      dialogRequests: [...entry.dialogRequests.values()]
+    };
+    if (!this.detailListeners.has(id)) this.detailListeners.set(id, new Set());
+    this.detailListeners.get(id)!.add(listener);
+    return {unsubscribe: () => this.detailListeners.get(id)?.delete(listener), snapshot};
   }
-  hasReplayGap(id: string, last: number) {
-    const a = this.get(id);
-    const current = a.nextSequence - 1;
-    return last > current || (last > 0 && a.events.length > 0 && last < a.events[0].sequence - 1);
+  toolOutput(id: string, toolCallId: string) {
+    return this.get(id).feed?.output(toolCallId);
   }
-  subscribe(id: string, listener: (e: StoredEvent) => void) {
-    this.get(id);
-    if (!this.listeners.has(id)) this.listeners.set(id, new Set());
-    this.listeners.get(id)!.add(listener);
-    return () => this.listeners.get(id)?.delete(listener);
-  }
-  subscribeAll(listener: (agentId: string, e: StoredEvent) => void) {
+  /** Events of every Agent: server-side consumers and the overview stream. */
+  subscribeAll(listener: (agentId: string, e: PublishedEvent) => void) {
     this.globalListeners.add(listener);
     return () => this.globalListeners.delete(listener);
   }
@@ -534,17 +599,19 @@ export class AgentManager {
     if (a.loading) await a.loading.catch(() => {});
     await a.backend?.dispose();
     a.backend = undefined;
+    a.feed?.close();
+    a.feed = undefined;
     a.record.status = 'unloaded';
     a.streaming = false;
-    a.bashIds.clear();
     a.dialogRequests.clear();
+    a.activity.reset(); // agent_unloaded below tells clients the activity is gone.
     a.queue = emptyQueue();
     this.publish(a, {type: 'agent_unloaded'});
   }
   async remove(id: string) {
     await this.dispose(id);
     this.agents.delete(id);
-    this.listeners.delete(id);
+    this.detailListeners.delete(id);
   }
   async archive(id: string) {
     const current = this.get(id).record;
@@ -560,18 +627,20 @@ export class AgentManager {
       record = this.get(id).record;
     return {...state, status: record.status, sessionName: state.sessionName?.trim() || record.sessionName};
   }
-  async messages(id: string) {
-    return (await this.ensureLoaded(id)).getMessages();
+  /** Older history: the page before item `before` (or the newest one). Live viewers get it from focus(). */
+  async timeline(id: string, limit?: number, before?: string) {
+    const source = (await this.ensureLoaded(id)).timeline(),
+      page = pageTimeline(buildTimeline(source.entries()), limit, before);
+    if (!page) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
+    return {sessionId: source.sessionId, ...page};
   }
-  async messagePage(id: string, limit = 25, before?: number) {
-    return this.paginateMessages(await (await this.ensureLoaded(id)).getMessages(), limit, before);
-  }
-  private paginateMessages(messages: unknown[], limit: number, before?: number) {
-    const safeLimit = Math.min(200, Math.max(1, Math.trunc(Number(limit) || 25))),
-      total = messages.length,
-      end = Math.min(total, Math.max(0, before === undefined ? total : Math.trunc(Number(before) || 0))),
-      start = Math.max(0, end - safeLimit);
-    return {items: messages.slice(start, end), total, start, end, limit: safeLimit, hasMore: start > 0};
+  /** The full body of one timeline item of the given session. It never changes. */
+  async item(id: string, sessionId: string, itemId: string) {
+    const source = (await this.ensureLoaded(id)).timeline(),
+      body = source.sessionId === sessionId ? itemBody(buildTimeline(source.entries()), itemId) : undefined;
+    if (body === undefined)
+      throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
+    return {id: itemId, body};
   }
   async systemPrompt(id: string) {
     const info = await (await this.ensureLoaded(id)).getSystemPrompt();
@@ -610,7 +679,9 @@ export class AgentManager {
     this.get(id).record.sessionName = name.trim();
   }
   async navigate(id: string, entryId: string) {
-    return (await this.ensureLoaded(id)).navigate(entryId);
+    const result = await (await this.ensureLoaded(id)).navigate(entryId);
+    this.get(id).feed?.sync(); // Moving the leaf back is no event; tell viewers to reload.
+    return result;
   }
   async fork(id: string, entryId: string) {
     const source = this.get(id),

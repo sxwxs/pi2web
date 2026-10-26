@@ -1,4 +1,4 @@
-import {describe, it, expect, beforeEach} from 'vitest';
+import {describe, it, expect, beforeEach, vi} from 'vitest';
 import {mkdtemp, writeFile, mkdir, symlink, readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
@@ -197,26 +197,65 @@ describe('terminal manager', () => {
 });
 
 describe('agent manager', () => {
-  it('emits ordered events and supports abort/dispose', async () => {
+  it('publishes events and the timeline, and supports abort/dispose', async () => {
     const root = await temp(),
       ws = new WorkspaceStore(),
       w = ws.add('x', root),
       m = new AgentManager(ws, (id, cwd) => new MockBackend(id, cwd));
     const a = await m.create(w.id);
-    expect(m.hasReplayGap(a.agentId, 5)).toBe(true);
     const received: any[] = [],
-      globalReceived: any[] = [];
-    m.subscribe(a.agentId, e => received.push(e));
-    m.subscribeAll((agentId, e) => globalReceived.push({agentId, e}));
+      details: any[] = [];
+    m.subscribeAll((agentId, e) => agentId === a.agentId && received.push(e));
+    const focus = await m.focus(a.agentId, message => details.push(message));
+    expect(focus.snapshot).toMatchObject({page: {items: [], total: 0}, live: null, dialogRequests: []});
+    const {sessionId} = focus.snapshot;
     await m.command(a.agentId, 'prompt', 'hello');
     expect((await m.state(a.agentId)).status).toBe('idle');
-    expect(received.map(x => x.sequence)).toEqual([1, 2, 3, 4, 5]);
-    expect(globalReceived.map(x => x.agentId)).toEqual(Array(5).fill(a.agentId));
-    expect(received.every(x => Number.isInteger(x.timestamp) && x.timestamp > 0)).toBe(true);
-    expect(await m.messages(a.agentId)).toHaveLength(1);
+    // Each activity change follows the event that caused it. Streamed text is not an event.
+    expect(received.map(x => x.event.type)).toEqual([
+      'agent_start',
+      'activity_changed',
+      'message_end',
+      'message_start',
+      'activity_changed',
+      'message_end',
+      'agent_end',
+      'activity_changed'
+    ]);
+    expect(received.map(x => x.event.activity?.phase.kind).filter(Boolean)).toEqual([
+      'waiting_llm',
+      'generating',
+      'idle'
+    ]);
+    expect(received.every(x => Number.isInteger(x.timestamp) && x.timestamp > 1e12)).toBe(true);
+    // Viewers get the recorded prompt, the streamed answer, then the recorded answer replacing it.
+    await vi.waitFor(() => expect(details).toHaveLength(3));
+    expect(details).toEqual([
+      {type: 'items', sessionId, items: [expect.objectContaining({kind: 'user', body: 'hello'})]},
+      {type: 'delta', kind: 'text', delta: 'Mock response: hello'},
+      {
+        type: 'items',
+        sessionId,
+        items: [expect.objectContaining({kind: 'assistant', body: 'Mock response: hello'})],
+        clearLive: true
+      }
+    ]);
     for (let i = 0; i < 29; i++) await m.command(a.agentId, 'prompt', `message-${i}`);
-    expect(await m.messagePage(a.agentId, 5)).toMatchObject({total: 30, start: 25, end: 30, hasMore: true});
-    expect((await m.messagePage(a.agentId, 5, 25)).items).toHaveLength(5);
+    const page = await m.timeline(a.agentId, 5);
+    expect(page).toMatchObject({sessionId, total: 60, start: 55, hasMore: true});
+    const older = await m.timeline(a.agentId, 5, page.items[0].id);
+    expect(older).toMatchObject({start: 50, items: expect.any(Array)});
+    expect(older.items.at(-1).id).not.toBe(page.items[0].id);
+    await expect(m.timeline(a.agentId, 5, 'missing')).rejects.toMatchObject({
+      code: 'TIMELINE_ITEM_NOT_FOUND'
+    });
+    expect(await m.item(a.agentId, sessionId, page.items[0].id)).toEqual({
+      id: page.items[0].id,
+      body: page.items[0].body
+    });
+    await expect(m.item(a.agentId, 'other-session', page.items[0].id)).rejects.toMatchObject({
+      code: 'TIMELINE_ITEM_NOT_FOUND'
+    });
     await m.setSessionName(a.agentId, 'Named Session');
     expect(m.list().find(x => x.agentId === a.agentId)?.sessionName).toBe('Named Session');
     await m.dispose(a.agentId);
@@ -241,7 +280,7 @@ describe('agent manager', () => {
     expect(starts).toBe(0);
     expect(restored.list()[0].status).toBe('unloaded');
     expect(restored.isLoaded(saved.agentId)).toBe(false);
-    await Promise.all([restored.messages(saved.agentId), restored.session(saved.agentId)]);
+    await Promise.all([restored.timeline(saved.agentId), restored.session(saved.agentId)]);
     expect(starts).toBe(1);
     expect(restored.isLoaded(saved.agentId)).toBe(true);
     expect(restored.list()[0].sessionName).toBe('Persisted Agent Name');

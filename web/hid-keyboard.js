@@ -35,17 +35,14 @@
   };
   const BUSY_LIGHT = {effect: EFFECT_BREATH, speed: 0.15};
 
-  // Keep activity in one place; the light phase is derived, never stored twice.
-  const newActivity = () => ({turn: 'idle', tools: new Set(), bash: new Set(), dialogs: new Set()});
-  const resetTurn = (activity, turn = 'idle') => {
-    activity.turn = turn;
-    activity.tools.clear();
-  };
+  // The server maintains each Agent's activity (see src/activity.ts); lights only map it.
   const activityPhase = activity => {
+    const kind = activity?.phase?.kind;
     if (!activity) return 'idle';
-    if (activity.dialogs.size) return 'waiting';
-    if (activity.tools.size || activity.bash.size) return 'tool';
-    return activity.turn;
+    if (activity.dialogs?.length) return 'waiting';
+    if (kind === 'running_tools' || activity.bash?.length) return 'tool';
+    if (kind === 'retrying') return 'retry';
+    return kind && kind !== 'idle' ? 'llm' : 'idle';
   };
 
   const normalizeColor = value => {
@@ -192,93 +189,29 @@
       this.syncLights().catch(error => this.fail(error));
     }
 
+    /** An Agent's status, with its server activity when the update carries one. */
     updateAgent(agent) {
       if (!agent?.agentId) return;
       this.agents.set(agent.agentId, agent);
-      if (agent.activity) {
-        const activity = this.activities.get(agent.agentId) || newActivity();
-        activity.bash = new Set(agent.activity.bashIds || []);
-        activity.dialogs = new Set(agent.activity.dialogIds || []);
-        this.activities.set(agent.agentId, activity);
-      }
+      if (agent.activity) this.activities.set(agent.agentId, agent.activity);
       this.reconcileActivity(agent.agentId);
       this.syncLights().catch(error => this.fail(error));
     }
 
-    setAgentSnapshot(agent) {
-      // A gap invalidates old details; restore independent work from the server.
-      // Older servers omit activity and fall back to ordinary Agent status.
-      this.activities.delete(agent.agentId);
-      this.updateAgent(agent);
+    setActivity(agentId, activity) {
+      this.activities.set(agentId, activity);
+      this.reconcileActivity(agentId);
+      this.syncLights().catch(error => this.fail(error));
     }
 
     reconcileActivity(agentId) {
-      const activity = this.activities.get(agentId),
-        status = this.agents.get(agentId)?.status;
-      if (!activity) return;
-      if (!status || ['unloaded', 'stopped', 'error'].includes(status)) {
+      const status = this.agents.get(agentId)?.status;
+      if (
+        !status ||
+        ['unloaded', 'stopped', 'error'].includes(status) ||
+        activityPhase(this.activities.get(agentId)) === 'idle'
+      )
         this.activities.delete(agentId);
-        return;
-      }
-      // Status describes the LLM run, not independent !bash commands or dialogs.
-      if (!BUSY_STATUSES.has(status)) resetTurn(activity);
-      if (activityPhase(activity) === 'idle') this.activities.delete(agentId);
-    }
-
-    handleAgentEvent(agentId, event) {
-      const activity = this.activities.get(agentId) || newActivity();
-      const previous = activityPhase(activity);
-      switch (event.type) {
-        case 'agent_start':
-          resetTurn(activity, 'llm');
-          break;
-        case 'message_start':
-          if ((event.message?.role || event.role) !== 'assistant') return;
-          activity.turn = 'llm';
-          break;
-        case 'message_update':
-          activity.turn = 'llm';
-          break;
-        case 'tool_execution_start':
-        case 'tool_execution_update':
-          activity.turn = 'llm';
-          activity.tools.add(event.toolCallId || event.toolName || 'default');
-          break;
-        case 'tool_execution_end':
-          activity.tools.delete(event.toolCallId || event.toolName || 'default');
-          break;
-        case 'bash_execution_start':
-        case 'bash_execution_update':
-          activity.bash.add(event.id || 'default');
-          break;
-        case 'bash_execution_end':
-          activity.bash.delete(event.id || 'default');
-          break;
-        case 'auto_retry_start':
-          resetTurn(activity, 'retry');
-          break;
-        case 'auto_retry_end':
-          activity.turn = event.success === false ? 'idle' : 'llm';
-          break;
-        case 'extension_ui_request':
-          activity.dialogs.add(event.requestId);
-          break;
-        case 'extension_ui_response':
-          activity.dialogs.delete(event.requestId);
-          break;
-        case 'agent_end':
-          resetTurn(activity, event.willRetry ? 'retry' : 'idle');
-          break;
-        case 'agent_settled':
-          resetTurn(activity);
-          break;
-        default:
-          return;
-      }
-      const phase = activityPhase(activity);
-      if (phase === 'idle') this.activities.delete(agentId);
-      else this.activities.set(agentId, activity);
-      if (phase !== previous) this.syncLights().catch(error => this.fail(error));
     }
 
     isBusy(agentId) {
