@@ -137,6 +137,7 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
     if (subscriptions.has('*')) send({type: 'session_namer_event', agentId, event});
   });
   ws.on('close', () => {
+    focusRequest++; // A focus still loading is for a socket that no longer exists.
     if (batchTimer) clearTimeout(batchTimer);
     pendingDelta = undefined;
     pendingOutputs.clear();

@@ -27,14 +27,16 @@ afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
 });
 
-async function setup() {
+/** `reloadGate` holds loading a backend again (after the first) until it resolves. */
+async function setup({reloadGate}: {reloadGate?: Promise<void>} = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'pi-agent-socket-'));
   const workspaceDir = path.join(dir, 'workspace');
   await mkdir(workspaceDir);
   const workspaces = new WorkspaceStore(),
     workspace = workspaces.add('test', workspaceDir);
   const backends: ControlledBackend[] = [];
-  const agents = new AgentManager(workspaces, (id, cwd) => {
+  const agents = new AgentManager(workspaces, async (id, cwd) => {
+    if (backends.length && reloadGate) await reloadGate;
     const backend = new ControlledBackend(id, cwd);
     backends.push(backend);
     return backend;
@@ -85,6 +87,15 @@ async function setup() {
     publish,
     connect,
     workspaces,
+    /** Open WebSocket connections, as the server counts them once their close is handled. */
+    connections: async () =>
+      (
+        await (
+          await fetch(`http://127.0.0.1:${address!.port}/api/v1/system/status`, {
+            headers: {authorization: `Bearer ${token}`}
+          })
+        ).json()
+      ).data.webSocketConnections,
     unload: () =>
       fetch(`http://127.0.0.1:${address!.port}/api/v1/agents/${agent.agentId}`, {
         method: 'DELETE',
@@ -408,6 +419,24 @@ describe('detail stream of the focused Agent', () => {
       m => m.type === 'items' && m.items.some((i: any) => i.body === 'after reload')
     );
     expect(items.items[0]).toMatchObject({kind: 'user', body: 'after reload'});
+  });
+
+  it('leaves no listener behind when the socket closes while focus is loading the Agent', async () => {
+    let release!: () => void;
+    const {agents, agent, connect, connections} = await setup({
+      reloadGate: new Promise<void>(resolve => (release = resolve))
+    });
+    await agents.dispose(agent.agentId);
+    const client = await connect();
+    client.send({type: 'focus', agentId: agent.agentId});
+    await vi.waitFor(() => expect(agents.get(agent.agentId).record.status).toBe('starting'));
+    client.socket.close();
+    // The server has handled the close before the Agent finishes loading.
+    await vi.waitFor(async () => expect(await connections()).toBe(0));
+    release();
+    await vi.waitFor(() => expect(agents.isLoaded(agent.agentId)).toBe(true));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect((agents as any).detailListeners.get(agent.agentId)?.size ?? 0).toBe(0);
   });
 
   it('reports a focus that cannot load', async () => {
