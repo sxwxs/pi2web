@@ -126,7 +126,8 @@ function setup(pages: any[] = []) {
     return {body: `full body of ${url.split('/').pop()}`};
   });
   const sendFocused = vi.fn(),
-    restoreExtensionRequests = vi.fn();
+    restoreExtensionRequests = vi.fn(),
+    renderTranscriptEvent = vi.fn();
   const api = runInNewContext(
     `${timelineSource}\n({loadTimeline, handleDetail, addCard})`,
     {
@@ -136,6 +137,7 @@ function setup(pages: any[] = []) {
       requestAgent,
       sendFocused,
       restoreExtensionRequests,
+      renderTranscriptEvent,
       toast: vi.fn(),
       requestAnimationFrame: (callback: () => void) => setTimeout(callback, 0),
       cancelAnimationFrame: (id: any) => clearTimeout(id),
@@ -156,6 +158,7 @@ function setup(pages: any[] = []) {
     requestAgent,
     sendFocused,
     restoreExtensionRequests,
+    renderTranscriptEvent,
     card,
     summary,
     body,
@@ -224,12 +227,18 @@ describe('timeline rendering', () => {
     ui.detail({
       type: 'items',
       sessionId: 's1',
-      items: [{...running, status: 'ok', size: 9000, body: undefined}]
+      items: [],
+      updated: [{...running, status: 'ok', size: 9000, body: undefined, toolCallId: undefined, rev: 'r1'}]
     });
     const replaced = ui.card('e2.0');
     expect(ui.summary('e2.0')).toBe('✓ bash · npm test');
     expect(replaced.open).toBe(true);
-    await vi.waitFor(() => expect(ui.body('e2.0')).toBe('full body of e2.0'));
+    await vi.waitFor(() => expect(ui.body('e2.0')).toBe('full body of e2.0?rev=r1'));
+    expect(ui.requestAgent).toHaveBeenLastCalledWith('bk:agent-a', '/sessions/s1/items/e2.0?rev=r1');
+    // The collapsed group's summary follows the finished card.
+    expect(ui.messages.querySelector('.activity-group')!.querySelector('.summary-text')!.textContent).toBe(
+      '✓ bash · npm test'
+    );
     expect(ui.messages.querySelectorAll('.tool')).toHaveLength(1);
   });
 
@@ -308,5 +317,49 @@ describe('timeline rendering', () => {
     await (button as any).onclick();
     await vi.waitFor(() => expect(ui.messages.children.map(el => el.dataset.itemId)).toEqual(['e0', 'e1']));
     expect(ui.requestAgent).toHaveBeenLastCalledWith('bk:agent-a', '/timeline?limit=50&before=e1');
+  });
+
+  it('skips updates to history that is not loaded instead of appending them', async () => {
+    const ui = setup([page([user], {start: 60, total: 61, hasMore: true})]);
+    await ui.loadTimeline(ui.state.agent);
+    ui.detail({
+      type: 'items',
+      sessionId: 's1',
+      items: [],
+      updated: [{...running, id: 'old.0', status: 'ok'}]
+    });
+    expect(ui.messages.children.map(el => el.dataset.itemId).filter(Boolean)).toEqual(['e1']);
+    expect(ui.state.timeline.items.map((item: any) => item.id)).toEqual(['e1']);
+  });
+
+  it('shows an emptied timeline instead of the cached conversation', async () => {
+    const ui = setup([page([user]), page([])]);
+    await ui.loadTimeline(ui.state.agent);
+    await ui.loadTimeline(ui.state.agent);
+    expect(ui.state.timeline.items).toEqual([]);
+    expect(ui.messages.querySelector('.empty')).toBeDefined();
+    expect(ui.messages.descendants().some(el => el.dataset.itemId)).toBe(false);
+  });
+
+  it('holds transcript events (dialogs, shell output) that arrive while loading until the page is shown', async () => {
+    let release!: (value: unknown) => void;
+    const ui = setup();
+    ui.requestAgent.mockImplementationOnce(() => new Promise(resolve => (release = resolve)));
+    const loading = ui.loadTimeline(ui.state.agent);
+    const dialog = {
+      type: 'agent_event',
+      agentId: 'bk:agent-a',
+      event: {type: 'extension_ui_request', requestId: 'q'}
+    };
+    ui.detail({type: 'focus_state', live: null});
+    ui.handleDetail(dialog);
+    expect(ui.renderTranscriptEvent).not.toHaveBeenCalled();
+    release(page([user]));
+    await loading;
+    expect(ui.renderTranscriptEvent).toHaveBeenCalledExactlyOnceWith(dialog);
+    // Rendered after the focus baseline, in arrival order.
+    expect(ui.restoreExtensionRequests.mock.invocationCallOrder[0]).toBeLessThan(
+      ui.renderTranscriptEvent.mock.invocationCallOrder[0]
+    );
   });
 });

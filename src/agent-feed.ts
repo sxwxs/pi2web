@@ -8,8 +8,12 @@ export type TimelineSource = {sessionId: string; leafId: string | null; entries(
 export type DetailMessage =
   /** Streamed text of the assistant message being generated. */
   | {type: 'delta'; kind: 'text' | 'thinking'; delta: string}
-  /** New items, and items whose status changed. `clearLive` drops the streamed text they replace. */
-  | {type: 'items'; sessionId: string; items: TimelineItem[]; clearLive?: true}
+  /**
+   * `items` were appended to the timeline; `updated` replace items published before (a running
+   * tool finished), which a client may not have loaded. `clearLive` drops the streamed text
+   * the appended items replace.
+   */
+  | {type: 'items'; sessionId: string; items: TimelineItem[]; updated?: TimelineItem[]; clearLive?: true}
   /** The branch changed in a way that is not an append (navigation, new session): reload the timeline. */
   | {type: 'timeline_reset'; sessionId: string}
   /** Latest output of a running tool. Sockets forward it only for tools a client has expanded. */
@@ -115,25 +119,27 @@ export class AgentFeed {
       previous = this.published;
     if (source.sessionId === previous.sessionId && source.leafId === previous.leafId && !this.clearLive)
       return;
-    const {published, records} = this.project(source);
+    const {published, records, entries} = this.project(source);
     this.published = published;
+    // Append-only means the old leaf is still on the branch. Same item ids are not enough: moving
+    // back from a tool's result to its call keeps every id but takes the result away.
     const appended =
-      previous.ids.length <= published.ids.length && previous.ids.every((id, i) => published.ids[i] === id);
+      (previous.leafId === null || entries.some(entry => entry.id === previous.leafId)) &&
+      previous.ids.length <= published.ids.length &&
+      previous.ids.every((id, i) => published.ids[i] === id);
     if (source.sessionId !== previous.sessionId || !appended) {
       this.clearLive = false;
       this.emit({type: 'timeline_reset', sessionId: source.sessionId});
       return;
     }
-    const known = new Set(previous.ids),
-      changed = records
+    const items = records.slice(previous.ids.length).map(r => r.item),
+      updated = records
+        .slice(0, previous.ids.length)
         .map(r => r.item)
-        .filter(
-          item =>
-            !known.has(item.id) ||
-            (previous.pending.has(item.id) && previous.pending.get(item.id) !== signature(item))
-        );
-    if (!changed.length && !this.clearLive) return;
-    const message: DetailMessage = {type: 'items', sessionId: source.sessionId, items: changed};
+        .filter(item => previous.pending.has(item.id) && previous.pending.get(item.id) !== signature(item));
+    if (!items.length && !updated.length && !this.clearLive) return;
+    const message: DetailMessage = {type: 'items', sessionId: source.sessionId, items};
+    if (updated.length) message.updated = updated;
     if (this.clearLive) {
       message.clearLive = true;
       this.clearLive = false;
@@ -148,7 +154,8 @@ export class AgentFeed {
   }
 
   private project(source = this.source()) {
-    const records = buildTimeline(source.entries()),
+    const entries = source.entries(),
+      records = buildTimeline(entries),
       published: Published = {
         sessionId: source.sessionId,
         leafId: source.leafId,
@@ -158,6 +165,6 @@ export class AgentFeed {
           records.filter(r => r.item.status === 'pending').map(r => [r.item.id, signature(r.item)])
         )
       };
-    return {published, records};
+    return {published, records, entries};
   }
 }

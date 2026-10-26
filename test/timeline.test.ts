@@ -47,6 +47,7 @@ describe('buildTimeline', () => {
         summary: 'npm test',
         status: 'ok',
         durationMs: 1200,
+        rev: output.id,
         size: expect.any(Number),
         body: '{\n  "command": "npm test"\n}\n\n— 结果 —\npassed'
       }
@@ -126,6 +127,20 @@ describe('buildTimeline', () => {
     expect(tool.body).toBe('done\n\n— 嵌套调用（1）—\n✓ read: a.ts · 3 ms');
   });
 
+  it('versions a tool body by the result it includes, so a rerun is never served from a cache', () => {
+    const ask = message({role: 'assistant', content: [call('c1')]}),
+      first = result('c1', 'first run'),
+      second = result('c1', 'second run');
+    const [before] = buildTimeline([ask, first]),
+      [after] = buildTimeline([ask, second]);
+    expect(before.item.id).toBe(after.item.id);
+    expect([before.item.rev, after.item.rev]).toEqual([first.id, second.id]);
+    const records = buildTimeline([ask, second]);
+    expect(itemDetail(records, after.item.id, second.id)?.body).toContain('second run');
+    expect(itemDetail(records, after.item.id, first.id)).toBeUndefined();
+    expect(itemDetail(records, after.item.id)).toBeUndefined();
+  });
+
   it('pages backwards and returns full bodies, pending ones marked as still changing', () => {
     const entries = [
       message({role: 'user', content: 'a'}),
@@ -177,12 +192,26 @@ describe('AgentFeed', () => {
       vi.runAllTimers();
       agentFeed.handle({type: 'turn_end'});
       vi.runAllTimers();
-      const updates = sent.filter(m => m.type === 'items') as any[];
-      expect(updates.map(m => m.items.map((i: any) => i.status))).toEqual([['pending'], ['ok']]);
+      const batches = sent.filter(m => m.type === 'items') as any[];
+      expect(
+        batches.map(m => [m.items.map((i: any) => i.status), m.updated?.map((i: any) => i.status)])
+      ).toEqual([
+        [['pending'], undefined],
+        [[], ['ok']]
+      ]);
       expect(agentFeed.output('c1')).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('resets viewers when moving back from a tool result to its call, though every item id stays', () => {
+    const {entries, sent, feed: agentFeed} = feed();
+    entries.push(message({role: 'assistant', content: [call('c1')]}), result('c1', 'done'));
+    agentFeed.sync();
+    entries.pop();
+    agentFeed.sync();
+    expect(sent.at(-1)).toEqual({type: 'timeline_reset', sessionId: 's1'});
   });
 
   it('resets viewers when the branch or session changes', () => {

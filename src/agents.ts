@@ -630,11 +630,11 @@ export class AgentManager {
     if (!page) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
     return {sessionId: source.sessionId, ...page};
   }
-  /** The full body of one timeline item of the given session. */
-  async item(id: string, sessionId: string, itemId: string) {
+  /** The full body of one timeline item of the given session, at revision `rev` (see TimelineItem.rev). */
+  async item(id: string, sessionId: string, itemId: string, rev?: string) {
     const source = (await this.ensureLoaded(id)).timeline(),
       detail =
-        source.sessionId === sessionId ? itemDetail(buildTimeline(source.entries()), itemId) : undefined;
+        source.sessionId === sessionId ? itemDetail(buildTimeline(source.entries()), itemId, rev) : undefined;
     if (!detail) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
     return detail;
   }

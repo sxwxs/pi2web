@@ -35,6 +35,12 @@ export type TimelineItem = {
   status?: ItemStatus;
   durationMs?: number;
   toolCallId?: string;
+  /**
+   * Which recorded result a tool call's body includes (its entry id). The call and its result are
+   * separate entries, so after moving back from the result and running the call again the same item
+   * gets a different body: `rev` is part of the body's identity, and of its URL.
+   */
+  rev?: string;
   /** Length of the full body in characters. */
   size: number;
   /** The full body, present for the kinds people read linearly and for small bodies. */
@@ -125,7 +131,15 @@ const resultText = (result: any) =>
   );
 const RESULT_SEPARATOR = '\n\n— 结果 —\n';
 
-function toolRecord(id: string, call: any, result: any, timestamp: number | undefined, status: ItemStatus) {
+type Result = {entryId: string; message: any};
+function toolRecord(
+  id: string,
+  call: any,
+  found: Result | undefined,
+  timestamp: number | undefined,
+  status: ItemStatus
+) {
+  const result = found?.message;
   const args = call ? argsText(call) : '',
     output = result ? resultText(result) : '',
     separator = args && result ? RESULT_SEPARATOR : '',
@@ -140,7 +154,9 @@ function toolRecord(id: string, call: any, result: any, timestamp: number | unde
       status,
       durationMs: Number.isFinite(result?.durationMs) ? result.durationMs : undefined,
       // Only needed to watch a running tool's output; provider ids can be long.
-      toolCallId: status === 'pending' ? String(call?.id ?? '') : undefined
+      toolCallId: status === 'pending' ? String(call?.id ?? '') : undefined,
+      // A result standing alone is its own entry: its id already identifies the body.
+      rev: call && found ? found.entryId : undefined
     },
     args.length + separator.length + output.length,
     () => args + separator + output
@@ -154,7 +170,7 @@ export function buildTimeline(entries: TimelineEntry[]): ItemRecord[] {
   let lastConversationIndex = -1;
   entries.forEach((entry, index) => {
     const message = entry.type === 'message' ? (entry as any).message : undefined;
-    if (message?.role === 'toolResult') results.set(String(message.toolCallId), message);
+    if (message?.role === 'toolResult') results.set(String(message.toolCallId), {entryId: entry.id, message});
     else if (message?.role === 'user' || message?.role === 'assistant') lastConversationIndex = index;
   });
   const consumed = new Set<string>(),
@@ -241,7 +257,15 @@ export function buildTimeline(entries: TimelineEntry[]): ItemRecord[] {
     if (role === 'toolResult') {
       // Normally shown with its call; a result whose call is not on this branch stands alone.
       if (!consumed.has(String(message.toolCallId)))
-        records.push(toolRecord(entry.id, undefined, message, timestamp, message.isError ? 'error' : 'ok'));
+        records.push(
+          toolRecord(
+            entry.id,
+            undefined,
+            {entryId: entry.id, message},
+            timestamp,
+            message.isError ? 'error' : 'ok'
+          )
+        );
       return;
     }
     if (role !== 'assistant') return;
@@ -257,7 +281,7 @@ export function buildTimeline(entries: TimelineEntry[]): ItemRecord[] {
         const result = results.get(String(part.id));
         if (result) consumed.add(String(part.id));
         const status: ItemStatus = result
-          ? result.isError
+          ? result.message.isError
             ? 'error'
             : 'ok'
           : index < lastConversationIndex
@@ -289,8 +313,8 @@ export function pageTimeline(records: ItemRecord[], limit = 50, before?: string)
   };
 }
 
-/** The full body of one item, and whether it can still change. */
-export function itemDetail(records: ItemRecord[], id: string) {
-  const found = records.find(r => r.item.id === id);
+/** The full body of one item at revision `rev`, and whether it can still change. */
+export function itemDetail(records: ItemRecord[], id: string, rev?: string) {
+  const found = records.find(r => r.item.id === id && (r.item.rev ?? '') === (rev ?? ''));
   return found && {id, body: found.body(), complete: found.item.status !== 'pending'};
 }

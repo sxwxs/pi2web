@@ -353,13 +353,15 @@ describe('detail stream of the focused Agent', () => {
       durationMs: 1200
     });
     publish({type: 'tool_execution_end', toolCallId: 'call-1', toolName: 'bash', isError: false});
-    const done = await watcher.wait(m => m.type === 'items' && m.items[0].status === 'ok');
-    expect(done.items).toEqual([
-      expect.objectContaining({id: `${entryId}.0`, status: 'ok', durationMs: 1200})
+    // A finished tool is an update to an item published before, not a new item.
+    const done = await watcher.wait(m => m.type === 'items' && m.updated?.[0].status === 'ok');
+    expect(done).toMatchObject({items: []});
+    expect(done.updated).toEqual([
+      expect.objectContaining({id: `${entryId}.0`, status: 'ok', durationMs: 1200, rev: expect.any(String)})
     ]);
     await other.barrier();
     expect(other.messages.some(m => m.type === 'tool_output')).toBe(false);
-    expect(other.messages.some(m => m.type === 'items' && m.items[0].status === 'ok')).toBe(true);
+    expect(other.messages.some(m => m.type === 'items' && m.updated?.[0].status === 'ok')).toBe(true);
   });
 
   it('stops details when the focus moves away and resets the timeline when the branch changes', async () => {

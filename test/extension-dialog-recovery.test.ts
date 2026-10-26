@@ -60,14 +60,15 @@ function setup() {
     messages.append(body);
     return {body};
   });
-  const handleDetail = vi.fn();
+  // Transcript events of the viewed Agent go through the timeline's queue; it is shown here, so render them.
+  const handleDetail = vi.fn(message => message.type === 'agent_event' && api.renderTranscriptEvent(message));
   const sessionKeyboard = {updateAgent: vi.fn(), setActivity: vi.fn()};
   const setAgentActivity = vi.fn(),
     setAgentStatus = vi.fn(),
     selectAgent = vi.fn(async () => {}),
     navigateMobile = vi.fn();
-  const {handleAgentEvent, onKey} = runInNewContext(
-    `${keyboardSource}\n${dialogSource}\n${handlerSource}\n({handleAgentEvent, onKey:sessionKeyboard.onKey})`,
+  const api = runInNewContext(
+    `${keyboardSource}\n${dialogSource}\n${handlerSource}\n({handleAgentEvent, renderTranscriptEvent, onKey:sessionKeyboard.onKey})`,
     {
       state,
       $,
@@ -102,14 +103,14 @@ function setup() {
     {filename: 'web/app.js'}
   );
   return {
-    handleAgentEvent,
+    handleAgentEvent: api.handleAgentEvent,
     $,
     messages,
     postAgent,
     addCard,
     handleDetail,
     state,
-    onKey,
+    onKey: api.onKey,
     setAgentStatus,
     setAgentActivity,
     sessionKeyboard,

@@ -1727,8 +1727,13 @@
     card.details.remove();
     const group = card.group;
     if (!group) return;
-    if (group.querySelector('.activity-items').childElementCount) updateActivityGroup(group);
+    if (group.querySelector('.activity-items').childElementCount) refreshActivityGroup(group);
     else group.remove();
+  }
+  /** A group's summary shows its newest card, which may just have been replaced or removed. */
+  function refreshActivityGroup(group) {
+    const last = group.querySelector('.activity-items').lastElementChild;
+    updateActivityGroup(group, last?.querySelector('.summary-text')?.textContent);
   }
 
   // ---- Timeline of the viewed Agent: its persisted session items. The server pushes new and
@@ -1806,11 +1811,13 @@
     }
   }
   async function loadItemBody(timeline, item) {
-    const key = `${timeline.backendId}|${timeline.sessionId}|${item.id}`;
+    // `rev` names the tool result a body includes; the same item can get another one after a rewind.
+    const rev = item.rev ? `?rev=${encodeURIComponent(item.rev)}` : '',
+      key = `${timeline.backendId}|${timeline.sessionId}|${item.id}${rev}`;
     if (state.itemBodies.has(key)) return state.itemBodies.get(key);
     const data = await requestAgent(
       timeline.agentId,
-      `/sessions/${encodeURIComponent(timeline.sessionId)}/items/${encodeURIComponent(item.id)}`
+      `/sessions/${encodeURIComponent(timeline.sessionId)}/items/${encodeURIComponent(item.id)}${rev}`
     );
     if (!isRunningTool(item)) {
       state.itemBodies.set(key, data.body);
@@ -1863,8 +1870,10 @@
     if (state.timelineCache.size > 20) state.timelineCache.delete(state.timelineCache.keys().next().value);
   }
   const sameTail = (items, tail) =>
-    items.length >= tail.length &&
-    JSON.stringify(items.slice(items.length - tail.length)) === JSON.stringify(tail);
+    tail.length
+      ? items.length >= tail.length &&
+        JSON.stringify(items.slice(items.length - tail.length)) === JSON.stringify(tail)
+      : !items.length;
   /**
    * Show an Agent's timeline: the cached copy at once, then the newest page from the server.
    * Detail messages arriving meanwhile wait in `queue` and apply in order once it is shown.
@@ -1889,7 +1898,17 @@
       renderTimelinePage(cached, false);
       box.scrollTop = box.scrollHeight;
     }
-    const page = await requestAgent(agent.agentId, `/timeline?limit=${TIMELINE_PAGE}`);
+    let page;
+    try {
+      page = await requestAgent(agent.agentId, `/timeline?limit=${TIMELINE_PAGE}`);
+    } catch (error) {
+      // Nothing more to wait for: let queued events (dialogs, shell output) show.
+      if (state.timeline === timeline) {
+        timeline.ready = true;
+        for (const message of timeline.queue.splice(0)) handleDetail(message);
+      }
+      throw error;
+    }
     if (state.timeline !== timeline) return;
     if (!cached || cached.sessionId !== page.sessionId || !sameTail(cached.items, page.items)) {
       timeline.cards.clear();
@@ -1953,30 +1972,47 @@
     controls.append(older, all);
     $('messages').prepend(controls);
   }
-  /** New items go to the end; changed ones (a tool that finished) are replaced where they are. */
+  function replaceItemCard(existing, item) {
+    const timeline = state.timeline,
+      card = itemCard(item);
+    timeline.cards.set(item.id, card);
+    card.group = existing.group;
+    existing.details.replaceWith(card.details);
+    if (card.group) refreshActivityGroup(card.group);
+    // Re-opening fires `toggle`, which loads the final body of a tool that was being watched.
+    card.details.open = existing.details.open;
+  }
+  /**
+   * Appended items go to the end (or replace a card the loaded page already had). Updated items
+   * (a tool that finished) are replaced where they are, or skipped when that history is not loaded.
+   */
   function applyItems(message) {
     const timeline = state.timeline,
       box = $('messages');
     if (message.sessionId !== timeline.sessionId) return reloadTimeline();
     if (message.clearLive) clearLiveCards();
+    for (const item of message.updated || []) {
+      const index = timeline.items.findIndex(x => x.id === item.id);
+      if (index < 0) continue;
+      timeline.items[index] = item;
+      const existing = timeline.cards.get(item.id);
+      if (existing) replaceItemCard(existing, item);
+    }
     let added = false;
     for (const item of message.items) {
-      const existing = timeline.cards.get(item.id),
-        card = itemCard(item);
-      timeline.cards.set(item.id, card);
+      const existing = timeline.cards.get(item.id);
       if (existing) {
-        card.group = existing.group;
-        existing.details.replaceWith(card.details);
-        // Re-opening fires `toggle`, which loads the final body of a tool that was being watched.
-        card.details.open = existing.details.open;
+        replaceItemCard(existing, item);
         const index = timeline.items.findIndex(x => x.id === item.id);
         if (index >= 0) timeline.items[index] = item;
-      } else {
-        box.querySelector('.empty')?.remove();
-        placeCard(card, box, item.timestamp);
-        timeline.items.push(item);
-        added = true;
+        continue;
       }
+      const card = itemCard(item);
+      timeline.cards.set(item.id, card);
+      box.querySelector('.empty')?.remove();
+      placeCard(card, box, item.timestamp);
+      timeline.items.push(item);
+      added = true;
     }
     if (added) {
       for (const card of state.optimistic.splice(0)) removeCard(card);
@@ -1984,7 +2020,10 @@
     }
     saveTimelineCache();
   }
-  /** Messages of the focused Agent's detail stream. */
+  /**
+   * Messages of the focused Agent's detail stream, and its events that add to the transcript.
+   * Until the page is shown they wait, in arrival order: showing it replaces the transcript.
+   */
   function handleDetail(message) {
     const timeline = state.timeline;
     if (!timeline || timeline.agentId !== message.agentId || state.selectedKind !== 'agent') return;
@@ -1995,7 +2034,8 @@
     if (message.type === 'focus_state') {
       applyLive(message.live);
       restoreExtensionRequests(message.agentId, {dialogRequests: message.dialogRequests || []});
-    } else if (message.type === 'delta') appendDelta(message.kind, message.delta);
+    } else if (message.type === 'agent_event') renderTranscriptEvent(message);
+    else if (message.type === 'delta') appendDelta(message.kind, message.delta);
     else if (message.type === 'items') applyItems(message);
     else if (message.type === 'timeline_reset') void reloadTimeline();
     else if (message.type === 'tool_output') applyToolOutput(message);
@@ -2440,7 +2480,11 @@
       renderAgentList();
       if (selected) updateAgentHeader();
     }
-    if (!selected) return;
+    if (selected) handleDetail(message);
+  }
+  /** The part of an Agent event shown in the transcript of the Agent being viewed. */
+  function renderTranscriptEvent(message) {
+    const ev = message.event || {};
     if (ev.type === 'agent_start') $('messages').querySelector('.empty')?.remove();
     else if (
       ev.type === 'bash_execution_start' ||
