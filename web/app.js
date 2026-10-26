@@ -124,6 +124,8 @@
     toast.timer = setTimeout(() => ($('toast').hidden = true), 3000);
   };
   const backendOf = id => backendRegistry.find(id);
+  // Must equal the server's PROTOCOL_VERSION (src/ws/agent-socket.ts); test/web-protocol-version.test.ts checks it.
+  const PROTOCOL_VERSION = 2;
   const connectedBackends = () => backendRegistry.connected();
   const primaryBackend = () => backendRegistry.primary();
   const hasConnection = () => connectedBackends().length > 0;
@@ -353,8 +355,8 @@
     }
 
     const statusInfo = await request(base, token, '/api/v1/system/status');
-    if (statusInfo.protocolVersion !== 1) {
-      throw Error(`不支持的协议版本 ${statusInfo.protocolVersion}（需要 1）`);
+    if (statusInfo.protocolVersion !== PROTOCOL_VERSION) {
+      throw Error(`不支持的协议版本 ${statusInfo.protocolVersion}（需要 ${PROTOCOL_VERSION}）`);
     }
     const authRequired = statusInfo.authRequired !== false;
     if (!authRequired) token = '';
