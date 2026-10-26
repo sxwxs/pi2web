@@ -206,7 +206,9 @@ describe('agent manager', () => {
     const received: any[] = [],
       details: any[] = [];
     m.subscribeAll((agentId, e) => agentId === a.agentId && received.push(e));
-    m.subscribeDetail(a.agentId, message => details.push(message));
+    const focus = await m.focus(a.agentId, message => details.push(message));
+    expect(focus.snapshot).toMatchObject({page: {items: [], total: 0}, live: null, dialogRequests: []});
+    const {sessionId} = focus.snapshot;
     await m.command(a.agentId, 'prompt', 'hello');
     expect((await m.state(a.agentId)).status).toBe('idle');
     // Each activity change follows the event that caused it. Streamed text is not an event.
@@ -228,29 +230,29 @@ describe('agent manager', () => {
     expect(received.every(x => Number.isInteger(x.timestamp) && x.timestamp > 1e12)).toBe(true);
     // Viewers get the recorded prompt, the streamed answer, then the recorded answer replacing it.
     await vi.waitFor(() => expect(details).toHaveLength(3));
-    const sessionId = m.detailState(a.agentId).sessionId;
     expect(details).toEqual([
-      {type: 'items', sessionId, version: 1, items: [expect.objectContaining({kind: 'user', body: 'hello'})]},
+      {type: 'items', sessionId, items: [expect.objectContaining({kind: 'user', body: 'hello'})]},
       {type: 'delta', kind: 'text', delta: 'Mock response: hello'},
       {
         type: 'items',
         sessionId,
-        version: 2,
         items: [expect.objectContaining({kind: 'assistant', body: 'Mock response: hello'})],
         clearLive: true
       }
     ]);
     for (let i = 0; i < 29; i++) await m.command(a.agentId, 'prompt', `message-${i}`);
     const page = await m.timeline(a.agentId, 5);
-    // The page reports the version of the last timeline change it includes.
-    expect(page).toMatchObject({sessionId, version: 60, total: 60, start: 55, hasMore: true});
+    expect(page).toMatchObject({sessionId, total: 60, start: 55, hasMore: true});
     const older = await m.timeline(a.agentId, 5, page.items[0].id);
     expect(older).toMatchObject({start: 50, items: expect.any(Array)});
     expect(older.items.at(-1).id).not.toBe(page.items[0].id);
     await expect(m.timeline(a.agentId, 5, 'missing')).rejects.toMatchObject({
       code: 'TIMELINE_ITEM_NOT_FOUND'
     });
-    expect(await m.item(a.agentId, sessionId!, page.items[0].id)).toMatchObject({complete: true});
+    expect(await m.item(a.agentId, sessionId, page.items[0].id)).toEqual({
+      id: page.items[0].id,
+      body: page.items[0].body
+    });
     await expect(m.item(a.agentId, 'other-session', page.items[0].id)).rejects.toMatchObject({
       code: 'TIMELINE_ITEM_NOT_FOUND'
     });

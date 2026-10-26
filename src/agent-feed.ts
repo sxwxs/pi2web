@@ -1,59 +1,34 @@
 import type {AgentEvent} from './agents.js';
-import type {ToolRuntime} from './activity.js';
-import {buildTimeline, contentText, type TimelineEntry, type TimelineItem} from './timeline.js';
+import {buildTimeline, contentText, pageTimeline, type TimelineEntry, type TimelineItem} from './timeline.js';
 
 /** What a backend exposes of its session for the timeline. */
 export type TimelineSource = {sessionId: string; leafId: string | null; entries(): TimelineEntry[]};
 
 /**
- * Messages for clients viewing one Agent in detail. Timeline changes (`items`, `timeline_reset`)
- * carry consecutive versions; GET /timeline returns the version its page is at, so a client
- * applies exactly the changes after it, and reloads if it ever sees a gap.
+ * Messages for clients viewing one Agent in detail. A client starts from snapshot(), taken
+ * synchronously when it subscribes, so every message after it is new to the client and needs
+ * no numbering: items only ever append, and anything else is a reset.
  */
 export type DetailMessage =
   /** Streamed text of the assistant message being generated. */
   | {type: 'delta'; kind: 'text' | 'thinking'; delta: string}
-  /**
-   * `items` were appended to the timeline; `updated` replace items published before (a running
-   * tool finished), which a client may not have loaded. `clearLive` drops the streamed text
-   * the appended items replace.
-   */
-  | {
-      type: 'items';
-      sessionId: string;
-      version: number;
-      items: TimelineItem[];
-      updated?: TimelineItem[];
-      clearLive?: true;
-    }
-  /** The branch changed in a way that is not an append (navigation, new session): reload the timeline. */
-  | {type: 'timeline_reset'; sessionId: string; version: number}
-  /** Latest output of a running tool. Sockets forward it only for tools a client has expanded. */
+  /** Items appended to the timeline. `clearLive`: they record the streamed message, drop its text. */
+  | {type: 'items'; sessionId: string; items: TimelineItem[]; clearLive?: true}
+  /** The branch changed other than by appending (rewind, new session): take a new snapshot. */
+  | {type: 'timeline_reset'; sessionId: string}
+  /** Output so far of a running tool. Sockets forward it only for tools a client has expanded. */
   | {type: 'tool_output'; toolCallId: string; output: string}
   /** Events only the focused view renders, such as user shell command output. */
   | {type: 'event'; event: AgentEvent};
 
-type Published = {
-  sessionId: string;
-  leafId: string | null;
-  /** Running tools change how unfinished calls display, without moving the leaf. */
-  runtime: string;
-  ids: string[];
-  /** Tool calls without a result: the only items that change after they appear. */
-  unresolved: Map<string, string>;
-};
-const signature = (item: TimelineItem) => JSON.stringify(item);
-const runtimeKey = (runtime: ToolRuntime) => JSON.stringify([runtime.active, [...runtime.running].sort()]);
-const NO_RUNTIME = (): ToolRuntime => ({active: false, running: new Set()});
+type Published = {sessionId: string; leafId: string | null; ids: string[]};
 
 /**
- * Turns one backend's raw events into the detail stream. The timeline itself is never
- * streamed as events: after any event, if the session's leaf moved, the branch is projected
- * again and only new items and items whose status changed are published.
+ * Turns one backend's raw events into the detail stream. After any event, if the session's
+ * leaf moved, the branch is projected again and the items after the published ones are sent.
  */
 export class AgentFeed {
   private published: Published;
-  private version = 0;
   private live = {active: false, text: '', thinking: ''};
   private clearLive = false;
   private outputs = new Map<string, string>();
@@ -61,23 +36,24 @@ export class AgentFeed {
   private closed = false;
   constructor(
     private readonly source: () => TimelineSource,
-    private readonly emit: (message: DetailMessage) => void,
-    private readonly runtime: () => ToolRuntime = NO_RUNTIME
+    private readonly emit: (message: DetailMessage) => void
   ) {
     this.published = this.project().published;
   }
 
-  /** Text streamed so far for the message being generated, for clients that start watching mid-stream. */
-  liveState() {
-    const {active, text, thinking} = this.live;
-    return active || text || thinking ? {text, thinking} : null;
-  }
-  sessionId() {
-    return this.published.sessionId;
-  }
-  /** Version of the last published timeline change. Call sync() first to include unpublished ones. */
-  currentVersion() {
-    return this.version;
+  /**
+   * Everything a client needs to start viewing: the newest page and the text streamed so far.
+   * Publishes pending changes first, so the next message a subscriber gets is newer than this.
+   */
+  snapshot(limit?: number) {
+    this.sync();
+    const source = this.source(),
+      {active, text, thinking} = this.live;
+    return {
+      sessionId: source.sessionId,
+      page: pageTimeline(buildTimeline(source.entries()), limit)!,
+      live: active || text || thinking ? {text, thinking} : null
+    };
   }
   output(toolCallId: string) {
     return this.outputs.get(toolCallId);
@@ -140,53 +116,35 @@ export class AgentFeed {
     }, 0);
   }
 
-  /** Publish what changed on the timeline since the last call. Cheap when nothing was appended. */
+  /** Publish what changed on the timeline since the last call. Cheap when the leaf did not move. */
   sync() {
     if (this.closed) return;
     const source = this.source(),
-      runtime = this.runtime(),
       previous = this.published;
-    if (
-      source.sessionId === previous.sessionId &&
-      source.leafId === previous.leafId &&
-      runtimeKey(runtime) === previous.runtime &&
-      !this.clearLive
-    )
+    if (source.sessionId === previous.sessionId && source.leafId === previous.leafId && !this.clearLive)
       return;
-    const {published, records, entries} = this.project(source, runtime);
+    const {published, records, entries} = this.project(source);
     this.published = published;
-    // Append-only means the old leaf is still on the branch. Same item ids are not enough: moving
-    // back from a tool's result to its call keeps every id but takes the result away.
+    // An append keeps the old leaf on the branch and every item published so far.
     const appended =
+      source.sessionId === previous.sessionId &&
       (previous.leafId === null || entries.some(entry => entry.id === previous.leafId)) &&
-      previous.ids.length <= published.ids.length &&
       previous.ids.every((id, i) => published.ids[i] === id);
-    if (source.sessionId !== previous.sessionId || !appended) {
-      this.clearLive = false;
-      this.emit({type: 'timeline_reset', sessionId: source.sessionId, version: ++this.version});
+    const clearLive = this.clearLive;
+    this.clearLive = false;
+    if (clearLive) this.live = {active: false, text: '', thinking: ''};
+    if (!appended) {
+      this.emit({type: 'timeline_reset', sessionId: source.sessionId});
       return;
     }
-    const items = records.slice(previous.ids.length).map(r => r.item),
-      updated = records
-        .slice(0, previous.ids.length)
-        .map(r => r.item)
-        .filter(
-          item => previous.unresolved.has(item.id) && previous.unresolved.get(item.id) !== signature(item)
-        );
-    if (!items.length && !updated.length && !this.clearLive) return;
-    const message: DetailMessage = {
+    const items = records.slice(previous.ids.length).map(r => r.item);
+    if (!items.length && !clearLive) return;
+    this.emit({
       type: 'items',
       sessionId: source.sessionId,
-      version: ++this.version,
-      items
-    };
-    if (updated.length) message.updated = updated;
-    if (this.clearLive) {
-      message.clearLive = true;
-      this.clearLive = false;
-      this.live = {active: false, text: '', thinking: ''};
-    }
-    this.emit(message);
+      items,
+      ...(clearLive ? {clearLive: true as const} : {})
+    });
   }
 
   close() {
@@ -194,23 +152,13 @@ export class AgentFeed {
     if (this.timer) clearTimeout(this.timer);
   }
 
-  private project(source = this.source(), runtime = this.runtime()) {
+  private project(source = this.source()) {
     const entries = source.entries(),
-      records = buildTimeline(entries, runtime),
-      published: Published = {
-        sessionId: source.sessionId,
-        leafId: source.leafId,
-        runtime: runtimeKey(runtime),
-        ids: records.map(r => r.item.id),
-        unresolved: new Map(
-          records
-            .filter(
-              r =>
-                r.item.kind === 'tool' && !r.item.rev && r.item.status !== 'ok' && r.item.status !== 'error'
-            )
-            .map(r => [r.item.id, signature(r.item)])
-        )
-      };
-    return {published, records, entries};
+      records = buildTimeline(entries);
+    return {
+      published: {sessionId: source.sessionId, leafId: source.leafId, ids: records.map(r => r.item.id)},
+      records,
+      entries
+    };
   }
 }

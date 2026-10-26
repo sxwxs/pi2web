@@ -108,7 +108,7 @@ class Element {
   }
 }
 
-function setup(pages: any[] = []) {
+function setup(olderPages: any[] = []) {
   const messages = new Element();
   const state: any = {
     selectedKind: 'agent',
@@ -116,22 +116,22 @@ function setup(pages: any[] = []) {
     timeline: null,
     timelineCache: new Map(),
     itemBodies: new Map(),
+    activities: new Map(),
     streams: new Map(),
     liveCards: [],
     bashCards: new Map(),
     optimistic: []
   };
   const requestAgent = vi.fn(async (_agentId: string, url: string) => {
-    if (url.startsWith('/timeline')) return pages.shift();
+    if (url.startsWith('/timeline')) return olderPages.shift();
     return {body: `full body of ${url.split('/').pop()}`};
   });
   const sendFocused = vi.fn(),
-    // No socket unless a test says so: loading then does not wait for focus_state.
-    sendFocus = vi.fn(() => false),
+    sendFocus = vi.fn(() => true),
     restoreExtensionRequests = vi.fn(),
     renderTranscriptEvent = vi.fn();
   const api = runInNewContext(
-    `${timelineSource}\n({loadTimeline, handleDetail, addCard})`,
+    `${timelineSource}\n({loadTimeline, handleDetail, addCard, refreshToolCards})`,
     {
       state,
       $: () => messages,
@@ -142,7 +142,6 @@ function setup(pages: any[] = []) {
       restoreExtensionRequests,
       renderTranscriptEvent,
       toast: vi.fn(),
-      setTimeout,
       requestAnimationFrame: (callback: () => void) => setTimeout(callback, 0),
       cancelAnimationFrame: (id: any) => clearTimeout(id),
       document: {
@@ -155,13 +154,22 @@ function setup(pages: any[] = []) {
   const card = (id: string) => messages.descendants().find(el => el.dataset.itemId === id)!;
   const summary = (id: string) => card(id).querySelector('.summary-text')!.textContent;
   const body = (id: string) => card(id).querySelector('.msg-content')!.textContent;
-  // Timeline changes are numbered from the page's version (0 in these pages) unless a test sets one.
-  let version = 0;
-  const detail = (message: any) =>
-    api.handleDetail({
-      agentId: 'bk:agent-a',
-      ...(['items', 'timeline_reset'].includes(message.type) ? {version: ++version} : {}),
-      ...message
+  const ids = () => messages.children.map(el => el.dataset.itemId).filter(Boolean);
+  const detail = (message: any) => api.handleDetail({agentId: 'bk:agent-a', sessionId: 's1', ...message});
+  /** Select the Agent and deliver the snapshot the server answers `focus` with. */
+  const open = (items: any[], extra: any = {}) => {
+    api.loadTimeline(state.agent);
+    detail({
+      type: 'focus_state',
+      page: {items, total: items.length, start: 0, hasMore: false},
+      live: null,
+      ...extra
+    });
+  };
+  const running = (toolCallId: string) =>
+    state.activities.set('bk:agent-a', {
+      run: {startedAt: 1},
+      phase: {kind: 'running_tools', since: 1, tools: [{toolCallId, toolName: 'bash', since: 1}]}
     });
   return {
     messages,
@@ -170,100 +178,97 @@ function setup(pages: any[] = []) {
     sendFocused,
     sendFocus,
     restoreExtensionRequests,
-    renderTranscriptEvent,
     card,
     summary,
     body,
+    ids,
     detail,
+    open,
+    running,
     ...api
   };
 }
 
-const page = (items: any[], extra = {}) => ({
-  sessionId: 's1',
-  version: 0,
-  items,
-  total: items.length,
-  start: 0,
-  hasMore: false,
-  ...extra
-});
 const user = {id: 'e1', kind: 'user', size: 2, body: 'hi'};
-const running = {
+const call = {
   id: 'e2.0',
-  kind: 'tool',
+  kind: 'tool_call',
   title: 'bash',
   summary: 'npm test',
-  status: 'pending',
-  toolCallId: 'call-1',
-  size: 26,
+  toolCallId: 'c1',
+  size: 23,
   body: '{"command": "npm test"}'
 };
-const big = {
-  id: 'e3.0',
-  kind: 'tool',
-  title: 'read',
-  summary: 'a.ts',
+const result = {
+  id: 'e3',
+  kind: 'tool_result',
+  title: 'bash',
   status: 'ok',
+  toolCallId: 'c1',
   size: 9000,
   durationMs: 900
 };
 
 describe('timeline rendering', () => {
-  it('shows summaries, groups activity, and loads a large body once when expanded', async () => {
-    const ui = setup([page([user, big])]);
-    await ui.loadTimeline(ui.state.agent);
+  it('shows the snapshot, groups activity, and loads a large body once when expanded', async () => {
+    const ui = setup();
+    ui.open([user, call, result]);
     expect(ui.body('e1')).toBe('hi');
-    expect(ui.summary('e3.0')).toBe('✓ read · a.ts');
-    expect(ui.card('e3.0').querySelector('.tool-duration')!.textContent).toBe('900 ms');
-    expect(ui.body('e3.0')).toBe('展开以加载（8.8K 字符）');
+    // The call and its result are one card.
+    expect(ui.summary('e2.0')).toBe('✓ bash · npm test');
+    expect(ui.card('e2.0').querySelector('.tool-duration')!.textContent).toBe('900 ms');
     expect(ui.messages.querySelector('.activity-group')!.querySelector('.activity-count')!.textContent).toBe(
       '1 项'
     );
-    ui.card('e3.0').open = true;
-    await vi.waitFor(() => expect(ui.body('e3.0')).toBe('full body of e3.0'));
-    expect(ui.requestAgent).toHaveBeenLastCalledWith('bk:agent-a', '/sessions/s1/items/e3.0');
-    // Collapsing and expanding again, even after reloading the page, needs no request.
-    ui.card('e3.0').open = false;
-    ui.card('e3.0').open = true;
-    expect(ui.requestAgent).toHaveBeenCalledTimes(2);
+    ui.card('e2.0').open = true;
+    await vi.waitFor(() =>
+      expect(ui.body('e2.0')).toBe('{"command": "npm test"}\n\n— 结果 —\nfull body of e3')
+    );
+    expect(ui.requestAgent).toHaveBeenCalledExactlyOnceWith('bk:agent-a', '/sessions/s1/items/e3');
+    ui.card('e2.0').open = false;
+    ui.card('e2.0').open = true;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(ui.requestAgent).toHaveBeenCalledOnce();
   });
 
-  it('streams output of an expanded running tool and replaces the card when it finishes', async () => {
-    const ui = setup([page([running])]);
-    await ui.loadTimeline(ui.state.agent);
+  it('shows a call as running from the activity, watches it while expanded, and completes it with its result', async () => {
+    const ui = setup();
+    ui.running('c1');
+    ui.open([call]);
     expect(ui.summary('e2.0')).toBe('⏳ bash · npm test · 执行中');
     ui.card('e2.0').open = true;
-    expect(ui.sendFocused).toHaveBeenCalledWith({type: 'watch', toolCallId: 'call-1'});
-    ui.detail({type: 'tool_output', toolCallId: 'call-1', output: 'PASS 3'});
+    expect(ui.sendFocused).toHaveBeenCalledWith({type: 'watch', toolCallId: 'c1'});
+    ui.detail({type: 'tool_output', toolCallId: 'c1', output: 'PASS 3'});
     expect(ui.body('e2.0')).toBe('{"command": "npm test"}\n\n— 输出 —\nPASS 3');
-    ui.detail({
-      type: 'items',
-      sessionId: 's1',
-      items: [],
-      updated: [{...running, status: 'ok', size: 9000, body: undefined, toolCallId: undefined, rev: 'r1'}]
-    });
-    const replaced = ui.card('e2.0');
+    ui.state.activities.set('bk:agent-a', {run: {startedAt: 1}, phase: {kind: 'waiting_llm', since: 2}});
+    ui.detail({type: 'items', items: [{...result, size: 2, body: 'ok'}]});
     expect(ui.summary('e2.0')).toBe('✓ bash · npm test');
-    expect(replaced.open).toBe(true);
-    await vi.waitFor(() => expect(ui.body('e2.0')).toBe('full body of e2.0?rev=r1'));
-    expect(ui.requestAgent).toHaveBeenLastCalledWith('bk:agent-a', '/sessions/s1/items/e2.0?rev=r1');
+    expect(ui.sendFocused).toHaveBeenLastCalledWith({type: 'unwatch', toolCallId: 'c1'});
+    await vi.waitFor(() => expect(ui.body('e2.0')).toBe('{"command": "npm test"}\n\n— 结果 —\nok'));
     // The collapsed group's summary follows the finished card.
     expect(ui.messages.querySelector('.activity-group')!.querySelector('.summary-text')!.textContent).toBe(
       '✓ bash · npm test'
     );
-    expect(ui.messages.querySelectorAll('.tool')).toHaveLength(1);
+  });
+
+  it('tells calls waiting in the run going on from ones that never finished', () => {
+    const ui = setup();
+    const old = {...call, id: 'e0.0', toolCallId: 'c0'};
+    ui.state.activities.set('bk:agent-a', {run: {startedAt: 1}, phase: {kind: 'waiting_llm', since: 1}});
+    ui.open([old, user, call]);
+    expect(ui.summary('e0.0')).toBe('⊘ bash · npm test · 未完成');
+    expect(ui.summary('e2.0')).toBe('⋯ bash · npm test · 等待执行');
+    // The run ends without a result: the call did not finish.
+    ui.state.activities.delete('bk:agent-a');
+    ui.refreshToolCards('bk:agent-a');
+    expect(ui.summary('e2.0')).toBe('⊘ bash · npm test · 未完成');
   });
 
   it('replaces streamed text with the recorded items and drops optimistic prompts', async () => {
-    const ui = setup([page([user])]);
-    await ui.loadTimeline(ui.state.agent);
+    const ui = setup();
+    ui.open([user]);
     ui.state.optimistic.push(ui.addCard(null, 'next question', 'user'));
-    ui.detail({
-      type: 'items',
-      sessionId: 's1',
-      items: [{id: 'e4', kind: 'user', size: 13, body: 'next question'}]
-    });
+    ui.detail({type: 'items', items: [{id: 'e4', kind: 'user', size: 13, body: 'next question'}]});
     ui.detail({type: 'delta', kind: 'thinking', delta: 'pondering'});
     ui.detail({type: 'delta', kind: 'text', delta: 'Hel'});
     ui.detail({type: 'delta', kind: 'text', delta: 'lo'});
@@ -271,174 +276,55 @@ describe('timeline rendering', () => {
     await vi.waitFor(() => expect(texts()).toEqual(['hi', 'next question', 'pondering', 'Hello']));
     ui.detail({
       type: 'items',
-      sessionId: 's1',
       clearLive: true,
       items: [
         {id: 'e5.0', kind: 'thinking', size: 9, body: 'pondering'},
         {id: 'e5.1', kind: 'assistant', size: 5, body: 'Hello'}
       ]
     });
-    expect(ui.state.timeline.items.map((item: any) => item.id)).toEqual(['e1', 'e4', 'e5.0', 'e5.1']);
-    expect(ui.messages.children.map(el => el.dataset.itemId)).toEqual(['e1', 'e4', 'e5.0', 'e5.1']);
+    expect(ui.ids()).toEqual(['e1', 'e4', 'e5.0', 'e5.1']);
   });
 
-  it('applies details that arrive while loading after the page, in order', async () => {
-    let release!: (value: unknown) => void;
+  it('shows the cached copy at once, then the snapshot, ignoring what arrives before it', () => {
     const ui = setup();
-    ui.requestAgent.mockImplementationOnce(() => new Promise(resolve => (release = resolve)));
-    const loading = ui.loadTimeline(ui.state.agent);
-    const dialog = {type: 'extension_ui_request', requestId: 'q', kind: 'confirm', title: 'Go?'};
-    ui.detail({type: 'focus_state', live: {text: 'Wor', thinking: ''}, dialogRequests: [dialog]});
-    ui.detail({type: 'delta', kind: 'text', delta: 'king'});
-    release(page([user]));
-    await loading;
-    await vi.waitFor(() =>
-      expect(ui.messages.querySelectorAll('.msg-content').map(el => el.textContent)).toEqual([
-        'hi',
-        'Working'
-      ])
-    );
-    // Dialog controls are rebuilt once the transcript they live in is shown.
-    expect(ui.restoreExtensionRequests).toHaveBeenCalledExactlyOnceWith('bk:agent-a', {
-      dialogRequests: [dialog]
+    ui.open([user]);
+    ui.state.timeline = null;
+    ui.loadTimeline(ui.state.agent);
+    expect(ui.ids()).toEqual(['e1']); // Cached, before the server answered.
+    ui.detail({type: 'items', items: [{id: 'old', kind: 'user', size: 1, body: 'x'}]});
+    expect(ui.ids()).toEqual(['e1']);
+    ui.detail({
+      type: 'focus_state',
+      page: {items: [], total: 0, start: 0, hasMore: false},
+      live: {text: 'Work', thinking: ''},
+      dialogRequests: [{requestId: 'q'}]
+    });
+    expect(ui.ids()).toEqual([]);
+    expect(ui.restoreExtensionRequests).toHaveBeenCalledWith('bk:agent-a', {
+      dialogRequests: [{requestId: 'q'}]
     });
   });
 
-  it('reloads when the session changed and shows the cached copy at once when coming back', async () => {
-    const ui = setup([page([user]), page([{...user, id: 'f1', body: 'other'}], {sessionId: 's2'})]);
-    await ui.loadTimeline(ui.state.agent);
-    ui.detail({type: 'items', sessionId: 's2', items: []});
-    await vi.waitFor(() => expect(ui.state.timeline.sessionId).toBe('s2'));
-    expect(ui.body('f1')).toBe('other');
-    let release!: (value: unknown) => void;
-    ui.requestAgent.mockImplementationOnce(() => new Promise(resolve => (release = resolve)));
-    const loading = ui.loadTimeline(ui.state.agent);
-    expect(ui.body('f1')).toBe('other'); // Before the server answered.
-    release(page([{...user, id: 'f1', body: 'other'}], {sessionId: 's2'}));
-    await loading;
-    expect(ui.body('f1')).toBe('other');
+  it('takes a new snapshot when the branch changes', () => {
+    const ui = setup();
+    ui.open([user]);
+    ui.sendFocus.mockClear();
+    ui.detail({type: 'timeline_reset'});
+    expect(ui.sendFocus).toHaveBeenCalledWith(true);
+    // Until the new snapshot, appended items are already in it.
+    ui.detail({type: 'items', items: [{id: 'e9', kind: 'user', size: 1, body: 'x'}]});
+    expect(ui.ids()).toEqual(['e1']);
   });
 
   it('pages back through older items', async () => {
     const ui = setup([
-      page([user], {start: 1, total: 2, hasMore: true}),
-      page([{...user, id: 'e0', body: 'first'}])
+      {sessionId: 's1', items: [{...user, id: 'e0', body: 'first'}], total: 2, start: 0, hasMore: false}
     ]);
-    await ui.loadTimeline(ui.state.agent);
+    ui.open([user], {page: {items: [user], total: 2, start: 1, hasMore: true}});
     const button = ui.messages.querySelector('#loadOlderMessages')!;
     expect(button.textContent).toBe('加载更早的对话（还有 1 项）');
     await (button as any).onclick();
-    await vi.waitFor(() => expect(ui.messages.children.map(el => el.dataset.itemId)).toEqual(['e0', 'e1']));
+    await vi.waitFor(() => expect(ui.ids()).toEqual(['e0', 'e1']));
     expect(ui.requestAgent).toHaveBeenLastCalledWith('bk:agent-a', '/timeline?limit=50&before=e1');
-  });
-
-  it('skips updates to history that is not loaded instead of appending them', async () => {
-    const ui = setup([page([user], {start: 60, total: 61, hasMore: true})]);
-    await ui.loadTimeline(ui.state.agent);
-    ui.detail({
-      type: 'items',
-      sessionId: 's1',
-      items: [],
-      updated: [{...running, id: 'old.0', status: 'ok'}]
-    });
-    expect(ui.messages.children.map(el => el.dataset.itemId).filter(Boolean)).toEqual(['e1']);
-    expect(ui.state.timeline.items.map((item: any) => item.id)).toEqual(['e1']);
-  });
-
-  it('shows an emptied timeline instead of the cached conversation', async () => {
-    const ui = setup([page([user]), page([])]);
-    await ui.loadTimeline(ui.state.agent);
-    await ui.loadTimeline(ui.state.agent);
-    expect(ui.state.timeline.items).toEqual([]);
-    expect(ui.messages.querySelector('.empty')).toBeDefined();
-    expect(ui.messages.descendants().some(el => el.dataset.itemId)).toBe(false);
-  });
-
-  it('holds transcript events (dialogs, shell output) that arrive while loading until the page is shown', async () => {
-    let release!: (value: unknown) => void;
-    const ui = setup();
-    ui.requestAgent.mockImplementationOnce(() => new Promise(resolve => (release = resolve)));
-    const loading = ui.loadTimeline(ui.state.agent);
-    const dialog = {
-      type: 'agent_event',
-      agentId: 'bk:agent-a',
-      event: {type: 'extension_ui_request', requestId: 'q'}
-    };
-    ui.detail({type: 'focus_state', live: null});
-    ui.handleDetail(dialog);
-    expect(ui.renderTranscriptEvent).not.toHaveBeenCalled();
-    release(page([user]));
-    await loading;
-    expect(ui.renderTranscriptEvent).toHaveBeenCalledExactlyOnceWith(dialog);
-    // Rendered after the focus baseline, in arrival order.
-    expect(ui.restoreExtensionRequests.mock.invocationCallOrder[0]).toBeLessThan(
-      ui.renderTranscriptEvent.mock.invocationCallOrder[0]
-    );
-  });
-
-  it('reads the page only after the server confirmed the focus', async () => {
-    const ui = setup([page([user])]);
-    ui.sendFocus.mockReturnValue(true);
-    const loading = ui.loadTimeline(ui.state.agent);
-    await new Promise(resolve => setTimeout(resolve, 10));
-    expect(ui.requestAgent).not.toHaveBeenCalled();
-    ui.detail({type: 'focus_state', version: 0, live: null});
-    await loading;
-    expect(ui.requestAgent).toHaveBeenCalledOnce();
-    expect(ui.body('e1')).toBe('hi');
-  });
-
-  it('applies only timeline changes after the page, and still drops their streamed text', async () => {
-    let release!: (value: unknown) => void;
-    const ui = setup();
-    ui.requestAgent.mockImplementationOnce(() => new Promise(resolve => (release = resolve)));
-    const loading = ui.loadTimeline(ui.state.agent);
-    ui.detail({type: 'focus_state', live: {text: 'Hello', thinking: ''}});
-    // Recorded before the page was read: the page has it, so it must not be appended again.
-    ui.detail({
-      type: 'items',
-      version: 7,
-      sessionId: 's1',
-      clearLive: true,
-      items: [{id: 'e2', kind: 'assistant', size: 5, body: 'Hello'}]
-    });
-    ui.detail({
-      type: 'items',
-      version: 8,
-      sessionId: 's1',
-      items: [{id: 'e3', kind: 'user', size: 4, body: 'next'}]
-    });
-    release(page([user, {id: 'e2', kind: 'assistant', size: 5, body: 'Hello'}], {version: 7}));
-    await loading;
-    await new Promise(resolve => setTimeout(resolve, 5));
-    expect(ui.messages.children.map(el => el.dataset.itemId)).toEqual(['e1', 'e2', 'e3']);
-    expect(ui.state.timeline.version).toBe(8);
-  });
-
-  it('reloads after a gap in timeline changes', async () => {
-    const ui = setup([
-      page([user]),
-      page([user, {id: 'e5', kind: 'user', size: 1, body: 'x'}], {version: 5})
-    ]);
-    await ui.loadTimeline(ui.state.agent);
-    ui.detail({
-      type: 'items',
-      version: 3,
-      sessionId: 's1',
-      items: [{id: 'e4', kind: 'user', size: 1, body: 'y'}]
-    });
-    await vi.waitFor(() => expect(ui.state.timeline.version).toBe(5));
-    expect(ui.messages.children.map(el => el.dataset.itemId)).toEqual(['e1', 'e5']);
-  });
-
-  it('extends a watched tool output with appended parts', async () => {
-    const ui = setup([page([running])]);
-    await ui.loadTimeline(ui.state.agent);
-    ui.card('e2.0').open = true;
-    ui.detail({type: 'tool_output', toolCallId: 'call-1', output: 'one'});
-    ui.detail({type: 'tool_output', toolCallId: 'call-1', append: ' two'});
-    expect(ui.body('e2.0')).toBe('{"command": "npm test"}\n\n— 输出 —\none two');
-    ui.detail({type: 'tool_output', toolCallId: 'call-1', output: 'tail only'});
-    expect(ui.body('e2.0')).toBe('{"command": "npm test"}\n\n— 输出 —\ntail only');
   });
 });

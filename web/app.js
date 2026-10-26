@@ -1236,6 +1236,7 @@
     if (window.ActivityView.isBusy(activity)) state.activities.set(agentId, activity);
     else state.activities.delete(agentId);
     sessionKeyboard.setActivity(agentId, activity);
+    refreshToolCards(agentId);
     renderAgentList();
     if (state.agent?.agentId === agentId) renderActivityBar();
   }
@@ -1559,7 +1560,7 @@
     state.commandsAgentId = null;
     renderQueueBar();
     try {
-      await loadTimeline(agent);
+      loadTimeline(agent);
       await loadSessionIdentity();
     } catch (error) {
       addCard('加载消息失败', error.message, 'error', true);
@@ -1734,31 +1735,31 @@
     updateActivityGroup(group, last?.querySelector('.summary-text')?.textContent);
   }
 
-  // ---- Timeline of the viewed Agent: its persisted session items. The server pushes new and
-  // changed items while the Agent is focused. Large bodies load when a card is expanded, and
-  // completed items never change, so their bodies are cached here and by the browser.
+  // ---- Timeline of the viewed Agent. Items never change. Focusing the Agent makes the server send
+  // a snapshot (focus_state), then append items in order on the same socket; anything that is not an
+  // append makes it send timeline_reset, and the view takes a new snapshot. A tool's call and result
+  // are two items shown as one card, and whether a call is running comes from the Agent's activity.
+  // Large bodies load when a card is expanded; they never change, so they are cached for good.
   const TIMELINE_PAGE = 50;
-  const STATUS_MARK = {pending: '⏳', ok: '✓', error: '✗', cancelled: '⊘'};
   const CARD_KIND = {
     user: 'user',
     assistant: 'assistant',
     thinking: 'thinking',
     error: 'error',
-    tool: 'tool',
     bash: 'tool'
   };
   const formatSize = chars => (chars < 1024 ? `${chars} 字符` : `${(chars / 1024).toFixed(1)}K 字符`);
+  const RESULT_MARK = {ok: '✓', error: '✗', cancelled: '⊘'};
   function itemTitle(item) {
-    const detail = item.summary ? ` · ${item.summary}` : '',
-      mark = STATUS_MARK[item.status] || '';
+    const detail = item.summary ? ` · ${item.summary}` : '';
     switch (item.kind) {
       case 'user':
       case 'assistant':
         return null;
-      case 'tool':
-        return `${mark} ${item.title}${detail}${item.status === 'pending' ? ' · 执行中' : item.status === 'cancelled' ? ' · 未完成' : ''}`;
       case 'bash':
-        return `${mark} $ ${item.title}${detail}`;
+        return `${RESULT_MARK[item.status] || ''} $ ${item.title}${detail}`;
+      case 'tool_result': // Its call is not on this page.
+        return `${RESULT_MARK[item.status] || ''} ${item.title}`;
       case 'thinking':
         return item.body === undefined ? `Thinking${detail}` : 'Thinking';
       case 'error':
@@ -1767,82 +1768,147 @@
         return `${item.title || item.kind}${detail}`;
     }
   }
-  const isRunningTool = item => item.kind === 'tool' && item.status === 'pending' && !!item.toolCallId;
   function itemCard(item) {
     const lazy = item.body === undefined,
       card = createCard(
         itemTitle(item),
         lazy ? `展开以加载（${formatSize(item.size)}）` : item.body,
-        CARD_KIND[item.kind] || 'system',
+        CARD_KIND[item.kind] || (item.kind === 'tool_result' ? 'tool' : 'system'),
         item.kind === 'error',
         item.timestamp
       );
     card.item = item;
-    card.loaded = !lazy;
-    card.args = lazy ? undefined : item.body;
     card.details.dataset.itemId = item.id;
     card.details.classList.toggle('tool-error', item.status === 'error');
     if (item.durationMs !== undefined) setToolDuration(card, item.durationMs);
-    if (lazy || isRunningTool(item)) card.details.addEventListener('toggle', () => void onItemToggle(card));
+    if (lazy) card.details.addEventListener('toggle', () => void expandItem(card));
     return card;
   }
-  /** Expanding loads a large body; expanding a running tool also streams its output. */
-  async function onItemToggle(card) {
-    const timeline = state.timeline,
-      item = card.item;
-    if (!timeline || timeline.cards.get(item.id) !== card) return;
-    const running = isRunningTool(item);
-    if (running) sendFocused({type: card.details.open ? 'watch' : 'unwatch', toolCallId: item.toolCallId});
-    if (!card.details.open || card.loaded || card.loading) return;
-    card.loading = true;
+  async function expandItem(card) {
+    if (!card.details.open || card.loaded) return;
+    card.loaded = true;
     try {
-      const body = await loadItemBody(timeline, item);
-      if (timeline.cards.get(item.id) !== card) return;
-      card.loaded = true;
-      card.args = body;
-      if (card.output !== undefined) renderToolOutput(card);
-      else renderCardBody(card.body, body, item.kind === 'assistant');
+      renderCardBody(card.body, await loadItemBody(card.item), card.item.kind === 'assistant');
     } catch (error) {
+      card.loaded = false;
       renderCardBody(card.body, `加载失败：${error.message}`);
-    } finally {
-      card.loading = false;
     }
   }
-  async function loadItemBody(timeline, item) {
-    // `rev` names the tool result a body includes; the same item can get another one after a rewind.
-    const rev = item.rev ? `?rev=${encodeURIComponent(item.rev)}` : '',
-      key = `${timeline.backendId}|${timeline.sessionId}|${item.id}${rev}`;
+  async function loadItemBody(item) {
+    const timeline = state.timeline,
+      key = `${timeline.backendId}|${timeline.sessionId}|${item.id}`;
     if (state.itemBodies.has(key)) return state.itemBodies.get(key);
     const data = await requestAgent(
       timeline.agentId,
-      `/sessions/${encodeURIComponent(timeline.sessionId)}/items/${encodeURIComponent(item.id)}${rev}`
+      `/sessions/${encodeURIComponent(timeline.sessionId)}/items/${encodeURIComponent(item.id)}`
     );
-    if (!isRunningTool(item)) {
-      state.itemBodies.set(key, data.body);
-      // The browser's HTTP cache keeps everything; this only makes recent expansions instant.
-      if (state.itemBodies.size > 200) state.itemBodies.delete(state.itemBodies.keys().next().value);
-    }
+    state.itemBodies.set(key, data.body);
+    // The browser's HTTP cache keeps everything; this only makes recent expansions instant.
+    if (state.itemBodies.size > 200) state.itemBodies.delete(state.itemBodies.keys().next().value);
     return data.body;
   }
-  function renderToolOutput(card) {
-    renderCardBody(card.body, `${card.args ? `${card.args}\n\n` : ''}— 输出 —\n${card.output}`);
+
+  // A tool card: its call, its result once recorded, and while it runs and is expanded, its output.
+  const TOOL_MARK = {ok: '✓', error: '✗', running: '⏳', waiting: '⋯', unfinished: '⊘'};
+  const TOOL_NOTE = {running: ' · 执行中', waiting: ' · 等待执行', unfinished: ' · 未完成'};
+  const entryOf = itemId => itemId.slice(0, itemId.lastIndexOf('.'));
+  /** ok/error once recorded; otherwise running, waiting (in the newest calls of a run going on) or unfinished. */
+  function toolState(card) {
+    if (card.result) return card.result.status;
+    const timeline = state.timeline,
+      activity = state.activities.get(timeline.agentId),
+      phase = activity?.phase;
+    if (phase?.kind === 'running_tools' && phase.tools.some(tool => tool.toolCallId === card.call.toolCallId))
+      return 'running';
+    return activity?.run && entryOf(card.call.id) === timeline.lastCallEntry ? 'waiting' : 'unfinished';
   }
-  /** The server sends a tool's whole output, then only what was appended (until it no longer extends). */
+  function toolCard(call) {
+    const card = createCard(call.title, '', 'tool', false, call.timestamp);
+    card.call = card.item = call;
+    card.details.dataset.itemId = call.id;
+    card.details.addEventListener('toggle', () => void expandTool(card));
+    return card;
+  }
+  function updateToolCard(card) {
+    const status = toolState(card),
+      {call, result} = card;
+    card.summaryText.textContent = `${TOOL_MARK[status]} ${call.title}${call.summary ? ` · ${call.summary}` : ''}${TOOL_NOTE[status] || ''}`;
+    card.details.classList.toggle('tool-error', status === 'error');
+    if (result?.durationMs !== undefined) setToolDuration(card, result.durationMs);
+    if (card.group) refreshActivityGroup(card.group);
+    if (card.details.open) void expandTool(card);
+  }
+  /** Refresh the calls still without a result, whose state follows the Agent's activity. */
+  function refreshToolCards(agentId) {
+    if (state.timeline?.agentId !== agentId) return;
+    for (const card of state.timeline.toolCards.values()) if (!card.result) updateToolCard(card);
+  }
+  function renderToolBody(card) {
+    const head = card.args ?? '加载中…',
+      tail = card.result
+        ? `— 结果 —\n${card.resultText ?? '加载中…'}`
+        : card.output !== undefined
+          ? `— 输出 —\n${card.output}`
+          : '';
+    renderCardBody(card.body, [head, tail].filter(Boolean).join('\n\n'));
+  }
+  /** Expanding loads the call's and result's bodies; expanding a running call also watches its output. */
+  async function expandTool(card) {
+    const watch = card.details.open && toolState(card) === 'running';
+    if (watch !== !!card.watching) {
+      card.watching = watch;
+      sendFocused({type: watch ? 'watch' : 'unwatch', toolCallId: card.call.toolCallId});
+    }
+    if (!card.details.open) return;
+    renderToolBody(card);
+    try {
+      if (card.args === undefined) card.args = card.call.body ?? (await loadItemBody(card.call));
+      if (card.result && card.resultText === undefined)
+        card.resultText = card.result.body ?? (await loadItemBody(card.result));
+    } catch (error) {
+      renderCardBody(card.body, `加载失败：${error.message}`);
+      return;
+    }
+    renderToolBody(card);
+  }
   function applyToolOutput(message) {
-    for (const card of state.timeline.cards.values())
-      if (card.item.toolCallId === message.toolCallId && isRunningTool(card.item)) {
-        card.output = message.append !== undefined ? (card.output || '') + message.append : message.output;
-        if (card.loaded) renderToolOutput(card);
+    const card = state.timeline.toolCards.get(message.toolCallId);
+    if (!card || card.result) return;
+    card.output = message.output;
+    if (card.details.open) renderToolBody(card);
+  }
+
+  /** Add items in order: a result joins its call's card, everything else gets a card of its own. */
+  function placeItems(items, target) {
+    const timeline = state.timeline;
+    for (const item of items) {
+      const call = item.kind === 'tool_result' ? timeline.toolCards.get(item.toolCallId) : undefined;
+      if (call) {
+        call.result = item;
+        timeline.cards.set(item.id, call);
+        updateToolCard(call);
+        continue;
       }
+      const card = item.kind === 'tool_call' ? toolCard(item) : itemCard(item);
+      timeline.cards.set(item.id, card);
+      placeCard(card, target, item.timestamp);
+      if (item.kind === 'tool_call') {
+        timeline.toolCards.set(item.toolCallId, card);
+        updateToolCard(card);
+      }
+    }
   }
   function renderTimelinePage(page, prepend) {
     const timeline = state.timeline,
       box = $('messages'),
       fragment = document.createDocumentFragment();
-    for (const item of page.items) {
-      const card = placeCard(itemCard(item), fragment, item.timestamp);
-      timeline.cards.set(item.id, card);
+    if (!prepend) {
+      timeline.cards.clear();
+      timeline.toolCards.clear();
+      const calls = page.items.filter(item => item.kind === 'tool_call');
+      timeline.lastCallEntry = calls.length ? entryOf(calls[calls.length - 1].id) : null;
     }
+    placeItems(page.items, fragment);
     if (prepend) {
       box.querySelector('#messageHistoryControls')?.remove();
       box.prepend(fragment);
@@ -1859,7 +1925,6 @@
   }
   function saveTimelineCache() {
     const timeline = state.timeline;
-    if (!timeline?.ready) return;
     state.timelineCache.delete(timeline.agentId);
     state.timelineCache.set(timeline.agentId, {
       sessionId: timeline.sessionId,
@@ -1868,29 +1933,21 @@
     });
     if (state.timelineCache.size > 20) state.timelineCache.delete(state.timelineCache.keys().next().value);
   }
-  const sameTail = (items, tail) =>
-    tail.length
-      ? items.length >= tail.length &&
-        JSON.stringify(items.slice(items.length - tail.length)) === JSON.stringify(tail)
-      : !items.length;
   /**
-   * Show an Agent's timeline: the cached copy at once, then the newest page from the server.
-   * The page is read only after the server confirmed the focus (focus_state), so every timeline
-   * change after the page's version reaches this client. Detail messages arriving meanwhile wait
-   * in `queue`; then those after the page's version apply, in arrival order.
+   * Show an Agent: its cached timeline at once, then the snapshot the server answers `focus` with.
+   * Until that arrives, detail messages are older than it and are ignored.
    */
-  async function loadTimeline(agent) {
+  function loadTimeline(agent) {
     const timeline = {
       agentId: agent.agentId,
       backendId: agent.backendId,
       sessionId: null,
-      version: 0,
       cards: new Map(),
+      toolCards: new Map(),
+      lastCallEntry: null,
       items: [],
       start: 0,
-      ready: false,
-      queue: [],
-      focused: null
+      ready: false
     };
     state.timeline = timeline;
     discardStreams();
@@ -1900,52 +1957,41 @@
       timeline.sessionId = cached.sessionId;
       renderTimelinePage(cached, false);
       box.scrollTop = box.scrollHeight;
-    }
-    const focused = new Promise(resolve => (timeline.focused = resolve));
-    // Without a socket there is nothing to wait for; reconnecting loads the timeline again.
-    if (sendFocus(true)) await Promise.race([focused, new Promise(resolve => setTimeout(resolve, 5000))]);
-    if (state.timeline !== timeline) return;
-    let page;
-    try {
-      page = await requestAgent(agent.agentId, `/timeline?limit=${TIMELINE_PAGE}`);
-    } catch (error) {
-      // Nothing more to wait for: let queued events (dialogs, shell output) show.
-      if (state.timeline === timeline) flushTimelineQueue(timeline);
-      throw error;
-    }
-    if (state.timeline !== timeline) return;
-    if (!cached || cached.sessionId !== page.sessionId || !sameTail(cached.items, page.items)) {
-      timeline.cards.clear();
-      timeline.sessionId = page.sessionId;
-      renderTimelinePage(page, false);
-    }
-    timeline.version = page.version;
-    flushTimelineQueue(timeline);
+    } else box.innerHTML = '<div class="empty">正在加载…</div>';
+    if (!sendFocus(true) && !cached) box.innerHTML = '<div class="empty">等待连接 backend…</div>';
+  }
+  /** Ask for a new snapshot, e.g. when the branch changed. */
+  function refocus() {
+    if (!state.timeline) return;
+    state.timeline.ready = false;
+    sendFocus(true);
+  }
+  function showSnapshot(message) {
+    const timeline = state.timeline,
+      box = $('messages');
+    timeline.sessionId = message.sessionId;
+    timeline.snapshots = (timeline.snapshots || 0) + 1;
+    renderTimelinePage(message.page, false);
+    timeline.ready = true;
+    applyLive(message.live);
+    restoreExtensionRequests(message.agentId, {dialogRequests: message.dialogRequests || []});
     saveTimelineCache();
     box.scrollTop = box.scrollHeight;
-  }
-  /** Apply what waited for the page; handleDetail skips the timeline changes it already includes. */
-  function flushTimelineQueue(timeline) {
-    timeline.ready = true;
-    for (const message of timeline.queue.splice(0)) handleDetail(message);
-  }
-  function reloadTimeline() {
-    if (state.selectedKind !== 'agent' || !state.agent) return;
-    state.timelineCache.delete(state.agent.agentId);
-    return loadTimeline(state.agent).catch(error => toast(`加载消息失败：${error.message}`));
   }
   async function loadOlderItems(limit = TIMELINE_PAGE) {
     const timeline = state.timeline;
     if (!timeline?.ready || !timeline.items.length) return;
     const box = $('messages'),
-      oldHeight = box.scrollHeight,
-      oldTop = box.scrollTop;
+      snapshot = timeline.snapshots;
     const page = await requestAgent(
       timeline.agentId,
       `/timeline?limit=${limit}&before=${encodeURIComponent(timeline.items[0].id)}`
     );
-    if (state.timeline !== timeline) return;
-    if (page.sessionId !== timeline.sessionId) return reloadTimeline();
+    // An older page belongs to the snapshot it was asked for.
+    if (state.timeline !== timeline || timeline.snapshots !== snapshot) return;
+    const oldHeight = box.scrollHeight,
+      oldTop = box.scrollTop;
+    if (page.sessionId !== timeline.sessionId) return refocus();
     renderTimelinePage(page, true);
     box.scrollTop = oldTop + (box.scrollHeight - oldHeight);
     saveTimelineCache();
@@ -1981,83 +2027,36 @@
     controls.append(older, all);
     $('messages').prepend(controls);
   }
-  function replaceItemCard(existing, item) {
-    const timeline = state.timeline,
-      card = itemCard(item);
-    timeline.cards.set(item.id, card);
-    card.group = existing.group;
-    existing.details.replaceWith(card.details);
-    if (card.group) refreshActivityGroup(card.group);
-    // Re-opening fires `toggle`, which loads the final body of a tool that was being watched.
-    card.details.open = existing.details.open;
-  }
-  /**
-   * Appended items go to the end (or replace a card the loaded page already had). Updated items
-   * (a tool that finished) are replaced where they are, or skipped when that history is not loaded.
-   */
   function applyItems(message) {
     const timeline = state.timeline,
       box = $('messages');
-    if (message.sessionId !== timeline.sessionId) return reloadTimeline();
     if (message.clearLive) clearLiveCards();
-    for (const item of message.updated || []) {
-      const index = timeline.items.findIndex(x => x.id === item.id);
-      if (index < 0) continue;
-      timeline.items[index] = item;
-      const existing = timeline.cards.get(item.id);
-      if (existing) replaceItemCard(existing, item);
-    }
-    let added = false;
-    for (const item of message.items) {
-      const existing = timeline.cards.get(item.id);
-      if (existing) {
-        replaceItemCard(existing, item);
-        const index = timeline.items.findIndex(x => x.id === item.id);
-        if (index >= 0) timeline.items[index] = item;
-        continue;
-      }
-      const card = itemCard(item);
-      timeline.cards.set(item.id, card);
-      box.querySelector('.empty')?.remove();
-      placeCard(card, box, item.timestamp);
-      timeline.items.push(item);
-      added = true;
-    }
-    if (added) {
-      for (const card of state.optimistic.splice(0)) removeCard(card);
-      box.scrollTop = box.scrollHeight;
-    }
+    if (!message.items.length) return;
+    box.querySelector('.empty')?.remove();
+    for (const card of state.optimistic.splice(0)) removeCard(card);
+    const calls = message.items.filter(item => item.kind === 'tool_call');
+    if (calls.length) timeline.lastCallEntry = entryOf(calls[calls.length - 1].id);
+    placeItems(message.items, box);
+    timeline.items.push(...message.items);
+    // Older calls without a result are no longer the newest: they did not finish.
+    if (calls.length) refreshToolCards(timeline.agentId);
     saveTimelineCache();
+    box.scrollTop = box.scrollHeight;
   }
-  /**
-   * Messages of the focused Agent's detail stream, and its events that add to the transcript.
-   * Until the page is shown they wait, in arrival order: showing it replaces the transcript.
-   */
+  /** Messages of the focused Agent's detail stream, and its events that add to the transcript. */
   function handleDetail(message) {
     const timeline = state.timeline;
     if (!timeline || timeline.agentId !== message.agentId || state.selectedKind !== 'agent') return;
-    if (message.type === 'focus_state') timeline.focused?.();
-    if (!timeline.ready) {
-      timeline.queue.push(message);
+    if (message.type === 'focus_state') return showSnapshot(message);
+    if (message.type === 'focus_error') {
+      addCard('加载消息失败', message.error?.message || '', 'error', true);
       return;
     }
-    if (message.type === 'items' || message.type === 'timeline_reset') {
-      // Already in the page (it can arrive after the page's response): only its streamed text must go.
-      if (message.version <= timeline.version) {
-        if (message.clearLive) clearLiveCards();
-        return;
-      }
-      // Timeline changes are consecutive; a gap means one was missed, so start over from a fresh page.
-      if (message.version !== timeline.version + 1) return void reloadTimeline();
-      timeline.version = message.version;
-    }
-    if (message.type === 'focus_state') {
-      applyLive(message.live);
-      restoreExtensionRequests(message.agentId, {dialogRequests: message.dialogRequests || []});
-    } else if (message.type === 'agent_event') renderTranscriptEvent(message);
+    if (!timeline.ready) return; // Older than the snapshot on its way, which includes it.
+    if (message.type === 'agent_event') renderTranscriptEvent(message);
     else if (message.type === 'delta') appendDelta(message.kind, message.delta);
     else if (message.type === 'items') applyItems(message);
-    else if (message.type === 'timeline_reset') void reloadTimeline();
+    else if (message.type === 'timeline_reset') refocus();
     else if (message.type === 'tool_output') applyToolOutput(message);
   }
 
@@ -2456,7 +2455,9 @@
       return;
     }
     // The focused Agent's detail stream; see handleDetail.
-    if (['focus_state', 'delta', 'items', 'timeline_reset', 'tool_output'].includes(message.type)) {
+    if (
+      ['focus_state', 'focus_error', 'delta', 'items', 'timeline_reset', 'tool_output'].includes(message.type)
+    ) {
       handleDetail(message);
       return;
     }
@@ -2625,8 +2626,7 @@
       ws.send(JSON.stringify({type: 'subscribe_drafts'}));
       // Nothing is replayed: refocus and reload what may have changed while disconnected.
       backend.focused = undefined;
-      if (state.selectedKind === 'agent' && state.agent?.backendId === backend.id)
-        loadTimeline(state.agent).catch(error => toast(`加载消息失败：${error.message}`));
+      if (state.selectedKind === 'agent' && state.agent?.backendId === backend.id) loadTimeline(state.agent);
       else sendFocus();
     };
     ws.onmessage = event => {

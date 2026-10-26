@@ -51,19 +51,20 @@ const BATCH_WINDOW_MS = 100;
 /**
  * Serves `/api/v1/ws`.
  * - `subscribe_all`: the state of every Agent, then their overview events.
- * - `focus {agentId}`: streamed text, timeline changes and user shell output of the Agent being viewed.
- * - `watch`/`unwatch {toolCallId}`: live output of a running tool the client has expanded.
- * Nothing is replayed: on (re)connect a client gets current state here and the timeline over HTTP.
+ * - `focus {agentId, limit}`: a snapshot of the Agent being viewed (newest timeline page, streamed
+ *   text, dialogs), then in order on this socket: streamed text, appended items, user shell output.
+ * - `watch`/`unwatch {toolCallId}`: output of a running tool the client has expanded.
+ * Nothing is replayed: on (re)connect a client gets current state again. HTTP serves only what
+ * never changes: older timeline pages and item bodies.
  */
 export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
   ctx.clients.add(ws);
   const subscriptions = new Map<string, () => void>();
   let focused: string | undefined;
-  /** Running tools this client has expanded, with the output last sent for each. */
-  const watched = new Map<string, string | undefined>();
+  /** Running tools whose card this client has expanded. */
+  const watched = new Set<string>();
   // Providers emit one delta per token, and tools report their whole output so far on every update.
-  // Both are held for a short window: adjacent deltas merge, and only a tool's latest output is sent,
-  // as the part appended since the last frame when it extends what the client has.
+  // Both wait for a short window: adjacent deltas merge, and only a tool's latest output is sent.
   let pendingDelta: {type: 'delta'; agentId: string; kind: string; delta: string} | undefined,
     batchTimer: ReturnType<typeof setTimeout> | undefined;
   const pendingOutputs = new Map<string, {agentId: string; output: string}>();
@@ -75,14 +76,6 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
     }
     ws.send(JSON.stringify(message));
   };
-  const sendOutput = (agentId: string, toolCallId: string, output: string) => {
-    const last = watched.get(toolCallId);
-    watched.set(toolCallId, output);
-    if (last !== undefined && output.startsWith(last)) {
-      if (output.length > last.length)
-        sendNow({type: 'tool_output', agentId, toolCallId, append: output.slice(last.length)});
-    } else sendNow({type: 'tool_output', agentId, toolCallId, output});
-  };
   const flushBatch = () => {
     if (batchTimer) clearTimeout(batchTimer);
     batchTimer = undefined;
@@ -92,7 +85,7 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
       sendNow(message);
     }
     for (const [toolCallId, {agentId, output}] of pendingOutputs)
-      if (watched.has(toolCallId)) sendOutput(agentId, toolCallId, output);
+      if (watched.has(toolCallId)) sendNow({type: 'tool_output', agentId, toolCallId, output});
     pendingOutputs.clear();
   };
   const scheduleBatch = () => {
@@ -128,7 +121,9 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
       });
     else send({...message, agentId});
   };
+  let focusRequest = 0;
   const unfocus = () => {
+    focusRequest++;
     subscriptions.get('focus')?.();
     subscriptions.delete('focus');
     focused = undefined;
@@ -206,14 +201,24 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
         if (m.type === 'focus') {
           unfocus();
           if (m.agentId === null || m.agentId === undefined) return;
-          const agentId = String(m.agentId);
-          ctx.agents.get(agentId);
+          const agentId = String(m.agentId),
+            request = focusRequest;
+          // Messages emitted while the snapshot is being sent wait for it; they are all newer.
+          let held: DetailMessage[] | undefined = [];
+          const focus = await ctx.agents
+            .focus(agentId, message => (held ? held.push(message) : forwardDetail(agentId, message)), m.limit)
+            .catch(error => {
+              if (request === focusRequest)
+                send({type: 'focus_error', agentId, error: {code: error.code, message: error.message}});
+            });
+          if (!focus) return;
+          if (request !== focusRequest) return focus.unsubscribe(); // Focus moved on while loading.
           focused = agentId;
-          subscriptions.set(
-            'focus',
-            ctx.agents.subscribeDetail(agentId, message => forwardDetail(agentId, message))
-          );
-          send({type: 'focus_state', agentId, ...ctx.agents.detailState(agentId)});
+          subscriptions.set('focus', focus.unsubscribe);
+          send({type: 'focus_state', agentId, ...focus.snapshot});
+          const pending = held;
+          held = undefined;
+          for (const message of pending) forwardDetail(agentId, message);
           return;
         }
         if (m.type === 'watch' || m.type === 'unwatch') {
@@ -222,13 +227,9 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
             watched.delete(toolCallId);
             pendingOutputs.delete(toolCallId);
           } else if (focused && toolCallId) {
-            // (Re)watching starts from the whole output: the client may have dropped what it had.
-            watched.set(toolCallId, undefined);
+            watched.add(toolCallId);
             const output = ctx.agents.toolOutput(focused, toolCallId);
-            if (output !== undefined) {
-              flushBatch();
-              sendOutput(focused, toolCallId, output);
-            }
+            if (output !== undefined) send({type: 'tool_output', agentId: focused, toolCallId, output});
           }
           return;
         }

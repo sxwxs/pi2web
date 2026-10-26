@@ -6,7 +6,7 @@ import {createSdkBackend, type BackendOptions} from './sdk-backend.js';
 import type {AgentTemplateSnapshot} from './agent-templates.js';
 import {ActivityTracker, type Activity} from './activity.js';
 import {AgentFeed, type DetailMessage, type TimelineSource} from './agent-feed.js';
-import {buildTimeline, itemDetail, pageTimeline, type TimelineEntry} from './timeline.js';
+import {buildTimeline, itemBody, pageTimeline, type TimelineEntry} from './timeline.js';
 export type AgentState = {
   status:
     | 'unloaded'
@@ -402,8 +402,7 @@ export class AgentManager {
         () => backend.timeline(),
         message => {
           for (const listener of this.detailListeners.get(agentId) ?? []) listener(message);
-        },
-        () => entry.activity.runtime()
+        }
       );
     entry.feed = feed;
     backend.subscribe(event => {
@@ -570,23 +569,22 @@ export class AgentManager {
       }
     };
   }
-  /** Streamed text, timeline changes and tool output of one Agent, for clients viewing it. */
-  subscribeDetail(id: string, listener: (message: DetailMessage) => void) {
-    this.get(id);
-    if (!this.detailListeners.has(id)) this.detailListeners.set(id, new Set());
-    this.detailListeners.get(id)!.add(listener);
-    return () => this.detailListeners.get(id)?.delete(listener);
-  }
-  /** What a client starting to view an Agent needs besides its timeline. */
-  detailState(id: string) {
+  /**
+   * Start viewing an Agent in detail: load it, then subscribe and take a snapshot together, with
+   * nothing in between, so every message the listener gets is newer than the snapshot.
+   */
+  async focus(id: string, listener: (message: DetailMessage) => void, limit?: number) {
+    await this.ensureLoaded(id);
     const entry = this.get(id);
-    return {
-      sessionId: entry.feed?.sessionId(),
-      version: entry.feed?.currentVersion() ?? 0,
-      live: entry.feed?.liveState() ?? null,
+    // Snapshot first: it publishes pending changes, which it includes, before this listener exists.
+    const snapshot = {
+      ...entry.feed!.snapshot(limit),
       // Dialog controls live in the transcript, which a viewer replaces when it starts viewing.
       dialogRequests: [...entry.dialogRequests.values()]
     };
+    if (!this.detailListeners.has(id)) this.detailListeners.set(id, new Set());
+    this.detailListeners.get(id)!.add(listener);
+    return {unsubscribe: () => this.detailListeners.get(id)?.delete(listener), snapshot};
   }
   toolOutput(id: string, toolCallId: string) {
     return this.get(id).feed?.output(toolCallId);
@@ -629,29 +627,20 @@ export class AgentManager {
       record = this.get(id).record;
     return {...state, status: record.status, sessionName: state.sessionName?.trim() || record.sessionName};
   }
-  /**
-   * A page of the session's timeline: the newest items, or those before `before`. `version` is the
-   * detail stream's version this page reflects: viewers apply only timeline changes after it.
-   */
+  /** Older history: the page before item `before` (or the newest one). Live viewers get it from focus(). */
   async timeline(id: string, limit?: number, before?: string) {
-    const backend = await this.ensureLoaded(id),
-      entry = this.get(id);
-    // Publish pending changes first, so the page and its version describe the same state.
-    entry.feed?.sync();
-    const source = backend.timeline(),
-      page = pageTimeline(buildTimeline(source.entries(), entry.activity.runtime()), limit, before);
-    if (!page) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
-    return {sessionId: source.sessionId, version: entry.feed?.currentVersion() ?? 0, ...page};
-  }
-  /** The full body of one timeline item of the given session, at revision `rev` (see TimelineItem.rev). */
-  async item(id: string, sessionId: string, itemId: string, rev?: string) {
     const source = (await this.ensureLoaded(id)).timeline(),
-      detail =
-        source.sessionId === sessionId
-          ? itemDetail(buildTimeline(source.entries(), this.get(id).activity.runtime()), itemId, rev)
-          : undefined;
-    if (!detail) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
-    return detail;
+      page = pageTimeline(buildTimeline(source.entries()), limit, before);
+    if (!page) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
+    return {sessionId: source.sessionId, ...page};
+  }
+  /** The full body of one timeline item of the given session. It never changes. */
+  async item(id: string, sessionId: string, itemId: string) {
+    const source = (await this.ensureLoaded(id)).timeline(),
+      body = source.sessionId === sessionId ? itemBody(buildTimeline(source.entries()), itemId) : undefined;
+    if (body === undefined)
+      throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
+    return {id: itemId, body};
   }
   async systemPrompt(id: string) {
     const info = await (await this.ensureLoaded(id)).getSystemPrompt();

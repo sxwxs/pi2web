@@ -118,18 +118,12 @@ export async function handleAgentRoutes(
           u.searchParams.get('before') ?? undefined
         )
       });
-    // /agents/:id/sessions/:sessionId/items/:itemId?rev= — the session and revision are part of the URL,
-    // so a cached body is never served for another session or tool result. Completed bodies at a given
-    // revision never change: cache them for good.
+    // /agents/:id/sessions/:sessionId/items/:itemId — items never change, and the session is part of the
+    // URL so a cached body is never served for another one: let the browser keep it for good.
     if (req.method === 'GET' && parts[4] === 'sessions' && parts[6] === 'items' && parts.length === 8) {
-      const detail = await ctx.agents.item(
-        id,
-        decodeURIComponent(parts[5]),
-        decodeURIComponent(parts[7]),
-        u.searchParams.get('rev') ?? undefined
-      );
-      res.setHeader('cache-control', detail.complete ? 'private, max-age=31536000, immutable' : 'no-store');
-      return send(200, {data: {id: detail.id, body: detail.body}});
+      const detail = await ctx.agents.item(id, decodeURIComponent(parts[5]), decodeURIComponent(parts[7]));
+      res.setHeader('cache-control', 'private, max-age=31536000, immutable');
+      return send(200, {data: detail});
     }
     if (req.method === 'GET' && parts[4] === 'system-prompt')
       return send(200, {data: await ctx.agents.systemPrompt(id)});

@@ -1,9 +1,13 @@
-import {toolSummary, type ToolRuntime} from './activity.js';
+import {toolSummary} from './activity.js';
 
 /**
  * The Web UI's view of a session: the current branch's persisted entries projected into
- * display items. Entries are append-only and never change, so an item's id is derived from
- * its entry and a completed item's body can be cached by clients forever.
+ * display items.
+ *
+ * Invariant: an item is derived from exactly one entry (or one part of an assistant entry), and
+ * entries never change, so neither does an item. A tool call and its result are separate entries
+ * and therefore separate items; the client shows them as one card. Whether a call is executing is
+ * not part of any item: it is the Agent's activity.
  */
 export type TimelineEntry = {
   type: string;
@@ -17,30 +21,27 @@ export type ItemKind =
   | 'assistant'
   | 'thinking'
   | 'error'
-  | 'tool'
+  | 'tool_call'
+  | 'tool_result'
   | 'bash'
   | 'compaction'
   | 'branch_summary'
   | 'custom'
   | 'system';
-export type ItemStatus = 'pending' | 'ok' | 'error' | 'cancelled';
 export type TimelineItem = {
   id: string;
   kind: ItemKind;
   /** Epoch milliseconds. */
   timestamp?: number;
+  /** Tool name, shell command, or what a system item is. */
   title?: string;
-  /** One line describing the item when its body is not inline: a tool's command or path, a preview. */
+  /** One line describing the item: a tool's command or path, an exit code, or a preview of a large body. */
   summary?: string;
-  status?: ItemStatus;
+  /** tool_result and bash: how it ended. */
+  status?: 'ok' | 'error' | 'cancelled';
   durationMs?: number;
+  /** tool_call and tool_result: pairs them, and names a running call to watch. */
   toolCallId?: string;
-  /**
-   * Which recorded result a tool call's body includes (its entry id). The call and its result are
-   * separate entries, so after moving back from the result and running the call again the same item
-   * gets a different body: `rev` is part of the body's identity, and of its URL.
-   */
-  rev?: string;
   /** Length of the full body in characters. */
   size: number;
   /** The full body, present for the kinds people read linearly and for small bodies. */
@@ -50,8 +51,8 @@ type ItemRecord = {item: TimelineItem; body: () => string};
 
 /**
  * Bodies of collapsed kinds (tools, thinking...) up to this many characters travel with the
- * timeline; larger ones load when expanded. Tool calls are 90% of a session's bytes and are
- * rarely opened, so this is kept small.
+ * timeline; larger ones load when expanded. Tool calls and results are 90% of a session's bytes
+ * and rarely opened, so this is kept small.
  */
 export const INLINE_LIMIT = 256;
 const ALWAYS_INLINE = new Set<ItemKind>(['user', 'assistant', 'error']);
@@ -104,12 +105,6 @@ function record(item: Omit<TimelineItem, 'size' | 'body'>, size: number, body: (
   return {item: full, body};
 }
 
-const argsText = (call: any) =>
-  memo(call, () =>
-    call.arguments && typeof call.arguments === 'object' && Object.keys(call.arguments).length
-      ? JSON.stringify(call.arguments, null, 2)
-      : ''
-  );
 const NESTED_MARK: Record<string, string> = {ok: '✓', error: '✗', unfinished: '⊘'};
 /** Calls the tool made to other tools (codemode scripts, MCP batches), one line each. */
 function nestedText(nested: any) {
@@ -122,194 +117,129 @@ function nestedText(nested: any) {
   });
   return `\n\n— 嵌套调用（${calls.length}${nested.complete === false ? '，不完整' : ''}）—\n${lines.join('\n')}`;
 }
-const resultText = (result: any) =>
-  memo(
-    result,
-    () =>
-      (contentText(result.content) || (result.isError ? '执行失败' : '执行完成')) +
-      nestedText(result.nestedCalls)
-  );
-const RESULT_SEPARATOR = '\n\n— 结果 —\n';
 
-type Result = {entryId: string; message: any};
-function toolRecord(
-  id: string,
-  call: any,
-  found: Result | undefined,
-  timestamp: number | undefined,
-  status: ItemStatus
-) {
-  const result = found?.message;
-  const args = call ? argsText(call) : '',
-    output = result ? resultText(result) : '',
-    separator = args && result ? RESULT_SEPARATOR : '',
-    toolName = String(call?.name ?? result?.toolName ?? 'tool');
-  return record(
-    {
-      id,
-      kind: 'tool',
-      timestamp,
-      title: toolName,
-      summary: call ? toolSummary(call.arguments) : undefined,
-      status,
-      durationMs: Number.isFinite(result?.durationMs) ? result.durationMs : undefined,
-      // Only needed to watch a running tool's output; provider ids can be long.
-      toolCallId: status === 'pending' ? String(call?.id ?? '') : undefined,
-      // A result standing alone is its own entry: its id already identifies the body.
-      rev: call && found ? found.entryId : undefined
-    },
-    args.length + separator.length + output.length,
-    () => args + separator + output
-  );
+function text(id: string, kind: ItemKind, value: string, item: Partial<TimelineItem> = {}) {
+  return record({id, kind, ...item}, value.length, () => value);
 }
 
-const IDLE: ToolRuntime = {active: false, running: new Set()};
-
-/**
- * Project a branch (root to leaf) into display items. A tool call without a result is only
- * `pending` if it is executing, or about to as part of the newest message of a run going on;
- * otherwise it never finished (interrupted, or the session moved back to it): `cancelled`.
- */
-export function buildTimeline(entries: TimelineEntry[], runtime: ToolRuntime = IDLE): ItemRecord[] {
-  const results = new Map<string, any>();
-  let lastConversationIndex = -1;
-  entries.forEach((entry, index) => {
-    const message = entry.type === 'message' ? (entry as any).message : undefined;
-    if (message?.role === 'toolResult') results.set(String(message.toolCallId), {entryId: entry.id, message});
-    else if (message?.role === 'user' || message?.role === 'assistant') lastConversationIndex = index;
-  });
-  const consumed = new Set<string>(),
-    records: ItemRecord[] = [];
-  entries.forEach((entry, index) => {
-    const e = entry as any;
-    if (entry.type === 'compaction') {
-      const summary = String(e.summary ?? '');
-      records.push(
-        record(
-          {
-            id: entry.id,
-            kind: 'compaction',
-            timestamp: timeOf(undefined, entry),
-            title: '上下文已压缩',
-            summary: Number.isFinite(e.tokensBefore) ? `压缩前 ${e.tokensBefore} tokens` : undefined
-          },
-          summary.length,
-          () => summary
-        )
-      );
-      return;
-    }
-    if (entry.type === 'branch_summary') {
-      const summary = String(e.summary ?? '');
-      records.push(
-        record(
-          {id: entry.id, kind: 'branch_summary', timestamp: timeOf(undefined, entry), title: '分支摘要'},
-          summary.length,
-          () => summary
-        )
-      );
-      return;
-    }
-    if (entry.type === 'custom_message') {
-      if (!e.display) return;
-      const text = memo(entry, () => contentText(e.content));
-      records.push(
-        record(
-          {
-            id: entry.id,
-            kind: 'custom',
-            timestamp: timeOf(undefined, entry),
-            title: String(e.customType ?? 'custom')
-          },
-          text.length,
-          () => text
-        )
-      );
-      return;
-    }
-    if (entry.type !== 'message') return;
+/** The items of one entry, computed once per entry object. */
+function entryItems(entry: TimelineEntry): ItemRecord[] {
+  return memo(entry, () => {
+    const e = entry as any,
+      at = timeOf(undefined, entry);
+    if (entry.type === 'compaction')
+      return [
+        text(entry.id, 'compaction', String(e.summary ?? ''), {
+          timestamp: at,
+          title: '上下文已压缩',
+          summary: Number.isFinite(e.tokensBefore) ? `压缩前 ${e.tokensBefore} tokens` : undefined
+        })
+      ];
+    if (entry.type === 'branch_summary')
+      return [text(entry.id, 'branch_summary', String(e.summary ?? ''), {timestamp: at, title: '分支摘要'})];
+    if (entry.type === 'custom_message')
+      return e.display
+        ? [
+            text(entry.id, 'custom', contentText(e.content), {
+              timestamp: at,
+              title: String(e.customType ?? 'custom')
+            })
+          ]
+        : [];
+    if (entry.type !== 'message') return [];
     const message = e.message,
       role = message?.role,
       timestamp = timeOf(message, entry);
     if (role === 'user' || role === 'system') {
-      const text = memo(message, () => contentText(message.content));
-      if (text) records.push(record({id: entry.id, kind: role, timestamp}, text.length, () => text));
-      return;
+      const value = contentText(message.content);
+      return value ? [text(entry.id, role, value, {timestamp})] : [];
     }
-    if (role === 'bashExecution') {
-      const output = String(message.output ?? ''),
-        failed = Number(message.exitCode) > 0;
-      records.push(
-        record(
+    if (role === 'bashExecution')
+      return [
+        text(entry.id, 'bash', String(message.output ?? ''), {
+          timestamp,
+          title: String(message.command ?? ''),
+          summary: message.cancelled
+            ? '已取消'
+            : message.exitCode === undefined
+              ? undefined
+              : `exit ${message.exitCode}${message.truncated ? ' · 输出已截断' : ''}`,
+          status: message.cancelled ? 'cancelled' : Number(message.exitCode) > 0 ? 'error' : 'ok'
+        })
+      ];
+    if (role === 'toolResult')
+      return [
+        text(
+          entry.id,
+          'tool_result',
+          (contentText(message.content) || (message.isError ? '执行失败' : '执行完成')) +
+            nestedText(message.nestedCalls),
           {
-            id: entry.id,
-            kind: 'bash',
             timestamp,
-            title: String(message.command ?? ''),
-            summary: message.cancelled
-              ? '已取消'
-              : message.exitCode === undefined
-                ? undefined
-                : `exit ${message.exitCode}${message.truncated ? ' · 输出已截断' : ''}`,
-            status: message.cancelled ? 'cancelled' : failed ? 'error' : 'ok'
-          },
-          output.length,
-          () => output
+            title: String(message.toolName ?? 'tool'),
+            status: message.isError ? 'error' : 'ok',
+            durationMs: Number.isFinite(message.durationMs) ? message.durationMs : undefined,
+            toolCallId: String(message.toolCallId ?? '')
+          }
         )
-      );
-      return;
-    }
-    if (role === 'toolResult') {
-      // Normally shown with its call; a result whose call is not on this branch stands alone.
-      if (!consumed.has(String(message.toolCallId)))
-        records.push(
-          toolRecord(
-            entry.id,
-            undefined,
-            {entryId: entry.id, message},
-            timestamp,
-            message.isError ? 'error' : 'ok'
+      ];
+    if (role !== 'assistant') return [];
+    const items: ItemRecord[] = [];
+    (Array.isArray(message.content) ? message.content : []).forEach((part: any, index: number) => {
+      const id = `${entry.id}.${index}`;
+      if (part?.type === 'text' && part.text)
+        items.push(text(id, 'assistant', String(part.text), {timestamp}));
+      else if (part?.type === 'thinking' && (part.thinking || part.text))
+        items.push(text(id, 'thinking', String(part.thinking || part.text), {timestamp}));
+      else if (part?.type === 'toolCall') {
+        const args = part.arguments;
+        items.push(
+          text(
+            id,
+            'tool_call',
+            args && typeof args === 'object' && Object.keys(args).length ? JSON.stringify(args, null, 2) : '',
+            {
+              timestamp,
+              title: String(part.name ?? 'tool'),
+              summary: toolSummary(args),
+              toolCallId: String(part.id ?? '')
+            }
           )
         );
-      return;
-    }
-    if (role !== 'assistant') return;
-    (Array.isArray(message.content) ? message.content : []).forEach((part: any, partIndex: number) => {
-      const id = `${entry.id}.${partIndex}`;
-      if (part?.type === 'text' && part.text) {
-        const text = String(part.text);
-        records.push(record({id, kind: 'assistant', timestamp}, text.length, () => text));
-      } else if (part?.type === 'thinking' && (part.thinking || part.text)) {
-        const text = String(part.thinking || part.text);
-        records.push(record({id, kind: 'thinking', timestamp}, text.length, () => text));
-      } else if (part?.type === 'toolCall') {
-        const result = results.get(String(part.id));
-        if (result) consumed.add(String(part.id));
-        const status: ItemStatus = result
-          ? result.message.isError
-            ? 'error'
-            : 'ok'
-          : runtime.running.has(String(part.id)) || (runtime.active && index >= lastConversationIndex)
-            ? 'pending'
-            : 'cancelled';
-        records.push(toolRecord(id, part, result, timestamp, status));
       }
     });
     const error = assistantError(message);
-    if (error)
-      records.push(record({id: `${entry.id}.error`, kind: 'error', timestamp}, error.length, () => error));
+    if (error) items.push(text(`${entry.id}.error`, 'error', error, {timestamp}));
+    return items;
   });
-  return records;
+}
+
+/** Project a branch (root to leaf) into display items. */
+export function buildTimeline(entries: TimelineEntry[]): ItemRecord[] {
+  return entries.flatMap(entryItems);
 }
 
 export type TimelinePage = {items: TimelineItem[]; total: number; start: number; hasMore: boolean};
 
-/** The `limit` items before `before` (or the newest ones). Undefined when `before` is not on the timeline. */
+/**
+ * About `limit` items before `before` (or the newest ones). A page never splits a tool call from its
+ * result: it starts early enough to include the calls of the results it holds. Undefined when
+ * `before` is not on the timeline.
+ */
 export function pageTimeline(records: ItemRecord[], limit = 50, before?: string): TimelinePage | undefined {
   const size = Math.min(500, Math.max(1, Math.trunc(Number(limit)) || 50)),
     end = before === undefined ? records.length : records.findIndex(r => r.item.id === before);
   if (end < 0) return undefined;
-  const start = Math.max(0, end - size);
+  let start = Math.max(0, end - size);
+  const callIndex = new Map<string, number>();
+  records.slice(0, end).forEach((r, index) => {
+    if (r.item.kind === 'tool_call') callIndex.set(r.item.toolCallId!, index);
+  });
+  for (let i = end - 1; i >= start; i--) {
+    const call =
+      records[i].item.kind === 'tool_result' ? callIndex.get(records[i].item.toolCallId!) : undefined;
+    if (call !== undefined && call < start) start = call; // The loop then also checks what this brought in.
+  }
   return {
     items: records.slice(start, end).map(r => r.item),
     total: records.length,
@@ -318,8 +248,7 @@ export function pageTimeline(records: ItemRecord[], limit = 50, before?: string)
   };
 }
 
-/** The full body of one item at revision `rev`, and whether it can still change. */
-export function itemDetail(records: ItemRecord[], id: string, rev?: string) {
-  const found = records.find(r => r.item.id === id && (r.item.rev ?? '') === (rev ?? ''));
-  return found && {id, body: found.body(), complete: found.item.status !== 'pending'};
+/** The full body of one item. */
+export function itemBody(records: ItemRecord[], id: string) {
+  return records.find(r => r.item.id === id)?.body();
 }
