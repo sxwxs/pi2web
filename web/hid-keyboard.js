@@ -233,7 +233,7 @@
           resetTurn(activity, 'llm');
           break;
         case 'message_start':
-          if ((event.message?.role || event.role) !== 'assistant') return;
+          if (event.role !== 'assistant') return;
           activity.turn = 'llm';
           break;
         case 'message_update':

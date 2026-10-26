@@ -19,9 +19,9 @@ export type AgentSocketContext = {
 export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
   ctx.clients.add(ws);
   const subscriptions = new Map<string, () => void>();
-  // Pi providers may emit one delta per character. Sending every delta as its own
-  // WebSocket frame is especially expensive over a high-latency/low-bandwidth
-  // link: agent_end gets stuck behind thousands of tiny frames. Coalesce adjacent
+  // Pi providers may emit one delta per token. Events are already slimmed to bare
+  // deltas (see slimEvent), but one frame per token still floods high-latency links:
+  // agent_end gets stuck behind thousands of tiny frames. Coalesce adjacent
   // text/thinking deltas while preserving their sequence cursor and event order.
   let pendingDelta: any, deltaTimer: ReturnType<typeof setTimeout> | undefined;
   const sendNow = (message: unknown) => {

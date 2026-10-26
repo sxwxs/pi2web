@@ -259,10 +259,10 @@ describe('session keyboard activity', () => {
 
   it('ignores non-assistant message starts', () => {
     const keyboard = boundKeyboard();
-    event(keyboard, 'message_start', {message: {role: 'user'}});
-    event(keyboard, 'message_start', {message: {role: 'toolResult'}});
+    event(keyboard, 'message_start', {role: 'user'});
+    event(keyboard, 'message_start', {role: 'toolResult'});
     expect(light(keyboard).effect).toBe(1);
-    event(keyboard, 'message_start', {message: {role: 'assistant'}});
+    event(keyboard, 'message_start', {role: 'assistant'});
     expect(light(keyboard).speed).toBe(0.12);
   });
 });

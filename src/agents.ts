@@ -21,6 +21,64 @@ export type AgentState = {
   cwd: string;
 };
 export type AgentEvent = {type: string; [key: string]: unknown};
+
+/**
+ * Reduce a Pi SDK event to the fields clients and server-side consumers use, or drop it.
+ * Pi attaches the whole partial assistant message (twice) to every streaming delta, which
+ * makes traffic grow quadratically with response length. Heavy SDK events are whitelisted
+ * field by field so new SDK fields never leak onto the wire; pi2web's own events pass through.
+ */
+export function slimEvent(event: AgentEvent): AgentEvent | undefined {
+  const e = event as any;
+  switch (event.type) {
+    case 'message_update': {
+      const update = e.assistantMessageEvent;
+      if (
+        (update?.type !== 'text_delta' && update?.type !== 'thinking_delta') ||
+        typeof update.delta !== 'string'
+      )
+        return undefined;
+      return {type: 'message_update', assistantMessageEvent: {type: update.type, delta: update.delta}};
+    }
+    case 'message_start':
+      return {type: 'message_start', role: e.message?.role ?? e.role};
+    case 'turn_start':
+    case 'turn_end':
+      return {type: event.type};
+    case 'message_end':
+      return {type: 'message_end', message: e.message};
+    case 'agent_end':
+      return {type: 'agent_end', willRetry: e.willRetry, aborted: e.aborted};
+    case 'tool_execution_start':
+      return {
+        type: event.type,
+        toolCallId: e.toolCallId,
+        toolName: e.toolName,
+        args: e.args,
+        parentToolCallId: e.parentToolCallId
+      };
+    case 'tool_execution_update':
+      return {
+        type: event.type,
+        toolCallId: e.toolCallId,
+        toolName: e.toolName,
+        parentToolCallId: e.parentToolCallId,
+        partialResult: e.partialResult
+      };
+    case 'tool_execution_end':
+      return {
+        type: event.type,
+        toolCallId: e.toolCallId,
+        toolName: e.toolName,
+        parentToolCallId: e.parentToolCallId,
+        result: e.result,
+        isError: e.isError,
+        durationMs: e.durationMs
+      };
+    default:
+      return event;
+  }
+}
 /** Whether a steered or follow-up message reached the running turn or is waiting for it. */
 export type QueuedInputDisposition = 'handled' | 'queued';
 export type AgentQueue = {steering: string[]; followUp: string[]};
@@ -350,7 +408,8 @@ export class AgentManager {
       if (type === 'session_info_changed')
         record.sessionName =
           typeof event.name === 'string' && event.name.trim() ? event.name.trim() : undefined;
-      this.publish(entry, event);
+      const slim = slimEvent(event);
+      if (slim) this.publish(entry, slim);
     });
   }
   private publish(entry: AgentEntry, event: AgentEvent) {
