@@ -30,7 +30,7 @@ describe('slash commands and session bash', () => {
     ).data;
     expect(commands).toEqual([{name: 'mock', description: 'Mock prompt template', source: 'prompt'}]);
     const events: AgentEvent[] = [];
-    agents.subscribe(agent.agentId, stored => events.push(stored.event));
+    agents.subscribeAll((agentId, published) => agentId === agent.agentId && events.push(published.event));
     const result = (await (await post(`/api/v1/agents/${agent.agentId}/bash`, {command: 'echo hi'})).json())
       .data;
     expect(result).toMatchObject({output: 'Mock bash: echo hi', exitCode: 0, cancelled: false});
@@ -49,8 +49,11 @@ describe('slash commands and session bash', () => {
     expect(events.some(event => event.type === 'bash_execution_update' && event.id === result.id)).toBe(true);
     expect(events.some(event => event.type === 'bash_execution_end' && event.id === result.id)).toBe(true);
     // Both ! and !! are recorded; !! only excludes the message from model context.
-    let messages = (await (await fetch(base + `/api/v1/agents/${agent.agentId}/messages`, {headers})).json())
-      .data;
+    const recorded = async () =>
+      (
+        await (await fetch(base + `/api/v1/agents/${agent.agentId}/session`, {headers})).json()
+      ).data.entries.map((entry: any) => entry.message);
+    let messages = await recorded();
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       role: 'bashExecution',
@@ -58,9 +61,14 @@ describe('slash commands and session bash', () => {
       output: 'Mock bash: echo hi',
       excludeFromContext: false
     });
+    const timeline = (
+      await (await fetch(base + `/api/v1/agents/${agent.agentId}/timeline`, {headers})).json()
+    ).data;
+    expect(timeline.items).toEqual([
+      expect.objectContaining({kind: 'bash', title: 'echo hi', status: 'ok', body: 'Mock bash: echo hi'})
+    ]);
     await post(`/api/v1/agents/${agent.agentId}/bash`, {command: 'echo hidden', excludeFromContext: true});
-    messages = (await (await fetch(base + `/api/v1/agents/${agent.agentId}/messages`, {headers})).json())
-      .data;
+    messages = await recorded();
     expect(messages).toHaveLength(2);
     expect(messages[1]).toMatchObject({
       role: 'bashExecution',

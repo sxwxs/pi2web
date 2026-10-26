@@ -75,7 +75,7 @@ describe('build, review, and explicit remediation',()=>{
     const developer=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'implementer',displayName:'dev',agentId:agent.agentId})).data;
     const reviewer=(await call('POST',`/api/v1/collab/sessions/${session.sessionId}/participants`,{role:'reviewer',displayName:'reviewer',agentId:await collabAgent()})).data;
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/advance`,{});
-    await waitUntil(async()=>((await agents.messages(agent.agentId)) as any[]).some(entry=>String(entry.content??'').includes('action: implement')));
+    await waitUntil(async()=>(await agents.timeline(agent.agentId)).items.some(item=>item.kind==='user'&&String(item.body??'').includes('action: implement')));
     expect((await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data.phase).toBe('implementing');
     await call('POST',`/api/v1/collab/sessions/${session.sessionId}/ready`,{clientRequestId:rid(),summary:'Implemented the requested change and verified the affected path.',changes:[]},developer.participantToken);
     await waitUntil(async()=>(await call('GET',`/api/v1/collab/sessions/${session.sessionId}`)).data.phase==='collecting');

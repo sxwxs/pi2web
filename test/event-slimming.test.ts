@@ -21,35 +21,16 @@ afterEach(async () => {
 });
 
 const partial = (text: string) => ({role: 'assistant', content: [{type: 'text', text}]});
+const delta = (type: string, text: string, streamed: string) => ({
+  type: 'message_update',
+  message: partial(streamed),
+  assistantMessageEvent: {type, contentIndex: 0, delta: text, partial: partial(streamed)}
+});
 
 describe('slimEvent', () => {
-  it('strips partial messages from streaming deltas', () => {
-    expect(
-      slimEvent({
-        type: 'message_update',
-        message: partial('hello'),
-        assistantMessageEvent: {type: 'text_delta', contentIndex: 0, delta: 'lo', partial: partial('hello')}
-      })
-    ).toEqual({type: 'message_update', assistantMessageEvent: {type: 'text_delta', delta: 'lo'}});
-  });
-
-  it('drops assistant stream sub-events clients do not render', () => {
-    for (const type of [
-      'start',
-      'text_start',
-      'text_end',
-      'toolcall_start',
-      'toolcall_delta',
-      'toolcall_end',
-      'done'
-    ])
-      expect(
-        slimEvent({
-          type: 'message_update',
-          message: partial('x'),
-          assistantMessageEvent: {type, partial: partial('x')}
-        })
-      ).toBeUndefined();
+  it('keeps streamed text and tool output out of events: they reach viewers as details', () => {
+    expect(slimEvent(delta('text_delta', 'lo', 'hello'))).toBeUndefined();
+    expect(slimEvent({type: 'tool_execution_update', toolCallId: 't', partialResult: 'x'})).toBeUndefined();
   });
 
   it('whitelists lifecycle and tool fields', () => {
@@ -67,18 +48,21 @@ describe('slimEvent', () => {
     });
     expect(
       slimEvent({
-        type: 'tool_execution_update',
+        type: 'tool_execution_end',
         toolCallId: 't',
         toolName: 'bash',
-        args: {command: 'ls'},
-        partialResult: 1
+        args: {},
+        result: 1,
+        isError: false
       })
     ).toEqual({
-      type: 'tool_execution_update',
+      type: 'tool_execution_end',
       toolCallId: 't',
       toolName: 'bash',
       parentToolCallId: undefined,
-      partialResult: 1
+      result: 1,
+      isError: false,
+      durationMs: undefined
     });
   });
 
@@ -88,84 +72,92 @@ describe('slimEvent', () => {
   });
 });
 
-describe('agent event wire size', () => {
-  it('grows linearly with the streamed response', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'pi-event-slim-'));
-    const workspaceDir = path.join(dir, 'workspace');
-    await mkdir(workspaceDir);
-    const workspaces = new WorkspaceStore(),
-      workspace = workspaces.add('test', workspaceDir);
-    let backend!: ControlledBackend;
-    const agents = new AgentManager(workspaces, (id, cwd) => (backend = new ControlledBackend(id, cwd)));
-    const server = new RemotePiServer({port: 0, dataDir: path.join(dir, 'data'), workspaces, agents});
-    let socket: WebSocket | undefined;
-    cleanup.push(async () => {
-      socket?.terminate();
-      await server.stop();
-      await rm(dir, {recursive: true, force: true});
+async function focusedClient() {
+  const dir = await mkdtemp(path.join(tmpdir(), 'pi-event-slim-'));
+  const workspaceDir = path.join(dir, 'workspace');
+  await mkdir(workspaceDir);
+  const workspaces = new WorkspaceStore(),
+    workspace = workspaces.add('test', workspaceDir);
+  let backend!: ControlledBackend;
+  const agents = new AgentManager(workspaces, (id, cwd) => (backend = new ControlledBackend(id, cwd)));
+  const server = new RemotePiServer({port: 0, dataDir: path.join(dir, 'data'), workspaces, agents});
+  const {token} = await server.auth.init(),
+    address = await server.start();
+  const agent = await agents.create(workspace.id);
+  const socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws`, [`access-token.${token}`]);
+  cleanup.push(async () => {
+    socket.terminate();
+    await server.stop();
+    await rm(dir, {recursive: true, force: true});
+  });
+  const frames: string[] = [];
+  socket.on('message', raw => frames.push(raw.toString()));
+  await new Promise(resolve => socket.once('open', resolve));
+  socket.send(JSON.stringify({type: 'subscribe_all'}));
+  socket.send(JSON.stringify({type: 'focus', agentId: agent.agentId}));
+  await new Promise<void>(resolve => {
+    const check = () => (frames.some(f => f.includes('"focus_state"')) ? resolve() : setTimeout(check, 5));
+    check();
+  });
+  frames.length = 0;
+  const recorded = () =>
+    new Promise<void>(resolve => {
+      const check = () => (frames.some(f => f.includes('"clearLive"')) ? resolve() : setTimeout(check, 5));
+      check();
     });
-    const {token} = await server.auth.init(),
-      address = await server.start();
-    const agent = await agents.create(workspace.id);
+  return {backend, frames, recorded};
+}
 
-    socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws`, [`access-token.${token}`]);
-    let bytes = 0,
-      activityChanges = 0,
-      text = '';
-    const ended = new Promise<void>(resolve =>
-      socket!.on('message', raw => {
-        bytes += (raw as Buffer).length;
-        const message = JSON.parse(raw.toString());
-        expect(raw.toString()).not.toContain('"partial"');
-        if (message.type === 'agent_event' && message.event.type === 'activity_changed') activityChanges++;
-        if (message.type === 'agent_event' && message.event.type === 'message_update')
-          text += message.event.assistantMessageEvent.delta;
-        if (message.type === 'agent_event' && message.event.type === 'message_end') resolve();
-      })
-    );
-    await new Promise(resolve => socket!.once('open', resolve));
-    const subscribed = new Promise(resolve =>
-      socket!.on('message', raw => JSON.parse(raw.toString()).type === 'agent_state' && resolve(undefined))
-    );
-    socket.send(JSON.stringify({type: 'subscribe', agentId: agent.agentId, fromNow: true}));
-    await subscribed;
-    bytes = 0;
-
-    const token4 = 'abcd',
+describe('agent stream wire size', () => {
+  it('grows linearly with the streamed response', async () => {
+    const {backend, frames, recorded} = await focusedClient();
+    const token = 'abcd',
       count = 5000;
     let streamed = '';
+    backend.publish({type: 'message_start', message: partial('')});
     // Content blocks stream one after another: the text, then a tool call's arguments.
     for (let i = 0; i < count; i++) {
-      streamed += token4;
-      backend.publish({
-        type: 'message_update',
-        message: partial(streamed),
-        assistantMessageEvent: {
-          type: 'text_delta',
-          contentIndex: 0,
-          delta: token4,
-          partial: partial(streamed)
-        }
-      });
+      streamed += token;
+      backend.publish(delta('text_delta', token, streamed));
     }
-    for (let i = 0; i < count; i++)
-      backend.publish({
-        type: 'message_update',
-        message: partial(streamed),
-        assistantMessageEvent: {
-          type: 'toolcall_delta',
-          contentIndex: 1,
-          delta: token4,
-          partial: partial(streamed)
-        }
-      });
+    for (let i = 0; i < count; i++) backend.publish(delta('toolcall_delta', token, streamed));
     backend.publish({type: 'message_end', message: partial(streamed)});
-    await ended;
+    await recorded();
 
-    expect(text).toBe(streamed);
+    const messages = frames.map(frame => JSON.parse(frame));
+    expect(frames.every(frame => !frame.includes('"partial"'))).toBe(true);
+    expect(
+      messages
+        .filter(m => m.type === 'delta')
+        .map(m => m.delta)
+        .join('')
+    ).toBe(streamed);
     // One activity change per content block (generating, preparing_tool), not one per token.
-    expect(activityChanges).toBe(2);
-    // Unslimmed, this stream is ~200 MB. Slimmed: one copy for message_end plus framing overhead.
-    expect(bytes).toBeLessThan(streamed.length * 3 + 10_000);
+    expect(messages.filter(m => m.event?.type === 'activity_changed')).toHaveLength(2);
+    // Unslimmed, this stream used to be ~200 MB. Now the text travels once, plus framing.
+    const bytes = frames.reduce((sum, frame) => sum + Buffer.byteLength(frame), 0);
+    expect(bytes).toBeLessThan(streamed.length + 5_000);
+  });
+
+  it('coalesces a paced stream into few small frames', async () => {
+    const {backend, frames, recorded} = await focusedClient();
+    let streamed = '';
+    backend.publish({type: 'message_start', message: partial('')});
+    // 100 tokens a few milliseconds apart, like a fast provider.
+    const started = Date.now();
+    for (let i = 0; i < 100; i++) {
+      streamed += 'abcd';
+      backend.publish(delta('text_delta', 'abcd', streamed));
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const elapsed = Date.now() - started;
+    backend.publish({type: 'message_end', message: partial(streamed)});
+    await recorded();
+    // At most one frame per 100 ms window, however many tokens arrive.
+    const deltaFrames = frames.filter(frame => frame.includes('"delta"'));
+    expect(deltaFrames.length).toBeLessThanOrEqual(Math.ceil(elapsed / 100) + 2);
+    expect(deltaFrames.length).toBeLessThan(50);
+    const overhead = deltaFrames.reduce((sum, frame) => sum + Buffer.byteLength(frame), 0) - streamed.length;
+    expect(overhead / deltaFrames.length).toBeLessThan(120);
   });
 });

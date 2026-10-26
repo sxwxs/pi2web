@@ -1,4 +1,4 @@
-import {describe, it, expect, afterEach} from 'vitest';
+import {describe, it, expect, afterEach, vi} from 'vitest';
 import WebSocket from 'ws';
 import {mkdtemp} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -145,7 +145,7 @@ describe('HTTP server', () => {
     ).data;
     expect(agent.sessionName).toBe('Auto-named Agent');
     expect((await (await fetch(base + '/api/v1/system/status', {headers})).json()).data.protocolVersion).toBe(
-      1
+      2
     );
     expect(
       (await (await fetch(base + `/api/v1/workspaces/${workspace.id}/stat?path=a.txt`, {headers})).json())
@@ -156,11 +156,31 @@ describe('HTTP server', () => {
         .thinkingLevel
     ).toBe('off');
     for (let i = 0; i < 30; i++) await agents.command(agent.agentId, 'prompt', `message-${i}`);
-    const messagePage = (
-      await (await fetch(base + `/api/v1/agents/${agent.agentId}/messages?limit=25`, {headers})).json()
+    const timeline = (
+      await (await fetch(base + `/api/v1/agents/${agent.agentId}/timeline?limit=25`, {headers})).json()
     ).data;
-    expect(messagePage).toMatchObject({total: 30, start: 5, end: 30, limit: 25, hasMore: true});
-    expect(messagePage.items).toHaveLength(25);
+    expect(timeline).toMatchObject({total: 60, start: 35, hasMore: true});
+    expect(timeline.items).toHaveLength(25);
+    const older = await fetch(
+      base + `/api/v1/agents/${agent.agentId}/timeline?limit=25&before=${timeline.items[0].id}`,
+      {headers}
+    );
+    expect((await older.json()).data).toMatchObject({start: 10});
+    expect(
+      (await fetch(base + `/api/v1/agents/${agent.agentId}/timeline?before=missing`, {headers})).status
+    ).toBe(404);
+    // A completed item's body never changes, so the browser may keep it for good.
+    const last = timeline.items.at(-1);
+    const detail = await fetch(
+      base + `/api/v1/agents/${agent.agentId}/sessions/${timeline.sessionId}/items/${last.id}`,
+      {headers}
+    );
+    expect(detail.headers.get('cache-control')).toBe('private, max-age=31536000, immutable');
+    expect((await detail.json()).data).toEqual({id: last.id, body: last.body});
+    expect(
+      (await fetch(base + `/api/v1/agents/${agent.agentId}/sessions/other/items/${last.id}`, {headers}))
+        .status
+    ).toBe(404);
     expect((await post(`/api/v1/agents/${agent.agentId}/compact`)).status).toBe(200);
     expect((await post(`/api/v1/agents/${agent.agentId}/thinking`, {level: 'off'})).status).toBe(200);
     expect((await post(`/api/v1/agents/${agent.agentId}/session-name`, {name: 'My Session'})).status).toBe(
@@ -200,7 +220,7 @@ describe('HTTP server', () => {
       import('node:fs/promises').then(fs => fs.access(path.join(dir, 'agents_archive.json')))
     ).rejects.toThrow();
   });
-  it('returns a websocket snapshot when replay cache has a gap', async () => {
+  it('sends every agent state on subscribe_all and details only for the focused agent', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'remote-pi-')),
       root = await mkdtemp(path.join(tmpdir(), 'remote-pi-ws-')),
       workspaces = new WorkspaceStore(),
@@ -209,43 +229,48 @@ describe('HTTP server', () => {
     server = new RemotePiServer({port: 0, dataDir: dir, workspaces, agents});
     const first = await server.auth.init(),
       address = await server.start(),
-      agent = await agents.create(workspace.id);
-    for (let i = 0; i < 205; i++) await agents.command(agent.agentId, 'prompt', String(i));
-    const message = await new Promise<any>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`, {
-        headers: {authorization: `Bearer ${first.token}`}
-      });
-      ws.on('open', () =>
-        ws.send(JSON.stringify({type: 'subscribe', agentId: agent.agentId, lastSequence: 1}))
-      );
-      ws.on('message', raw => {
-        const value = JSON.parse(String(raw));
-        if (value.type === 'agent_snapshot') {
-          ws.close();
-          resolve(value);
-        }
-      });
-      ws.on('error', reject);
+      agent = await agents.create(workspace.id),
+      other = await agents.create(workspace.id);
+    const ws = new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`, {
+      headers: {authorization: `Bearer ${first.token}`}
     });
-    expect(message.messages).toHaveLength(205);
-    expect(message.lastSequence).toBeGreaterThan(1000);
-    const live = await new Promise<any>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/ws`, {
-        headers: {authorization: `Bearer ${first.token}`}
-      });
-      ws.on('open', () => ws.send(JSON.stringify({type: 'subscribe_all', fromNow: true})));
-      ws.on('message', async raw => {
-        const value = JSON.parse(String(raw));
-        if (value.type === 'subscribed_all') await agents.command(agent.agentId, 'prompt', 'notification');
-        if (value.type === 'agent_event') {
-          ws.close();
-          resolve(value);
-        }
-      });
-      ws.on('error', reject);
+    const messages: any[] = [];
+    ws.on('message', raw => messages.push(JSON.parse(String(raw))));
+    await new Promise(resolve => ws.on('open', resolve));
+    const waitFor = (predicate: (m: any) => boolean) =>
+      vi
+        .waitFor(() => expect(messages.find(predicate)).toBeDefined(), {timeout: 3000})
+        .then(() => messages.find(predicate));
+    ws.send(JSON.stringify({type: 'subscribe_all'}));
+    const subscribed = await waitFor(m => m.type === 'subscribed_all');
+    expect(subscribed).toMatchObject({protocolVersion: 2, serverTime: expect.any(Number)});
+    expect(
+      messages
+        .filter(m => m.type === 'agent_state')
+        .map(m => m.agentId)
+        .sort()
+    ).toEqual([agent.agentId, other.agentId].sort());
+    ws.send(JSON.stringify({type: 'focus', agentId: agent.agentId}));
+    expect(await waitFor(m => m.type === 'focus_state')).toMatchObject({agentId: agent.agentId, live: null});
+    await agents.command(agent.agentId, 'prompt', 'hello');
+    await agents.command(other.agentId, 'prompt', 'elsewhere');
+    await waitFor(m => m.type === 'items' && m.clearLive);
+    await waitFor(
+      m => m.type === 'agent_event' && m.agentId === other.agentId && m.event.type === 'agent_end'
+    );
+    // Overview events carry no transcript; details arrive only for the focused agent.
+    expect(messages.filter(m => m.type === 'agent_event').map(m => m.event.type)).not.toContain(
+      'message_end'
+    );
+    const details = messages.filter(m => ['delta', 'items'].includes(m.type));
+    expect(details.every(m => m.agentId === agent.agentId)).toBe(true);
+    expect(details.find(m => m.type === 'delta')).toEqual({
+      type: 'delta',
+      agentId: agent.agentId,
+      kind: 'text',
+      delta: 'Mock response: hello'
     });
-    expect(live.timestamp).toEqual(expect.any(Number));
-    expect(live.sequence).toBeGreaterThan(message.lastSequence);
+    ws.close();
   });
 });
 describe('no-auth mode', () => {

@@ -60,7 +60,7 @@ function setup() {
     messages.append(body);
     return {body};
   });
-  const renderMessages = vi.fn(() => messages.append(new Element()));
+  const handleDetail = vi.fn();
   const sessionKeyboard = {updateAgent: vi.fn(), setActivity: vi.fn()};
   const setAgentActivity = vi.fn(),
     setAgentStatus = vi.fn(),
@@ -74,7 +74,7 @@ function setup() {
       localStorage: {},
       postAgent,
       addCard,
-      renderMessages,
+      handleDetail,
       toast: vi.fn(),
       document: {
         createElement: () => new Element(),
@@ -107,7 +107,7 @@ function setup() {
     messages,
     postAgent,
     addCard,
-    renderMessages,
+    handleDetail,
     state,
     onKey,
     setAgentStatus,
@@ -125,13 +125,10 @@ const request = {
   title: 'Choose an action',
   options: ['Keep', 'Replace']
 };
-function baseline(type: string, requests: (typeof request)[] = [request], sequence = 1, agentId = 'agent-a') {
+function baseline(requests: (typeof request)[] = [request], agentId = 'agent-a') {
   return {
-    type,
+    type: 'agent_state',
     agentId,
-    sequence,
-    lastSequence: sequence,
-    messages: [],
     state: {
       agentId,
       status: 'idle',
@@ -147,57 +144,52 @@ function baseline(type: string, requests: (typeof request)[] = [request], sequen
 }
 
 describe('extension dialog recovery', () => {
-  it.each(['agent_state', 'agent_snapshot'])(
-    'rebuilds answerable controls from %s without the original event',
-    async type => {
-      const ui = setup();
-      ui.handleAgentEvent(baseline(type));
-      const controls = ui.$('extension-request-dialog-1');
-      expect(controls).toBeDefined();
-      expect(ui.addCard).toHaveBeenCalledWith(request.title, '', 'dialog', true, undefined);
-      expect(controls!.children.map(button => button.textContent)).toEqual(request.options);
-      await controls!.children[1].onclick!();
-      expect(ui.postAgent).toHaveBeenCalledWith('agent-a', '/extension-response', {
-        requestId: request.requestId,
-        value: 'Replace'
-      });
-      expect(controls!.children[0].textContent).toBe('已响应');
-    }
-  );
+  it('rebuilds answerable controls from agent_state without the original event', async () => {
+    const ui = setup();
+    ui.handleAgentEvent(baseline());
+    const controls = ui.$('extension-request-dialog-1');
+    expect(controls).toBeDefined();
+    expect(ui.addCard).toHaveBeenCalledWith(request.title, '', 'dialog', true, undefined);
+    expect(controls!.children.map(button => button.textContent)).toEqual(request.options);
+    await controls!.children[1].onclick!();
+    expect(ui.postAgent).toHaveBeenCalledWith('agent-a', '/extension-response', {
+      requestId: request.requestId,
+      value: 'Replace'
+    });
+    expect(controls!.children[0].textContent).toBe('已响应');
+  });
 
-  it('deduplicates replay and state recovery without losing a draft, and closes requests absent from the baseline', () => {
+  it('deduplicates live and state recovery without losing a draft, and closes requests absent from the baseline', () => {
     const ui = setup(),
       inputRequest = {...request, kind: 'input', placeholder: 'Your answer'};
-    ui.handleAgentEvent({type: 'agent_event', agentId: 'agent-a', sequence: 1, event: inputRequest});
+    ui.handleAgentEvent({type: 'agent_event', agentId: 'agent-a', status: 'idle', event: inputRequest});
     const controls = ui.$('extension-request-dialog-1')!;
     controls.children[0].value = 'unfinished answer';
-    ui.handleAgentEvent(baseline('agent_state', [inputRequest]));
-    ui.handleAgentEvent(baseline('agent_state', [inputRequest], 2));
+    ui.handleAgentEvent(baseline([inputRequest]));
+    ui.handleAgentEvent(baseline([inputRequest]));
     expect(ui.$('extension-request-dialog-1')).toBe(controls);
     expect(controls.children[0].value).toBe('unfinished answer');
     expect(ui.addCard).toHaveBeenCalledOnce();
-    expect(ui.renderMessages).not.toHaveBeenCalled();
-    ui.handleAgentEvent(baseline('agent_state', [], 3));
+    ui.handleAgentEvent(baseline([]));
     expect(controls.children).toHaveLength(1);
     expect(controls.children[0].textContent).toBe('已结束');
     expect(ui.postAgent).not.toHaveBeenCalled();
   });
 
-  it('replaces obsolete dialogs on a replay gap and handles subsequent completion normally', () => {
+  it('closes dialogs a reconnect baseline no longer has and handles later completion normally', () => {
     const ui = setup();
     ui.handleAgentEvent({
       type: 'agent_event',
       agentId: 'agent-a',
-      sequence: 1,
+      status: 'waiting_for_user',
       event: {...request, requestId: 'old'}
     });
-    ui.handleAgentEvent(baseline('agent_snapshot', [request], 2));
-    expect(ui.$('extension-request-old')).toBeUndefined();
+    ui.handleAgentEvent(baseline([request]));
+    expect(ui.$('extension-request-old')!.children[0].textContent).toBe('已结束');
     expect(ui.$('extension-request-dialog-1')).toBeDefined();
     ui.handleAgentEvent({
       type: 'agent_event',
       agentId: 'agent-a',
-      sequence: 3,
       event: {type: 'extension_ui_response', requestId: 'dialog-1'}
     });
     expect(ui.$('extension-request-dialog-1')!.children[0].textContent).toBe('已结束');
@@ -205,12 +197,11 @@ describe('extension dialog recovery', () => {
 
   it('applies an unload event to status/lights and closes dialogs without replacing the transcript', () => {
     const ui = setup();
-    ui.handleAgentEvent(baseline('agent_state'));
+    ui.handleAgentEvent(baseline());
     const controls = ui.$('extension-request-dialog-1')!;
     ui.handleAgentEvent({
       type: 'agent_event',
       agentId: 'agent-a',
-      sequence: 2,
       event: {type: 'agent_unloaded'}
     });
     expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'unloaded');
@@ -218,12 +209,11 @@ describe('extension dialog recovery', () => {
     expect(ui.$('extension-request-dialog-1')).toBe(controls);
     expect(controls.children[0].textContent).toBe('已结束');
     expect(ui.addCard).toHaveBeenCalledOnce();
-    expect(ui.renderMessages).not.toHaveBeenCalled();
   });
 
   it('applies activity from state baselines and live changes without adding transcript cards', () => {
     const ui = setup();
-    const state = baseline('agent_state');
+    const state = baseline();
     ui.handleAgentEvent(state);
     expect(ui.setAgentActivity).toHaveBeenLastCalledWith('agent-a', state.state.activity);
     const activity = {run: {startedAt: 5}, phase: {kind: 'thinking', since: 6}, bash: [], dialogs: []};
@@ -231,35 +221,41 @@ describe('extension dialog recovery', () => {
     ui.handleAgentEvent({
       type: 'agent_event',
       agentId: 'agent-a',
-      sequence: 2,
       event: {type: 'activity_changed', activity}
     });
     expect(ui.setAgentActivity).toHaveBeenLastCalledWith('agent-a', activity);
     expect(ui.addCard).not.toHaveBeenCalled();
   });
 
-  it('uses the status sent with an event and falls back to lifecycle events for older backends', () => {
+  it('applies the status sent with every event', () => {
     const ui = setup();
-    const event = (sequence: number, event: Record<string, unknown>, status?: string) =>
-      ui.handleAgentEvent({type: 'agent_event', agentId: 'agent-a', sequence, status, event});
-    event(1, {type: 'message_update'}, 'waiting_for_user');
+    const event = (event: Record<string, unknown>, status: string) =>
+      ui.handleAgentEvent({type: 'agent_event', agentId: 'agent-a', timestamp: Date.now(), status, event});
+    event({type: 'extension_ui_request', ...request}, 'waiting_for_user');
     expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'waiting_for_user');
-    // Backends that do not send a status still report what they are doing.
-    event(2, {type: 'agent_start'});
+    event({type: 'agent_end', willRetry: true}, 'streaming');
     expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'streaming');
-    event(3, {type: 'agent_end', willRetry: true});
-    expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'streaming');
-    event(4, {type: 'agent_settled'});
+    event({type: 'agent_settled'}, 'idle');
     expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'idle');
-    // Events of neither kind leave the status alone.
-    ui.setAgentStatus.mockClear();
-    event(5, {type: 'message_update'});
-    expect(ui.setAgentStatus).not.toHaveBeenCalled();
+  });
+
+  it('routes detail messages of the focused Agent to the timeline', () => {
+    const ui = setup();
+    for (const type of ['focus_state', 'delta', 'items', 'timeline_reset', 'tool_output'])
+      ui.handleAgentEvent({type, agentId: 'agent-a'});
+    expect(ui.handleDetail.mock.calls.map(([message]: any[]) => message.type)).toEqual([
+      'focus_state',
+      'delta',
+      'items',
+      'timeline_reset',
+      'tool_output'
+    ]);
+    expect(ui.addCard).not.toHaveBeenCalled();
   });
 
   it('pressing the already selected Session key preserves a dialog draft without reloading', () => {
     const ui = setup();
-    ui.handleAgentEvent(baseline('agent_state', [{...request, kind: 'input'}]));
+    ui.handleAgentEvent(baseline([{...request, kind: 'input'}]));
     const controls = ui.$('extension-request-dialog-1')!;
     controls.children[0].value = 'unfinished answer';
     ui.onKey({agentId: 'agent-a', slot: 0});
@@ -285,14 +281,13 @@ describe('extension dialog recovery', () => {
 
   it('does not render another agent’s dialogs or change existing controls for older servers', () => {
     const ui = setup();
-    ui.handleAgentEvent(baseline('agent_state', [request], 1, 'agent-b'));
+    ui.handleAgentEvent(baseline([request], 'agent-b'));
     expect(ui.addCard).not.toHaveBeenCalled();
-    ui.handleAgentEvent({type: 'agent_event', agentId: 'agent-a', sequence: 1, event: request});
+    ui.handleAgentEvent({type: 'agent_event', agentId: 'agent-a', status: 'idle', event: request});
     const controls = ui.$('extension-request-dialog-1')!;
     ui.handleAgentEvent({
       type: 'agent_state',
       agentId: 'agent-a',
-      sequence: 2,
       state: {agentId: 'agent-a', status: 'idle'}
     });
     expect(controls.children.map(button => button.textContent)).toEqual(request.options);

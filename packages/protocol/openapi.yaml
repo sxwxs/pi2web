@@ -1,5 +1,5 @@
 openapi: 3.1.0
-info: {title: Remote Pi API, version: 1.0.0}
+info: {title: Remote Pi API, version: 2.0.0}
 servers: [{url: /api/v1}]
 security: [{bearerAuth: []}]
 paths:
@@ -19,8 +19,12 @@ paths:
   /agents:
     get: {operationId: listAgents, responses: {'200': {$ref: '#/components/responses/Success'}}}
     post: {operationId: createAgent, requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'201': {$ref: '#/components/responses/Success'}}}
+  /agents/{id}/timeline:
+    get: {operationId: agentTimeline, description: 'The session as display items (see timelineItem in websocket.schema.json): the newest `limit` items, or those before item `before`. Data {sessionId, items, total, start, hasMore}. 404 when `before` is not on the current branch.', parameters: [{$ref: '#/components/parameters/Id'}, {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 50}}, {name: before, in: query, schema: {type: string}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /agents/{id}/sessions/{sessionId}/items/{itemId}:
+    get: {operationId: agentTimelineItem, description: 'Full body of one timeline item, data {id, body}. Completed items never change and are served with Cache-Control private, max-age=31536000, immutable; running tools with no-store. 404 when the Agent is no longer on that session.', parameters: [{$ref: '#/components/parameters/Id'}, {name: sessionId, in: path, required: true, schema: {type: string}}, {name: itemId, in: path, required: true, schema: {type: string}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
   /agents/{id}/{action}:
-    get: {operationId: getAgentResource, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [state,messages,capabilities,session]}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+    get: {operationId: getAgentResource, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [state,capabilities,session]}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
     post: {operationId: agentCommand, parameters: [{$ref: '#/components/parameters/Id'}, {name: action, in: path, required: true, schema: {enum: [prompt,steer,follow-up,abort,compact,model,thinking,session-name,navigate,fork,extension-response]}}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
   /draft:
     post: {operationId: draftText, description: 'Insert text into the currently displayed Web UI input box on this backend, without sending it to an Agent. Body {text, mode?: append|replace, source?}; explicit agent/slot targets are rejected. Pending text is kept in memory until a page acknowledges it.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}

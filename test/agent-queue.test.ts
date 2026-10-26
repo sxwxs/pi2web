@@ -51,7 +51,7 @@ describe('queued steering and follow-up messages', () => {
   it('reports whether a message reached the turn and exposes the queue', async () => {
     const {agents, agent, backends, base, headers, post} = await setup();
     const events: AgentEvent[] = [];
-    agents.subscribe(agent.agentId, stored => events.push(stored.event));
+    agents.subscribeAll((agentId, published) => agentId === agent.agentId && events.push(published.event));
     // Nothing is running, so the message is handled immediately and the queue stays empty.
     expect(
       (await (await post(`/api/v1/agents/${agent.agentId}/steer`, {message: 'now'})).json()).data

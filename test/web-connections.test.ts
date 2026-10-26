@@ -32,7 +32,6 @@ describe('backend state', () => {
       rpAgentId: 'agent-a',
       rpTerminalId: 'terminal-a',
       rpWorkspaceId: 'workspace-a',
-      'rpSeq:agent-a': '42',
       rpSessionKeyboardBindings: JSON.stringify([{agentId: 'agent-a', slot: 0}])
     });
     const [backend] = api.loadStoredBackends(localStorage, 'http://localhost');
@@ -50,8 +49,6 @@ describe('backend state', () => {
     expect(localStorage.rpAgentId).toBe('bk-main:agent-a');
     expect(localStorage.rpTerminalId).toBe('bk-main:terminal-a');
     expect(localStorage.rpWorkspaceId).toBe('bk-main:workspace-a');
-    expect(localStorage['rpSeq:bk-main:agent-a']).toBe('42');
-    expect(localStorage['rpSeq:agent-a']).toBeUndefined();
   });
 
   it('migrates a connection whose pairing code was never saved', () => {

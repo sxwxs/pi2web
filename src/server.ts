@@ -31,7 +31,7 @@ import {
 } from './http/utils.js';
 import {serveWebAsset} from './http/web-assets.js';
 import {LoginLimiter} from './http/login-limiter.js';
-import {handleAgentSocket} from './ws/agent-socket.js';
+import {handleAgentSocket, PROTOCOL_VERSION} from './ws/agent-socket.js';
 import {handleTerminalSocket} from './ws/terminal-socket.js';
 import {handleAgentRoutes} from './http/agent-routes.js';
 import {handleMailSettingsRoutes} from './http/mail-settings-routes.js';
@@ -617,7 +617,7 @@ export class RemotePiServer {
         return json(res, 200, {
           data: {
             version: pkg.version,
-            protocolVersion: 1,
+            protocolVersion: PROTOCOL_VERSION,
             authRequired: !this.noAuth,
             piVersion: PI_VERSION,
             nodeVersion: process.version,

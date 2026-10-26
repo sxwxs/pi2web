@@ -390,8 +390,8 @@ describe('collaboration wiring over HTTP',()=>{
 
     // The managed reviewer must have been prompted by the hub, with a usable participant token.
     const prompt=await waitFor(async()=>{
-      const messages=await agents.messages(agentId) as any[];
-      return messages.map(entry=>String(entry.content??'')).find(text=>text.includes('[pi2web collaboration]'));
+      const {items}=await agents.timeline(agentId);
+      return items.filter(item=>item.kind==='user').map(item=>String(item.body??'')).find(text=>text.includes('[pi2web collaboration]'));
     });
     expect(prompt).toContain('action: file_findings');
     expect(prompt).toContain('collab_get_task');

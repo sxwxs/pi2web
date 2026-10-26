@@ -5,6 +5,8 @@ import type {WorkspaceStore} from './workspaces.js';
 import {createSdkBackend, type BackendOptions} from './sdk-backend.js';
 import type {AgentTemplateSnapshot} from './agent-templates.js';
 import {ActivityTracker, type Activity} from './activity.js';
+import {AgentFeed, type DetailMessage, type TimelineSource} from './agent-feed.js';
+import {buildTimeline, itemDetail, pageTimeline, type TimelineEntry} from './timeline.js';
 export type AgentState = {
   status:
     | 'unloaded'
@@ -24,23 +26,17 @@ export type AgentState = {
 export type AgentEvent = {type: string; [key: string]: unknown};
 
 /**
- * Reduce a Pi SDK event to the fields clients and server-side consumers use, or drop it.
- * Pi attaches the whole partial assistant message (twice) to every streaming delta, which
- * makes traffic grow quadratically with response length. Heavy SDK events are whitelisted
- * field by field so new SDK fields never leak onto the wire; pi2web's own events pass through.
+ * Reduce a Pi SDK event to the fields server-side consumers and clients use, or drop it.
+ * Heavy SDK events are whitelisted field by field (Pi attaches whole messages to many of
+ * them) so new SDK fields never leak into memory or onto the wire; pi2web's own events pass through.
  */
 export function slimEvent(event: AgentEvent): AgentEvent | undefined {
   const e = event as any;
   switch (event.type) {
-    case 'message_update': {
-      const update = e.assistantMessageEvent;
-      if (
-        (update?.type !== 'text_delta' && update?.type !== 'thinking_delta') ||
-        typeof update.delta !== 'string'
-      )
-        return undefined;
-      return {type: 'message_update', assistantMessageEvent: {type: update.type, delta: update.delta}};
-    }
+    // Streamed text and running tool output reach viewing clients through AgentFeed, not as events.
+    case 'message_update':
+    case 'tool_execution_update':
+      return undefined;
     case 'message_start':
       return {type: 'message_start', role: e.message?.role ?? e.role};
     case 'turn_start':
@@ -57,14 +53,6 @@ export function slimEvent(event: AgentEvent): AgentEvent | undefined {
         toolName: e.toolName,
         args: e.args,
         parentToolCallId: e.parentToolCallId
-      };
-    case 'tool_execution_update':
-      return {
-        type: event.type,
-        toolCallId: e.toolCallId,
-        toolName: e.toolName,
-        parentToolCallId: e.parentToolCallId,
-        partialResult: e.partialResult
       };
     case 'tool_execution_end':
       return {
@@ -117,7 +105,8 @@ export interface AgentBackend {
   clearQueue(): Promise<AgentQueue>;
   abort(): Promise<void>;
   getState(): Promise<AgentState>;
-  getMessages(): Promise<unknown[]>;
+  /** The session's current branch, for the timeline. Must be cheap when the leaf has not moved. */
+  timeline(): TimelineSource;
   getSystemPrompt(): Promise<SystemPromptInfo>;
   getCapabilities(): Promise<Record<string, unknown>>;
   getSession(): Promise<Record<string, unknown>>;
@@ -139,7 +128,7 @@ export interface AgentBackend {
 export class MockBackend implements AgentBackend {
   private emitter = new EventEmitter();
   private state: AgentState;
-  private messages: unknown[] = [];
+  private entries: TimelineEntry[] = [];
   private timer?: ReturnType<typeof setTimeout>;
   private queue: AgentQueue = {steering: [], followUp: []};
   constructor(
@@ -153,6 +142,18 @@ export class MockBackend implements AgentBackend {
   private emit(e: AgentEvent) {
     this.emitter.emit('event', e);
   }
+  /** Persist like Pi: append a session entry after listeners have seen the message. */
+  protected append(message: Record<string, unknown>) {
+    const id = randomUUID().slice(0, 8);
+    this.entries.push({
+      type: 'message',
+      id,
+      parentId: this.entries.at(-1)?.id ?? null,
+      timestamp: new Date().toISOString(),
+      message: {timestamp: Date.now(), ...message}
+    });
+    return id;
+  }
   /** The body of a turn. Tests override it to keep a run streaming while they inspect queued input. */
   protected runTurn() {
     return new Promise<void>(r => {
@@ -165,13 +166,15 @@ export class MockBackend implements AgentBackend {
     this.state.status = 'streaming';
     this.emit({type: 'agent_start', message});
     await this.runTurn();
-    this.messages.push({role: 'user', content: message});
-    this.emit({type: 'message_start', role: 'assistant'});
-    this.emit({
-      type: 'message_update',
-      assistantMessageEvent: {type: 'text_delta', delta: `Mock response: ${message}`}
-    });
-    this.emit({type: 'message_end', message: `Mock response: ${message}`});
+    const user = {role: 'user', content: message};
+    this.emit({type: 'message_end', message: user});
+    this.append(user);
+    const text = `Mock response: ${message}`,
+      assistant = {role: 'assistant', content: [{type: 'text', text}]};
+    this.emit({type: 'message_start', message: {role: 'assistant', content: []}});
+    this.emit({type: 'message_update', assistantMessageEvent: {type: 'text_delta', delta: text}});
+    this.emit({type: 'message_end', message: assistant});
+    this.append(assistant);
     this.state.status = 'idle';
     this.emit({type: 'agent_end'});
   }
@@ -211,8 +214,12 @@ export class MockBackend implements AgentBackend {
   async getState() {
     return {...this.state};
   }
-  async getMessages() {
-    return [...this.messages];
+  timeline(): TimelineSource {
+    return {
+      sessionId: this.state.sessionId,
+      leafId: this.entries.at(-1)?.id ?? null,
+      entries: () => [...this.entries]
+    };
   }
   async getSystemPrompt(): Promise<SystemPromptInfo> {
     const template = this.options.piDefaultPrompt ? undefined : this.options.template;
@@ -229,13 +236,13 @@ export class MockBackend implements AgentBackend {
     return {model: null, models: [], thinkingLevel: 'off', thinkingLevels: ['off'], supportsThinking: false};
   }
   async getSession() {
-    return {...(await this.getSessionInfo()), entries: [], tree: []};
+    return {...(await this.getSessionInfo()), entries: [...this.entries], tree: []};
   }
   async getSessionInfo() {
     return {
       sessionId: this.state.sessionId,
       sessionName: this.state.sessionName,
-      stats: {totalMessages: this.messages.length, tokens: {total: 0}, cost: 0},
+      stats: {totalMessages: this.entries.length, tokens: {total: 0}, cost: 0},
       contextUsage: {tokens: null, contextWindow: 0, percent: null}
     };
   }
@@ -248,7 +255,10 @@ export class MockBackend implements AgentBackend {
     this.state.sessionName = name;
     this.emit({type: 'session_info_changed', name});
   }
-  async navigate(_entryId: string) {
+  /** Move the leaf back to an earlier entry, like rewinding a Pi session. */
+  async navigate(entryId: string) {
+    const index = this.entries.findIndex(entry => entry.id === entryId);
+    if (index >= 0) this.entries = this.entries.slice(0, index + 1);
     return {cancelled: false};
   }
   async fork(_entryId: string): Promise<{sessionFile?: string; selectedText?: string}> {
@@ -264,14 +274,13 @@ export class MockBackend implements AgentBackend {
     this.emit({type: 'bash_execution_start', id, command});
     this.emit({type: 'bash_execution_update', id, delta: `${output}\n`});
     const result = {id, output, exitCode: 0, cancelled: false, truncated: false};
-    this.messages.push({
+    this.append({
       role: 'bashExecution',
       command,
       output,
       exitCode: 0,
       cancelled: false,
       truncated: false,
-      timestamp: Date.now(),
       excludeFromContext
     });
     this.emit({type: 'bash_execution_end', command, ...result});
@@ -297,13 +306,14 @@ export type AgentRecord = AgentState & {
   createdAt: string;
   lastActiveAt: string;
 };
-type StoredEvent = {id: string; sequence: number; timestamp: number; event: AgentEvent};
+/** An event as server-side consumers and the overview stream receive it. */
+export type PublishedEvent = {timestamp: number; status: AgentState['status']; event: AgentEvent};
 type AgentEntry = {
   record: AgentRecord;
   backend?: AgentBackend;
   loading?: Promise<AgentBackend>;
-  events: StoredEvent[];
-  nextSequence: number;
+  /** Detail stream of the loaded backend: streamed text, timeline changes, tool output. */
+  feed?: AgentFeed;
   activity: ActivityTracker;
   dialogRequests: Map<string, AgentEvent>;
   queue: AgentQueue;
@@ -317,8 +327,8 @@ const runStatus = (entry: AgentEntry, streaming: boolean): AgentState['status'] 
   entry.dialogRequests.size ? 'waiting_for_user' : streaming ? 'streaming' : 'idle';
 export class AgentManager {
   private agents = new Map<string, AgentEntry>();
-  private listeners = new Map<string, Set<(e: StoredEvent) => void>>();
-  private globalListeners = new Set<(agentId: string, e: StoredEvent) => void>();
+  private detailListeners = new Map<string, Set<(message: DetailMessage) => void>>();
+  private globalListeners = new Set<(agentId: string, e: PublishedEvent) => void>();
   constructor(
     private workspaces: WorkspaceStore,
     private factory: (
@@ -385,6 +395,15 @@ export class AgentManager {
   }
   private connect(entry: AgentEntry, backend: AgentBackend) {
     entry.backend = backend;
+    entry.feed?.close();
+    const agentId = entry.record.agentId,
+      feed = new AgentFeed(
+        () => backend.timeline(),
+        message => {
+          for (const listener of this.detailListeners.get(agentId) ?? []) listener(message);
+        }
+      );
+    entry.feed = feed;
     backend.subscribe(event => {
       if (entry.backend !== backend) return;
       const record = entry.record,
@@ -404,6 +423,7 @@ export class AgentManager {
       if (type === 'session_info_changed')
         record.sessionName =
           typeof event.name === 'string' && event.name.trim() ? event.name.trim() : undefined;
+      feed.handle(event);
       const slim = slimEvent(event);
       if (slim) this.publish(entry, slim);
       if (activityChanged) this.publishActivity(entry);
@@ -416,24 +436,13 @@ export class AgentManager {
     const record = entry.record;
     record.lastActiveAt = new Date().toISOString();
     // Every event carries the authoritative status, so clients never have to derive it from event types.
-    const item = {
-      id: randomUUID(),
-      sequence: entry.nextSequence++,
-      timestamp: Math.floor(Date.now() / 1000),
-      status: record.status,
-      event
-    };
-    entry.events.push(item);
-    if (entry.events.length > 1000) entry.events.shift();
-    for (const listener of this.listeners.get(record.agentId) ?? []) listener(item);
+    const item = {timestamp: Date.now(), status: record.status, event};
     for (const listener of this.globalListeners) listener(record.agentId, item);
   }
   private attach(id: string, record: AgentRecord, backend: AgentBackend) {
     const entry: AgentEntry = {
       record,
       backend,
-      events: [],
-      nextSequence: 1,
       activity: new ActivityTracker(),
       dialogRequests: new Map(),
       queue: emptyQueue()
@@ -465,8 +474,6 @@ export class AgentManager {
         };
         this.agents.set(saved.agentId, {
           record,
-          events: [],
-          nextSequence: 1,
           activity: new ActivityTracker(),
           dialogRequests: new Map(),
           queue: emptyQueue()
@@ -547,12 +554,6 @@ export class AgentManager {
     const entry = this.get(id);
     return entry.backend ? entry.backend.clearQueue() : emptyQueue();
   }
-  events(id: string, last = 0) {
-    return this.get(id).events.filter(e => e.sequence > last);
-  }
-  currentSequence(id: string) {
-    return this.get(id).nextSequence - 1;
-  }
   snapshotState(id: string): AgentSnapshotState {
     const a = this.get(id);
     return {
@@ -564,29 +565,28 @@ export class AgentManager {
       }
     };
   }
-  async snapshot(id: string, messageLimit?: number) {
-    // Capture state and its cursor before yielding. Events emitted while messages
-    // are being read must be delivered after, not swallowed by, this snapshot.
-    const a = this.get(id),
-      state = this.snapshotState(id),
-      lastSequence = a.nextSequence - 1;
-    const messages = a.backend ? await a.backend.getMessages() : [];
-    if (messageLimit === undefined) return {state, messages, lastSequence};
-    const page = this.paginateMessages(messages, messageLimit);
-    return {state, messages: page.items, messagePage: page, lastSequence};
-  }
-  hasReplayGap(id: string, last: number) {
-    const a = this.get(id);
-    const current = a.nextSequence - 1;
-    return last > current || (last > 0 && a.events.length > 0 && last < a.events[0].sequence - 1);
-  }
-  subscribe(id: string, listener: (e: StoredEvent) => void) {
+  /** Streamed text, timeline changes and tool output of one Agent, for clients viewing it. */
+  subscribeDetail(id: string, listener: (message: DetailMessage) => void) {
     this.get(id);
-    if (!this.listeners.has(id)) this.listeners.set(id, new Set());
-    this.listeners.get(id)!.add(listener);
-    return () => this.listeners.get(id)?.delete(listener);
+    if (!this.detailListeners.has(id)) this.detailListeners.set(id, new Set());
+    this.detailListeners.get(id)!.add(listener);
+    return () => this.detailListeners.get(id)?.delete(listener);
   }
-  subscribeAll(listener: (agentId: string, e: StoredEvent) => void) {
+  /** What a client starting to view an Agent needs besides its timeline. */
+  detailState(id: string) {
+    const entry = this.get(id);
+    return {
+      sessionId: entry.feed?.sessionId(),
+      live: entry.feed?.liveState() ?? null,
+      // Dialog controls live in the transcript, which a viewer replaces when it starts viewing.
+      dialogRequests: [...entry.dialogRequests.values()]
+    };
+  }
+  toolOutput(id: string, toolCallId: string) {
+    return this.get(id).feed?.output(toolCallId);
+  }
+  /** Events of every Agent: server-side consumers and the overview stream. */
+  subscribeAll(listener: (agentId: string, e: PublishedEvent) => void) {
     this.globalListeners.add(listener);
     return () => this.globalListeners.delete(listener);
   }
@@ -595,6 +595,8 @@ export class AgentManager {
     if (a.loading) await a.loading.catch(() => {});
     await a.backend?.dispose();
     a.backend = undefined;
+    a.feed?.close();
+    a.feed = undefined;
     a.record.status = 'unloaded';
     a.streaming = false;
     a.dialogRequests.clear();
@@ -605,7 +607,7 @@ export class AgentManager {
   async remove(id: string) {
     await this.dispose(id);
     this.agents.delete(id);
-    this.listeners.delete(id);
+    this.detailListeners.delete(id);
   }
   async archive(id: string) {
     const current = this.get(id).record;
@@ -621,18 +623,20 @@ export class AgentManager {
       record = this.get(id).record;
     return {...state, status: record.status, sessionName: state.sessionName?.trim() || record.sessionName};
   }
-  async messages(id: string) {
-    return (await this.ensureLoaded(id)).getMessages();
+  /** A page of the session's timeline: the newest items, or those before `before`. */
+  async timeline(id: string, limit?: number, before?: string) {
+    const source = (await this.ensureLoaded(id)).timeline(),
+      page = pageTimeline(buildTimeline(source.entries()), limit, before);
+    if (!page) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
+    return {sessionId: source.sessionId, ...page};
   }
-  async messagePage(id: string, limit = 25, before?: number) {
-    return this.paginateMessages(await (await this.ensureLoaded(id)).getMessages(), limit, before);
-  }
-  private paginateMessages(messages: unknown[], limit: number, before?: number) {
-    const safeLimit = Math.min(200, Math.max(1, Math.trunc(Number(limit) || 25))),
-      total = messages.length,
-      end = Math.min(total, Math.max(0, before === undefined ? total : Math.trunc(Number(before) || 0))),
-      start = Math.max(0, end - safeLimit);
-    return {items: messages.slice(start, end), total, start, end, limit: safeLimit, hasMore: start > 0};
+  /** The full body of one timeline item of the given session. */
+  async item(id: string, sessionId: string, itemId: string) {
+    const source = (await this.ensureLoaded(id)).timeline(),
+      detail =
+        source.sessionId === sessionId ? itemDetail(buildTimeline(source.entries()), itemId) : undefined;
+    if (!detail) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
+    return detail;
   }
   async systemPrompt(id: string) {
     const info = await (await this.ensureLoaded(id)).getSystemPrompt();
@@ -671,7 +675,9 @@ export class AgentManager {
     this.get(id).record.sessionName = name.trim();
   }
   async navigate(id: string, entryId: string) {
-    return (await this.ensureLoaded(id)).navigate(entryId);
+    const result = await (await this.ensureLoaded(id)).navigate(entryId);
+    this.get(id).feed?.sync(); // Moving the leaf back is no event; tell viewers to reload.
+    return result;
   }
   async fork(id: string, entryId: string) {
     const source = this.get(id),

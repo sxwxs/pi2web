@@ -110,12 +110,20 @@ export async function handleAgentRoutes(
       return send(200, {data: {archived: true}});
     }
     if (req.method === 'GET' && parts[4] === 'state') return send(200, {data: await ctx.agents.state(id)});
-    if (req.method === 'GET' && parts[4] === 'messages') {
-      const hasPaging = u.searchParams.has('limit') || u.searchParams.has('before');
-      if (!hasPaging) return send(200, {data: await ctx.agents.messages(id)});
-      const limit = Number(u.searchParams.get('limit') ?? 25),
-        before = u.searchParams.has('before') ? Number(u.searchParams.get('before')) : undefined;
-      return send(200, {data: await ctx.agents.messagePage(id, limit, before)});
+    if (req.method === 'GET' && parts[4] === 'timeline' && parts.length === 5)
+      return send(200, {
+        data: await ctx.agents.timeline(
+          id,
+          Number(u.searchParams.get('limit') ?? 50),
+          u.searchParams.get('before') ?? undefined
+        )
+      });
+    // /agents/:id/sessions/:sessionId/items/:itemId — the session is part of the URL so a cached body
+    // can never be served for another session. Completed items never change: cache them for good.
+    if (req.method === 'GET' && parts[4] === 'sessions' && parts[6] === 'items' && parts.length === 8) {
+      const detail = await ctx.agents.item(id, decodeURIComponent(parts[5]), decodeURIComponent(parts[7]));
+      res.setHeader('cache-control', detail.complete ? 'private, max-age=31536000, immutable' : 'no-store');
+      return send(200, {data: {id: detail.id, body: detail.body}});
     }
     if (req.method === 'GET' && parts[4] === 'system-prompt')
       return send(200, {data: await ctx.agents.systemPrompt(id)});
