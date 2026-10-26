@@ -38,8 +38,6 @@ function boundKeyboard() {
 }
 
 const light = (keyboard: any) => keyboard.lightState(0);
-const event = (keyboard: any, type: string, fields: Record<string, unknown> = {}) =>
-  keyboard.handleAgentEvent('agent-a', {type, ...fields});
 
 describe('session keyboard bindings', () => {
   it('leaves memory, storage and observers unchanged after a rejected move', () => {
@@ -84,163 +82,65 @@ describe('session keyboard bindings', () => {
 });
 
 describe('session keyboard activity', () => {
-  it('tracks parallel tools, retries and completion', () => {
+  // Event-by-event tracking lives on the server (test/activity.test.ts); lights only map its state.
+  const activity = (fields: Record<string, unknown> = {}) => ({
+    run: null,
+    phase: {kind: 'idle', since: 1},
+    bash: [],
+    dialogs: [],
+    ...fields
+  });
+  const phase = (kind: string, extra: Record<string, unknown> = {}) =>
+    activity({run: {startedAt: 1}, phase: {kind, since: 1, ...extra}});
+
+  it.each([
+    ['waiting_llm', 4, 0.12],
+    ['thinking', 4, 0.12],
+    ['generating', 4, 0.12],
+    ['preparing_tool', 4, 0.12],
+    ['compacting', 4, 0.12],
+    ['running_tools', 4, 0.45],
+    ['retrying', 4, 0.8]
+  ])('maps the %s phase to its light', (kind, effect, speed) => {
     const keyboard = boundKeyboard();
-    event(keyboard, 'agent_start');
-    expect(light(keyboard)).toMatchObject({effect: 4, speed: 0.12});
-    event(keyboard, 'tool_execution_start', {toolCallId: 'one'});
-    event(keyboard, 'tool_execution_start', {toolCallId: 'two'});
-    event(keyboard, 'tool_execution_end', {toolCallId: 'two'});
+    keyboard.setActivity(
+      'agent-a',
+      phase(kind, kind === 'running_tools' ? {tools: [{toolCallId: 't'}]} : {})
+    );
+    expect(light(keyboard)).toMatchObject({effect, speed});
+  });
+
+  it('lets dialogs win over tools, and shell commands count as tools while the LLM is idle', () => {
+    const keyboard = boundKeyboard();
+    keyboard.setActivity('agent-a', activity({bash: [{id: 'b', since: 1}]}));
     expect(light(keyboard)).toMatchObject({effect: 4, speed: 0.45});
-    event(keyboard, 'tool_execution_end', {toolCallId: 'one'});
-    expect(light(keyboard).speed).toBe(0.12);
-    event(keyboard, 'agent_end', {willRetry: true});
-    expect(light(keyboard).speed).toBe(0.8);
-    event(keyboard, 'auto_retry_start');
-    event(keyboard, 'agent_start');
-    event(keyboard, 'auto_retry_end', {success: true});
-    expect(light(keyboard).speed).toBe(0.12);
-    event(keyboard, 'agent_end');
-    event(keyboard, 'agent_settled');
+    keyboard.setActivity('agent-a', {...phase('running_tools'), dialogs: [{requestId: 'q', since: 1}]});
+    expect(light(keyboard)).toMatchObject({effect: 6, speed: 0.1});
+    keyboard.setActivity('agent-a', activity());
     expect(light(keyboard)).toMatchObject({effect: 1, speed: 0});
     expect(keyboard.activities.size).toBe(0);
   });
 
-  it.each(['agent_start', 'tool_execution_start', 'auto_retry_start'])(
-    'clears stale %s activity on an idle list refresh',
-    type => {
-      const keyboard = boundKeyboard();
-      event(keyboard, type);
-      keyboard.setAgents([agent('idle')]);
-      expect(light(keyboard).effect).toBe(1);
-      event(keyboard, 'session_info_changed', {name: 'renamed'});
-      expect(light(keyboard).effect).toBe(1);
-      expect(keyboard.activities.size).toBe(0);
-    }
-  );
-
-  it.each([
-    ['idle', 1, 0],
-    ['streaming', 4, 0.15],
-    ['waiting_for_user', 6, 0.1]
-  ])('replaces stale details with a %s snapshot', (status, effect, speed) => {
+  it('takes activity from status updates that carry it and keeps it for those that do not', () => {
     const keyboard = boundKeyboard();
-    event(keyboard, 'tool_execution_start', {toolCallId: 'old-tool'});
-    event(keyboard, 'bash_execution_start', {id: 'old-bash'});
-    event(keyboard, 'extension_ui_request', {requestId: 'old-request'});
-    keyboard.setAgentSnapshot(agent(String(status)));
-    expect(light(keyboard)).toMatchObject({effect, speed});
-    expect(keyboard.activities.size).toBe(0);
-    // Late/unknown responses must not resurrect work after a sequence reset.
-    event(keyboard, 'extension_ui_response', {requestId: 'old-request'});
-    expect(light(keyboard)).toMatchObject({effect, speed});
-  });
-
-  it('rebuilds parallel operations from snapshot IDs instead of preserving old guesses', () => {
-    const keyboard = boundKeyboard();
-    event(keyboard, 'tool_execution_start', {toolCallId: 'old-tool'});
-    event(keyboard, 'bash_execution_start', {id: 'old-bash'});
-    event(keyboard, 'extension_ui_request', {requestId: 'old-dialog'});
-    keyboard.setAgentSnapshot({
-      ...agent(),
-      activity: {bashIds: ['bash-1', 'bash-2'], dialogIds: ['dialog-1', 'dialog-2']}
-    });
-    expect(light(keyboard).effect).toBe(6);
-    event(keyboard, 'bash_execution_end', {id: 'old-bash'});
-    event(keyboard, 'extension_ui_response', {requestId: 'old-dialog'});
-    event(keyboard, 'extension_ui_response', {requestId: 'dialog-1'});
-    expect(light(keyboard).effect).toBe(6);
-    event(keyboard, 'extension_ui_response', {requestId: 'dialog-2'});
+    keyboard.updateAgent({...agent('streaming'), activity: phase('running_tools')});
+    keyboard.updateAgent(agent('streaming'));
     expect(light(keyboard).speed).toBe(0.45);
-    keyboard.setAgents([agent()]); // An idle LLM does not end standalone work.
-    event(keyboard, 'bash_execution_end', {id: 'bash-1'});
-    expect(light(keyboard).speed).toBe(0.45);
-    event(keyboard, 'bash_execution_end', {id: 'bash-2'});
-    expect(light(keyboard).effect).toBe(1);
-    expect(keyboard.activities.size).toBe(0);
-  });
-
-  it.each([
-    {activity: {bashIds: ['bash'], dialogIds: []}, effect: 4},
-    {activity: {bashIds: [], dialogIds: ['dialog']}, effect: 6}
-  ])(
-    'restores activity without its start event and clears it on a later empty snapshot: $effect',
-    ({activity, effect}) => {
-      const keyboard = boundKeyboard();
-      keyboard.setAgentSnapshot({...agent(), activity});
-      expect(light(keyboard).effect).toBe(effect);
-      keyboard.setAgentSnapshot({...agent(), activity: {bashIds: [], dialogIds: []}});
-      expect(light(keyboard).effect).toBe(1);
-    }
-  );
-
-  it('applies the final activity baseline without discarding replayed tool/LLM details', () => {
-    const keyboard = boundKeyboard();
-    event(keyboard, 'agent_start');
-    event(keyboard, 'tool_execution_start', {toolCallId: 'tool'});
-    event(keyboard, 'extension_ui_request', {requestId: 'stale-dialog'});
-    keyboard.updateAgent({...agent('streaming'), activity: {bashIds: ['bash'], dialogIds: []}});
-    event(keyboard, 'bash_execution_end', {id: 'bash'});
-    expect(light(keyboard).speed).toBe(0.45);
-    event(keyboard, 'tool_execution_end', {toolCallId: 'tool'});
-    expect(light(keyboard).speed).toBe(0.12);
-    keyboard.updateAgent({...agent(), activity: {bashIds: [], dialogIds: []}});
+    keyboard.updateAgent({...agent(), activity: activity()});
     expect(light(keyboard).effect).toBe(1);
   });
 
-  it('does not start LLM activity when an idle extension dialog is answered', () => {
+  it('falls back to the Agent status without activity', () => {
     const keyboard = boundKeyboard();
-    event(keyboard, 'extension_ui_request', {requestId: 'question'});
-    expect(light(keyboard).effect).toBe(6);
-    event(keyboard, 'extension_ui_response', {requestId: 'question'});
-    expect(light(keyboard).effect).toBe(1);
-    event(keyboard, 'agent_settled');
-    event(keyboard, 'extension_ui_response', {requestId: 'question'});
-    expect(light(keyboard).effect).toBe(1);
+    keyboard.updateAgent(agent('streaming'));
+    expect(light(keyboard)).toMatchObject({effect: 4, speed: 0.15});
+    keyboard.updateAgent(agent('waiting_for_user'));
+    expect(light(keyboard)).toMatchObject({effect: 6, speed: 0.1});
   });
 
-  it('matches dialog completions by request id and waits for every open dialog', () => {
+  it.each(['unloaded', 'stopped', 'error'])('clears activity when an agent becomes %s', status => {
     const keyboard = boundKeyboard();
-    event(keyboard, 'agent_start');
-    event(keyboard, 'extension_ui_request', {requestId: 'one'});
-    event(keyboard, 'extension_ui_request', {requestId: 'two'});
-    event(keyboard, 'message_update');
-    event(keyboard, 'extension_ui_response', {requestId: 'one'});
-    event(keyboard, 'extension_ui_response', {requestId: 'unrelated'});
-    expect(light(keyboard).effect).toBe(6);
-    event(keyboard, 'extension_ui_response', {requestId: 'two'});
-    expect(light(keyboard)).toMatchObject({effect: 4, speed: 0.12});
-  });
-
-  it('keeps independent silent bash runs alive across LLM turns and idle refreshes', () => {
-    const keyboard = boundKeyboard();
-    event(keyboard, 'bash_execution_start', {id: 'one'});
-    event(keyboard, 'bash_execution_start', {id: 'two'});
-    expect(light(keyboard).speed).toBe(0.45);
-    event(keyboard, 'agent_start');
-    event(keyboard, 'agent_end');
-    event(keyboard, 'agent_settled');
-    keyboard.setAgents([agent('idle')]);
-    event(keyboard, 'bash_execution_end', {id: 'one'});
-    expect(light(keyboard).speed).toBe(0.45);
-    event(keyboard, 'bash_execution_end', {id: 'two'});
-    expect(light(keyboard).effect).toBe(1);
-  });
-
-  it('does not dismiss an out-of-turn dialog just because the LLM is idle', () => {
-    const keyboard = boundKeyboard();
-    event(keyboard, 'extension_ui_request', {requestId: 'question'});
-    keyboard.updateAgent(agent('idle'));
-    keyboard.setAgents([agent('idle')]);
-    expect(light(keyboard).effect).toBe(6);
-    event(keyboard, 'extension_ui_response', {requestId: 'question'});
-    expect(light(keyboard).effect).toBe(1);
-  });
-
-  it.each(['unloaded', 'stopped', 'error'])('clears every activity when an agent becomes %s', status => {
-    const keyboard = boundKeyboard();
-    event(keyboard, 'bash_execution_start', {id: 'bash'});
-    event(keyboard, 'extension_ui_request', {requestId: 'question'});
+    keyboard.setActivity('agent-a', activity({bash: [{id: 'b', since: 1}]}));
     keyboard.updateAgent(agent(status));
     expect(light(keyboard).effect).toBe(1);
     expect(keyboard.activities.size).toBe(0);
@@ -248,21 +148,12 @@ describe('session keyboard activity', () => {
 
   it('turns lights off and clears activity, but keeps bindings, when a server disconnects', () => {
     const keyboard = boundKeyboard();
-    event(keyboard, 'tool_execution_start');
+    keyboard.setActivity('agent-a', phase('running_tools'));
     keyboard.setAgents([]);
     expect(light(keyboard).effect).toBe(0);
     expect(keyboard.activities.size).toBe(0);
     expect(keyboard.getBinding('agent-a')).not.toBeNull();
     keyboard.setAgents([agent()]);
     expect(light(keyboard).effect).toBe(1);
-  });
-
-  it('ignores non-assistant message starts', () => {
-    const keyboard = boundKeyboard();
-    event(keyboard, 'message_start', {role: 'user'});
-    event(keyboard, 'message_start', {role: 'toolResult'});
-    expect(light(keyboard).effect).toBe(1);
-    event(keyboard, 'message_start', {role: 'assistant'});
-    expect(light(keyboard).speed).toBe(0.12);
   });
 });

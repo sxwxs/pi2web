@@ -110,12 +110,14 @@ describe('agent event wire size', () => {
 
     socket = new WebSocket(`ws://127.0.0.1:${address.port}/api/v1/ws`, [`access-token.${token}`]);
     let bytes = 0,
+      activityChanges = 0,
       text = '';
     const ended = new Promise<void>(resolve =>
       socket!.on('message', raw => {
         bytes += (raw as Buffer).length;
         const message = JSON.parse(raw.toString());
         expect(raw.toString()).not.toContain('"partial"');
+        if (message.type === 'agent_event' && message.event.type === 'activity_changed') activityChanges++;
         if (message.type === 'agent_event' && message.event.type === 'message_update')
           text += message.event.assistantMessageEvent.delta;
         if (message.type === 'agent_event' && message.event.type === 'message_end') resolve();
@@ -132,6 +134,7 @@ describe('agent event wire size', () => {
     const token4 = 'abcd',
       count = 5000;
     let streamed = '';
+    // Content blocks stream one after another: the text, then a tool call's arguments.
     for (let i = 0; i < count; i++) {
       streamed += token4;
       backend.publish({
@@ -144,6 +147,8 @@ describe('agent event wire size', () => {
           partial: partial(streamed)
         }
       });
+    }
+    for (let i = 0; i < count; i++)
       backend.publish({
         type: 'message_update',
         message: partial(streamed),
@@ -154,11 +159,12 @@ describe('agent event wire size', () => {
           partial: partial(streamed)
         }
       });
-    }
     backend.publish({type: 'message_end', message: partial(streamed)});
     await ended;
 
     expect(text).toBe(streamed);
+    // One activity change per content block (generating, preparing_tool), not one per token.
+    expect(activityChanges).toBe(2);
     // Unslimmed, this stream is ~200 MB. Slimmed: one copy for message_end plus framing overhead.
     expect(bytes).toBeLessThan(streamed.length * 3 + 10_000);
   });

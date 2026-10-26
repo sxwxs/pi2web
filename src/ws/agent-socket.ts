@@ -123,7 +123,8 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
               event: e.event
             });
           subscriptions.set('*', ctx.agents.subscribeAll(forward));
-          send({type: 'subscribed_all', protocolVersion: 1});
+          // serverTime lets clients correct clock skew when showing how long an activity has been running.
+          send({type: 'subscribed_all', protocolVersion: 1, serverTime: Date.now()});
           return;
         }
         if (m.type === 'subscribe') {

@@ -61,8 +61,9 @@ function setup() {
     return {body};
   });
   const renderMessages = vi.fn(() => messages.append(new Element()));
-  const sessionKeyboard = {updateAgent: vi.fn(), setAgentSnapshot: vi.fn(), handleAgentEvent: vi.fn()};
-  const setAgentStatus = vi.fn(),
+  const sessionKeyboard = {updateAgent: vi.fn(), setActivity: vi.fn()};
+  const setAgentActivity = vi.fn(),
+    setAgentStatus = vi.fn(),
     selectAgent = vi.fn(async () => {}),
     navigateMobile = vi.fn();
   const {handleAgentEvent, onKey} = runInNewContext(
@@ -90,6 +91,7 @@ function setup() {
       selectAgent,
       navigateMobile,
       setAgentStatus,
+      setAgentActivity,
       discardStreams: vi.fn(),
       updateMessageHistoryControl: vi.fn(),
       renderQueueBar: vi.fn(),
@@ -109,6 +111,8 @@ function setup() {
     state,
     onKey,
     setAgentStatus,
+    setAgentActivity,
+    sessionKeyboard,
     selectAgent,
     navigateMobile
   };
@@ -132,8 +136,10 @@ function baseline(type: string, requests: (typeof request)[] = [request], sequen
       agentId,
       status: 'idle',
       activity: {
-        bashIds: [],
-        dialogIds: requests.map(request => request.requestId),
+        run: null,
+        phase: {kind: 'idle', since: 1},
+        bash: [],
+        dialogs: requests.map(request => ({requestId: request.requestId, title: request.title, since: 1})),
         dialogRequests: requests
       }
     }
@@ -208,10 +214,28 @@ describe('extension dialog recovery', () => {
       event: {type: 'agent_unloaded'}
     });
     expect(ui.setAgentStatus).toHaveBeenLastCalledWith('agent-a', 'unloaded');
+    expect(ui.setAgentActivity).toHaveBeenLastCalledWith('agent-a', null);
     expect(ui.$('extension-request-dialog-1')).toBe(controls);
     expect(controls.children[0].textContent).toBe('已结束');
     expect(ui.addCard).toHaveBeenCalledOnce();
     expect(ui.renderMessages).not.toHaveBeenCalled();
+  });
+
+  it('applies activity from state baselines and live changes without adding transcript cards', () => {
+    const ui = setup();
+    const state = baseline('agent_state');
+    ui.handleAgentEvent(state);
+    expect(ui.setAgentActivity).toHaveBeenLastCalledWith('agent-a', state.state.activity);
+    const activity = {run: {startedAt: 5}, phase: {kind: 'thinking', since: 6}, bash: [], dialogs: []};
+    ui.addCard.mockClear();
+    ui.handleAgentEvent({
+      type: 'agent_event',
+      agentId: 'agent-a',
+      sequence: 2,
+      event: {type: 'activity_changed', activity}
+    });
+    expect(ui.setAgentActivity).toHaveBeenLastCalledWith('agent-a', activity);
+    expect(ui.addCard).not.toHaveBeenCalled();
   });
 
   it('uses the status sent with an event and falls back to lifecycle events for older backends', () => {

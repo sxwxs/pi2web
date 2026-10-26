@@ -48,6 +48,8 @@
     contexts: new Map(),
     mobileView: 'home',
     queues: new Map(),
+    // Server-maintained activity of each busy Agent; idle ones are absent.
+    activities: new Map(),
     toolCards: new Map(),
     commands: [],
     commandsAgentId: null,
@@ -1079,6 +1081,11 @@
     return `Session cost ~$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`;
   };
   const sessionUsage = session => ({...(session.contextUsage || {}), cost: session.stats?.cost});
+  // Server time for a backend, corrected by the skew measured when its socket subscribed.
+  const activityView = window.ActivityView.createActivityView(
+    backendId => Date.now() + (backendOf(backendId)?.clockOffset || 0)
+  );
+  setInterval(activityView.tick, 1000);
   function renderAgentList() {
     const recent = (value, fallback) => {
       const time = Date.parse(value || fallback || '');
@@ -1122,6 +1129,8 @@
             tag.title = `System Prompt 模板：${item.template.name || item.template.id}（${templateModeText(item.template.mode)}，创建时固定）`;
             el.querySelector('.agent-top').append(tag);
           }
+          const activityLine = activityView.line(state.activities.get(item.agentId), item.backendId);
+          if (activityLine) el.querySelector('small').after(activityLine);
         } else
           el.innerHTML = `<div class="agent-top"><span class="terminal-kind">&gt;_</span><b>${esc(item.title || 'Terminal')}</b><span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span></div><small>${esc(item.cwd)}</small>`;
         if (connectedBackends().length > 1) {
@@ -1207,6 +1216,20 @@
     if (localStorage.rpSelectedKind === 'terminal' && terminal) await selectTerminal(terminal, false);
     else if (agent) await selectAgent(agent, false);
   }
+  function renderActivityBar() {
+    const bar = $('activityBar'),
+      agent = state.selectedKind === 'agent' ? state.agent : null,
+      nodes = agent ? activityView.bar(state.activities.get(agent.agentId), agent.backendId) : [];
+    bar.replaceChildren(...nodes);
+    bar.hidden = !nodes.length;
+  }
+  function setAgentActivity(agentId, activity) {
+    if (window.ActivityView.isBusy(activity)) state.activities.set(agentId, activity);
+    else state.activities.delete(agentId);
+    sessionKeyboard.setActivity(agentId, activity);
+    renderAgentList();
+    if (state.agent?.agentId === agentId) renderActivityBar();
+  }
   function setAgentStatus(agentId, status) {
     const agent = state.agents.find(x => x.agentId === agentId);
     if (!agent) {
@@ -1236,6 +1259,7 @@
     const percent = Math.min(100, Math.max(0, Number(usage?.percent) || 0));
     $('contextBar').style.width = `${percent}%`;
     panel.className = `context-usage ${usageLevel(usage)}`;
+    renderActivityBar();
   }
   function showAgentView() {
     $('agentToolbar').hidden = false;
@@ -2289,6 +2313,12 @@
       handleVoiceEvent(message);
       return;
     }
+    if (message.type === 'subscribed_all') {
+      const backend = backendOf(message.backendId);
+      if (backend && Number.isFinite(message.serverTime))
+        backend.clockOffset = message.serverTime - Date.now();
+      return;
+    }
     if (message.type === 'subscribed') {
       const key = `rpSeq:${message.agentId}`,
         saved = Number(localStorage[key] || 0),
@@ -2308,15 +2338,17 @@
       sessionKeyboard.updateAgent({...message.state, agentId: message.agentId});
       setAgentStatus(message.agentId, message.state.status);
       setAgentQueue(message.agentId, message.state.activity?.queue);
+      setAgentActivity(message.agentId, message.state.activity);
       restoreExtensionRequests(message.agentId, message.state.activity);
       return;
     }
     if (message.type === 'agent_snapshot') {
       localStorage[`rpSeq:${message.agentId}`] = message.lastSequence;
       if (message.state) {
-        sessionKeyboard.setAgentSnapshot({...message.state, agentId: message.agentId});
+        sessionKeyboard.updateAgent({...message.state, agentId: message.agentId});
         setAgentStatus(message.agentId, message.state.status);
         setAgentQueue(message.agentId, message.state.activity?.queue);
+        setAgentActivity(message.agentId, message.state.activity);
       }
       if (state.agent?.agentId === message.agentId) {
         discardStreams();
@@ -2336,7 +2368,6 @@
     localStorage[key] = message.sequence;
     const ev = message.event || {},
       selected = state.selectedKind === 'agent' && state.agent?.agentId === message.agentId;
-    sessionKeyboard.handleAgentEvent(message.agentId, ev);
     let eventAgent = state.agents.find(x => x.agentId === message.agentId);
     if (eventAgent && Number(message.timestamp) > 0)
       eventAgent.lastActiveAt = new Date(Number(message.timestamp) * 1000).toISOString();
@@ -2358,9 +2389,14 @@
       setAgentQueue(message.agentId, ev);
       return;
     }
+    if (ev.type === 'activity_changed') {
+      setAgentActivity(message.agentId, ev.activity);
+      return;
+    }
     if (ev.type === 'agent_unloaded') {
       setAgentStatus(message.agentId, 'unloaded');
       setAgentQueue(message.agentId, null);
+      setAgentActivity(message.agentId, null);
       restoreExtensionRequests(message.agentId, {dialogRequests: []});
       return;
     }

@@ -108,13 +108,32 @@ const startWork = (publish: (event: AgentEvent) => void) => {
   publish(dialogRequest);
 };
 const emptyQueue = {steering: [], followUp: []};
+const since = expect.any(Number);
+// startWork publishes two events, each followed by an activity_changed event.
+const WORK_EVENTS = 4;
 const active = {
-  bashIds: ['bash-1'],
-  dialogIds: ['dialog-1'],
+  run: null,
+  phase: {kind: 'idle', since},
+  bash: [{id: 'bash-1', command: 'sleep 30', since}],
+  dialogs: [{requestId: 'dialog-1', title: 'Confirm', since}],
   dialogRequests: [dialogRequest],
   queue: emptyQueue
 };
-const idle = {bashIds: [], dialogIds: [], dialogRequests: [], queue: emptyQueue};
+const idle = {
+  run: null,
+  phase: {kind: 'idle', since},
+  bash: [],
+  dialogs: [],
+  dialogRequests: [],
+  queue: emptyQueue
+};
+/** `active` with concrete times, for schema checks. */
+const activeValue = {
+  ...active,
+  phase: {kind: 'idle', since: 1},
+  bash: [{id: 'bash-1', command: 'sleep 30', since: 1}],
+  dialogs: [{requestId: 'dialog-1', title: 'Confirm', since: 1}]
+};
 
 describe('WebSocket state schema', () => {
   it.each(['agent_snapshot', 'agent_state'])(
@@ -123,7 +142,13 @@ describe('WebSocket state schema', () => {
       const state = {agentId: 'agent-a', sessionId: 'session-a', cwd: '/workspace', status: 'idle'};
       const message = {type, agentId: state.agentId, state, sequence: 0, lastSequence: 0, messages: []};
       expect(Check(schema, message)).toBe(true);
-      expect(Check(schema, {...message, state: {...state, activity: active}})).toBe(true);
+      expect(Check(schema, {...message, state: {...state, activity: activeValue}})).toBe(true);
+      expect(
+        Check(schema, {
+          ...message,
+          state: {...state, activity: {...activeValue, phase: {kind: 'nope', since: 1}}}
+        })
+      ).toBe(false);
       for (const key of ['agentId', 'sessionId', 'cwd', 'status']) {
         const incomplete: Record<string, unknown> = {...state};
         delete incomplete[key];
@@ -148,7 +173,12 @@ describe('authoritative activity snapshots', () => {
     // A pending dialog blocks the run, which is reported as waiting_for_user rather than idle.
     expect(agents.snapshotState(agent.agentId)).toMatchObject({
       status: 'waiting_for_user',
-      activity: {bashIds: ['bash-1', 'bash-2'], dialogIds: ['dialog-1', 'dialog-2']}
+      activity: {
+        run: null,
+        phase: {kind: 'idle'},
+        bash: [{id: 'bash-1'}, {id: 'bash-2'}],
+        dialogs: [{requestId: 'dialog-1'}, {requestId: 'dialog-2'}]
+      }
     });
     expect(agents.get(agent.agentId).record).not.toHaveProperty('activity');
     publish({type: 'bash_execution_end', id: 'bash-2'});
@@ -198,14 +228,14 @@ describe('authoritative activity snapshots', () => {
       gate.resolve([]);
       const snapshot = await pending;
       expect(snapshot.lastSequence).toBe(cursor);
-      expect(snapshot.state).toMatchObject({status: 'waiting_for_user', activity: active});
-      expect(agents.events(agent.agentId, cursor).map(event => event.sequence)).toEqual([
-        cursor + 1,
-        cursor + 2,
-        cursor + 3
-      ]);
+      const running = {...active, run: {startedAt: since}, phase: {kind: 'waiting_llm', since}};
+      expect(snapshot.state).toMatchObject({status: 'waiting_for_user', activity: running});
+      // Three events, each followed by its activity change.
+      expect(agents.events(agent.agentId, cursor).map(event => event.sequence)).toEqual(
+        [1, 2, 3, 4, 5, 6].map(n => cursor + n)
+      );
       expect(agents.snapshotState(agent.agentId)).toMatchObject({status: 'idle', activity: idle});
-      expect(snapshot.state.activity).toEqual(active); // Later events did not mutate the captured arrays.
+      expect(snapshot.state.activity).toEqual(running); // Later events did not mutate the captured state.
     }
   );
 
@@ -266,16 +296,20 @@ describe('WebSocket snapshot ordering', () => {
     const client = await connect();
     client.send({type: 'subscribe', agentId: agent.agentId, fromNow: true});
     const subscribed = await client.wait(message => message.type === 'subscribed');
-    expect(subscribed.currentSequence).toBe(2);
+    expect(subscribed.currentSequence).toBe(WORK_EVENTS);
     const baseline = await client.wait(message => message.type === 'agent_state');
-    expect(baseline).toMatchObject({sequence: 2, state: {status: 'waiting_for_user', activity: active}});
+    expect(baseline).toMatchObject({
+      sequence: WORK_EVENTS,
+      state: {status: 'waiting_for_user', activity: active}
+    });
     expect(backend.getMessages).not.toHaveBeenCalled();
     publish({type: 'bash_execution_end', id: 'bash-1'});
-    const end = await client.wait(message => message.type === 'agent_event');
-    expect(end.sequence).toBe(3);
+    const end = await client.wait(message => message.event?.type === 'activity_changed');
+    expect(end).toMatchObject({sequence: WORK_EVENTS + 2, event: {activity: {bash: []}}});
     expect(client.messages.map(message => message.type)).toEqual([
       'subscribed',
       'agent_state',
+      'agent_event',
       'agent_event'
     ]);
   });
@@ -285,9 +319,12 @@ describe('WebSocket snapshot ordering', () => {
     startWork(publish);
     backend.getMessages = vi.fn(async () => []);
     const client = await connect();
-    client.send({type: 'subscribe', agentId: agent.agentId, lastSequence: 2});
+    client.send({type: 'subscribe', agentId: agent.agentId, lastSequence: WORK_EVENTS});
     const baseline = await client.wait(message => message.type === 'agent_state');
-    expect(baseline).toMatchObject({sequence: 2, state: {status: 'waiting_for_user', activity: active}});
+    expect(baseline).toMatchObject({
+      sequence: WORK_EVENTS,
+      state: {status: 'waiting_for_user', activity: active}
+    });
     expect(client.messages.map(message => message.type)).toEqual(['subscribed', 'agent_state']);
     expect(backend.getMessages).not.toHaveBeenCalled();
   });
@@ -306,8 +343,8 @@ describe('WebSocket snapshot ordering', () => {
     gate.resolve([]);
     const baseline = await client.wait(message => message.type === 'agent_state');
     expect(baseline).toMatchObject({
-      sequence: cursor + 3,
-      state: {activity: {bashIds: ['bash-2'], dialogIds: []}}
+      sequence: cursor + 6,
+      state: {activity: {bash: [{id: 'bash-2'}], dialogs: []}}
     });
     const snapshot = client.messages.find(message => message.type === 'agent_snapshot');
     expect(snapshot).toMatchObject({
@@ -317,19 +354,15 @@ describe('WebSocket snapshot ordering', () => {
     expect(client.messages.map(message => message.type)).toEqual([
       'subscribed',
       'agent_snapshot',
-      'agent_event',
-      'agent_event',
-      'agent_event',
+      ...Array(6).fill('agent_event'),
       'agent_state'
     ]);
     expect(
       client.messages.filter(message => message.type === 'agent_event').map(message => message.sequence)
-    ).toEqual([cursor + 1, cursor + 2, cursor + 3]);
+    ).toEqual([1, 2, 3, 4, 5, 6].map(n => cursor + n));
     expect(agents.snapshotState(agent.agentId).activity).toEqual({
-      bashIds: ['bash-2'],
-      dialogIds: [],
-      dialogRequests: [],
-      queue: emptyQueue
+      ...idle,
+      bash: [{id: 'bash-2', since}]
     });
   });
 
@@ -358,12 +391,13 @@ describe('WebSocket snapshot ordering', () => {
     expect(client.messages[0].state).toBeUndefined();
     expect(client.messages.map(message => message.type)).toEqual([
       'subscribed',
-      'agent_event',
-      'agent_event',
+      ...Array(WORK_EVENTS).fill('agent_event'),
       'agent_state'
     ]);
     publish({type: 'extension_ui_response', requestId: 'dialog-1'});
-    expect((await client.wait(message => message.sequence === 3)).event.type).toBe('extension_ui_response');
+    expect((await client.wait(message => message.sequence === WORK_EVENTS + 1)).event.type).toBe(
+      'extension_ui_response'
+    );
   });
 
   it('does not deliver an old pending snapshot after a replacement subscription', async () => {
@@ -381,8 +415,8 @@ describe('WebSocket snapshot ordering', () => {
     expect(client.messages.some(message => message.type === 'agent_snapshot')).toBe(false);
     expect(client.messages.filter(message => message.type === 'agent_state')).toHaveLength(1);
     publish({type: 'bash_execution_end', id: 'bash-1'});
-    await client.wait(message => message.type === 'agent_event');
-    expect(client.messages.filter(message => message.type === 'agent_event')).toHaveLength(1);
+    await client.wait(message => message.event?.type === 'activity_changed');
+    expect(client.messages.filter(message => message.type === 'agent_event')).toHaveLength(2);
   });
 
   it('releases a failed subscription so it cannot block subscribe_all forwarding', async () => {

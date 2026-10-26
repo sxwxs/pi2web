@@ -36,9 +36,15 @@ describe('slash commands and session bash', () => {
     expect(result).toMatchObject({output: 'Mock bash: echo hi', exitCode: 0, cancelled: false});
     expect(events.map(event => event.type)).toEqual([
       'bash_execution_start',
+      'activity_changed',
       'bash_execution_update',
-      'bash_execution_end'
+      'bash_execution_end',
+      'activity_changed'
     ]);
+    expect((events[1] as any).activity.bash).toEqual([
+      {id: result.id, command: 'echo hi', since: expect.any(Number)}
+    ]);
+    expect((events[4] as any).activity.bash).toEqual([]);
     expect(events[0]).toMatchObject({id: result.id, command: 'echo hi'});
     expect(events.some(event => event.type === 'bash_execution_update' && event.id === result.id)).toBe(true);
     expect(events.some(event => event.type === 'bash_execution_end' && event.id === result.id)).toBe(true);

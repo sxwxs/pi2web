@@ -4,6 +4,7 @@ import {relative as pathRelative} from 'node:path';
 import type {WorkspaceStore} from './workspaces.js';
 import {createSdkBackend, type BackendOptions} from './sdk-backend.js';
 import type {AgentTemplateSnapshot} from './agent-templates.js';
+import {ActivityTracker, type Activity} from './activity.js';
 export type AgentState = {
   status:
     | 'unloaded'
@@ -82,9 +83,8 @@ export function slimEvent(event: AgentEvent): AgentEvent | undefined {
 /** Whether a steered or follow-up message reached the running turn or is waiting for it. */
 export type QueuedInputDisposition = 'handled' | 'queued';
 export type AgentQueue = {steering: string[]; followUp: string[]};
-export type AgentActivity = {
-  bashIds: string[];
-  dialogIds: string[];
+/** Live activity plus what clients need to rebuild dialog controls and the queue bar. */
+export type AgentActivity = Activity & {
   dialogRequests: AgentEvent[];
   queue: AgentQueue;
 };
@@ -304,7 +304,7 @@ type AgentEntry = {
   loading?: Promise<AgentBackend>;
   events: StoredEvent[];
   nextSequence: number;
-  bashIds: Set<string>;
+  activity: ActivityTracker;
   dialogRequests: Map<string, AgentEvent>;
   queue: AgentQueue;
   streaming?: boolean;
@@ -394,12 +394,8 @@ export class AgentManager {
       else if (type === 'agent_settled') entry.streaming = false;
       if (type === 'queue_update')
         entry.queue = {steering: toStringList(event.steering), followUp: toStringList(event.followUp)};
-      // Standalone shell runs and dialogs outlive LLM turns. Track them with the
-      // event cursor; keep dialog payloads so reconnecting clients can rebuild controls.
-      if (typeof event.id === 'string') {
-        if (type === 'bash_execution_start' || type === 'bash_execution_update') entry.bashIds.add(event.id);
-        else if (type === 'bash_execution_end') entry.bashIds.delete(event.id);
-      }
+      const activityChanged = entry.activity.apply(event);
+      // Keep dialog payloads so reconnecting clients can rebuild their controls.
       if (typeof event.requestId === 'string') {
         if (type === 'extension_ui_request') entry.dialogRequests.set(event.requestId, event);
         else if (type === 'extension_ui_response') entry.dialogRequests.delete(event.requestId);
@@ -410,7 +406,11 @@ export class AgentManager {
           typeof event.name === 'string' && event.name.trim() ? event.name.trim() : undefined;
       const slim = slimEvent(event);
       if (slim) this.publish(entry, slim);
+      if (activityChanged) this.publishActivity(entry);
     });
+  }
+  private publishActivity(entry: AgentEntry) {
+    this.publish(entry, {type: 'activity_changed', activity: entry.activity.snapshot()});
   }
   private publish(entry: AgentEntry, event: AgentEvent) {
     const record = entry.record;
@@ -434,7 +434,7 @@ export class AgentManager {
       backend,
       events: [],
       nextSequence: 1,
-      bashIds: new Set(),
+      activity: new ActivityTracker(),
       dialogRequests: new Map(),
       queue: emptyQueue()
     };
@@ -467,7 +467,7 @@ export class AgentManager {
           record,
           events: [],
           nextSequence: 1,
-          bashIds: new Set(),
+          activity: new ActivityTracker(),
           dialogRequests: new Map(),
           queue: emptyQueue()
         });
@@ -527,7 +527,10 @@ export class AgentManager {
     if (entry.record.status === 'stopped')
       throw Object.assign(new Error('Agent is not running'), {code: 'AGENT_NOT_RUNNING'});
     const backend = await this.ensureLoaded(id);
-    if (kind === 'abort') return backend.abort();
+    if (kind === 'abort') {
+      if (entry.activity.stopping()) this.publishActivity(entry);
+      return backend.abort();
+    }
     return backend[kind === 'follow-up' ? 'followUp' : kind](message);
   }
   /** Queued steering and follow-up messages waiting for the running turn. */
@@ -555,8 +558,7 @@ export class AgentManager {
     return {
       ...a.record,
       activity: {
-        bashIds: [...a.bashIds],
-        dialogIds: [...a.dialogRequests.keys()],
+        ...a.activity.snapshot(),
         dialogRequests: [...a.dialogRequests.values()],
         queue: {steering: [...a.queue.steering], followUp: [...a.queue.followUp]}
       }
@@ -595,8 +597,8 @@ export class AgentManager {
     a.backend = undefined;
     a.record.status = 'unloaded';
     a.streaming = false;
-    a.bashIds.clear();
     a.dialogRequests.clear();
+    a.activity.reset(); // agent_unloaded below tells clients the activity is gone.
     a.queue = emptyQueue();
     this.publish(a, {type: 'agent_unloaded'});
   }

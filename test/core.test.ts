@@ -210,8 +210,24 @@ describe('agent manager', () => {
     m.subscribeAll((agentId, e) => globalReceived.push({agentId, e}));
     await m.command(a.agentId, 'prompt', 'hello');
     expect((await m.state(a.agentId)).status).toBe('idle');
-    expect(received.map(x => x.sequence)).toEqual([1, 2, 3, 4, 5]);
-    expect(globalReceived.map(x => x.agentId)).toEqual(Array(5).fill(a.agentId));
+    expect(received.map(x => x.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    // Each activity change follows the event that caused it.
+    expect(received.map(x => x.event.type)).toEqual([
+      'agent_start',
+      'activity_changed',
+      'message_start',
+      'message_update',
+      'activity_changed',
+      'message_end',
+      'agent_end',
+      'activity_changed'
+    ]);
+    expect(received.map(x => x.event.activity?.phase.kind).filter(Boolean)).toEqual([
+      'waiting_llm',
+      'generating',
+      'idle'
+    ]);
+    expect(globalReceived.map(x => x.agentId)).toEqual(Array(8).fill(a.agentId));
     expect(received.every(x => Number.isInteger(x.timestamp) && x.timestamp > 0)).toBe(true);
     expect(await m.messages(a.agentId)).toHaveLength(1);
     for (let i = 0; i < 29; i++) await m.command(a.agentId, 'prompt', `message-${i}`);

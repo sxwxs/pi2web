@@ -4,6 +4,14 @@ import {runInNewContext} from 'node:vm';
 
 const source = readFileSync(new URL('../web/hid-keyboard.js', import.meta.url), 'utf8');
 const agent = {agentId: 'agent-a', status: 'idle'};
+// Server-maintained activity (src/activity.ts) as the controller receives it.
+const idleActivity = {run: null, phase: {kind: 'idle', since: 1}, bash: [], dialogs: []};
+const toolActivity = {
+  ...idleActivity,
+  run: {startedAt: 1},
+  phase: {kind: 'running_tools', since: 1, tools: [{toolCallId: 'tool', toolName: 'bash', since: 1}]}
+};
+const dialogActivity = {...idleActivity, dialogs: [{requestId: 'old-dialog', since: 1}]};
 
 /** Nozzala codex-full framing: bare JSON requests, LF-terminated replies. */
 class MockHidDevice {
@@ -253,7 +261,7 @@ describe('WebHID connection lifecycle', () => {
   it('waits for both close and the previous light sync before reopening the same device', async () => {
     const {keyboard, device, onStateChange} = setup();
     await connectKeyboard(keyboard);
-    keyboard.handleAgentEvent(agent.agentId, {type: 'tool_execution_start', toolCallId: 'tool'});
+    keyboard.setActivity(agent.agentId, toolActivity);
     await vi.advanceTimersByTimeAsync(0); // The reply arrived, but its cooldown is still running.
     const sent = device.sendReport.mock.calls.length;
     let finishClose!: () => void;
@@ -368,13 +376,13 @@ describe('WebHID connection lifecycle', () => {
 describe('light synchronization scheduling', () => {
   it('does not drop a snapshot correction after an unchanged cached pass', async () => {
     const {keyboard, device} = setup();
-    keyboard.handleAgentEvent(agent.agentId, {type: 'extension_ui_request', requestId: 'old-dialog'});
+    keyboard.setActivity(agent.agentId, dialogActivity);
     await connectKeyboard(keyboard);
     device.requests.length = 0;
     // This sequence previously ended the no-op worker, then joined its resolved
     // promise and lost the snapshot's request to send the idle light.
     keyboard.updateAgent(agent);
-    keyboard.setAgentSnapshot(agent);
+    keyboard.updateAgent({...agent, activity: idleActivity});
     await vi.runAllTimersAsync();
     expect(device.requests.map(request => request.p[0])).toEqual([
       {id: 0, c: 0xff3040, b: 1, e: 1, s: 0, sk: 0, sa: 0}
@@ -388,8 +396,8 @@ describe('light synchronization scheduling', () => {
     const {keyboard, device} = setup();
     await connectKeyboard(keyboard);
     device.requests.length = 0;
-    keyboard.handleAgentEvent(agent.agentId, {type: 'tool_execution_start', toolCallId: 'tool'});
-    keyboard.handleAgentEvent(agent.agentId, {type: 'agent_settled'});
+    keyboard.setActivity(agent.agentId, toolActivity);
+    keyboard.setActivity(agent.agentId, idleActivity);
     await vi.runAllTimersAsync();
     expect(device.requests).toEqual([]);
     expect(keyboard.syncPromise).toBeNull();
@@ -400,10 +408,10 @@ describe('light synchronization scheduling', () => {
     await connectKeyboard(keyboard);
     device.requests.length = 0;
     device.autoReply = false;
-    keyboard.handleAgentEvent(agent.agentId, {type: 'tool_execution_start', toolCallId: 'tool'});
+    keyboard.setActivity(agent.agentId, toolActivity);
     await vi.advanceTimersByTimeAsync(0);
     expect(device.requests[0].p[0].e).toBe(4);
-    keyboard.setAgentSnapshot(agent);
+    keyboard.updateAgent({...agent, activity: idleActivity});
     device.autoReply = true;
     device.reply(device.requests[0].id);
     await vi.runAllTimersAsync();
@@ -416,7 +424,7 @@ describe('light synchronization scheduling', () => {
     await connectKeyboard(keyboard);
     device.requests.length = 0;
     device.sendReport.mockRejectedValueOnce(Error('temporary send failure'));
-    keyboard.handleAgentEvent(agent.agentId, {type: 'tool_execution_start', toolCallId: 'tool'});
+    keyboard.setActivity(agent.agentId, toolActivity);
     await vi.runAllTimersAsync();
     expect(onError).toHaveBeenCalledOnce();
     expect(keyboard.syncPromise).toBeNull();
