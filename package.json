@@ -1,6 +1,6 @@
 {
   "name": "pi2web",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Secure remote web client server for Pi coding agent",
   "type": "module",
   "author": "sxwxs",
