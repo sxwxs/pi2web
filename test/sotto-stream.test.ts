@@ -38,7 +38,7 @@ describe('live browser dictation relay', () => {
         if (binary) socket.send(JSON.stringify({type: 'partial', segment: 0, text: '正在说'}));
         else if (JSON.parse(String(data)).type === 'stop') {
           socket.send(JSON.stringify({type: 'final', segment: 0, text: '说完了'}));
-          socket.close();
+          socket.close(1000);
         }
       });
     });
@@ -57,11 +57,26 @@ describe('live browser dictation relay', () => {
       const ready = message(browser);
       await once(browser, 'open');
       expect((await ready).type).toBe('ready');
-      browser.send(JSON.stringify({type: 'start', format: 'float32', sample_rate: 48000}));
-      browser.send(new Float32Array(4096));
-      expect(await message(browser)).toMatchObject({type: 'partial', text: '正在说'});
+      browser.send(JSON.stringify({type: 'start', format: 'float32', sample_rate: 16000}));
+      // More than 60 seconds of PCM must not hit a cumulative audio limit.
+      for (let i = 0; i < 120; i++) {
+        browser.send(new Float32Array(8192));
+        expect(await message(browser)).toMatchObject({type: 'partial', text: '正在说'});
+      }
+      const stopped = once(browser, 'close');
       browser.send(JSON.stringify({type: 'stop'}));
       expect(await message(browser)).toMatchObject({type: 'final', text: '说完了'});
+      expect((await stopped)[0]).toBe(1000);
+
+      // A ws parser error occurs before our message handler. It must not crash the backend.
+      browser = new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/agents/${agent.agentId}/transcribe/ws`);
+      const nextReady = message(browser);
+      await once(browser, 'open');
+      await nextReady;
+      const rejected = once(browser, 'close');
+      browser.send(Buffer.alloc(2 * 1024 * 1024 + 1));
+      expect((await rejected)[0]).toBe(1009);
+      expect((await fetch(base + '/api/v1/system/status')).status).toBe(200);
     } finally {
       browser?.terminate();
       await server.stop();

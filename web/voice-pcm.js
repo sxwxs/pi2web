@@ -4,8 +4,20 @@ class VoicePcmProcessor extends AudioWorkletProcessor {
     super();
     this.samples = new Float32Array(4096);
     this.offset = 0;
+    this.finished = false;
+    this.port.onmessage = event => {
+      if (event.data?.type !== 'flush' || this.finished) return;
+      this.finished = true;
+      if (this.offset) {
+        const tail = this.samples.slice(0, this.offset).buffer;
+        this.port.postMessage(tail, [tail]);
+        this.offset = 0;
+      }
+      this.port.postMessage({type: 'flushed'});
+    };
   }
   process(inputs) {
+    if (this.finished) return false;
     const channels = inputs[0];
     if (!channels?.length) return true;
     for (let i = 0; i < channels[0].length; i++) {

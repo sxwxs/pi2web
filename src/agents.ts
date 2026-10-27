@@ -552,11 +552,16 @@ export class AgentManager {
     if (entry.templateChanging)
       throw Object.assign(new Error('System Prompt is being changed'), {code: 'SESSION_BUSY'});
     const backend = await this.ensureLoaded(id);
+    const state = kind === 'abort' ? undefined : await backend.getState();
+    // Loading/state reads can yield to another command or a session replacement. From this
+    // check through reserving the first prompt, use live state without yielding again.
+    if (entry.templateChanging || entry.backend !== backend || this.agents.get(id) !== entry)
+      throw Object.assign(new Error('Agent session changed; retry the command'), {code: 'SESSION_BUSY'});
     if (kind === 'abort') {
       if (entry.activity.stopping()) this.publishActivity(entry);
       return backend.abort();
     }
-    const busy = entry.promptPending || entry.streaming || (await backend.getState()).status === 'streaming';
+    const busy = entry.promptPending || entry.streaming || state?.status === 'streaming';
     const effective = busy ? (kind === 'prompt' ? 'follow-up' : kind) : 'prompt';
     if (effective === 'prompt') entry.promptPending = true;
     try {

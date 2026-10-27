@@ -1,4 +1,4 @@
-import {describe, it, expect} from 'vitest';
+import {describe, it, expect, vi} from 'vitest';
 import http from 'node:http';
 import {mkdtemp} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -6,10 +6,38 @@ import path from 'node:path';
 import {RemotePiServer} from '../src/server.js';
 import {WorkspaceStore} from '../src/workspaces.js';
 import {AgentManager, MockBackend} from '../src/agents.js';
+import {SottoSttService} from '../src/sotto-stt.js';
+import type {MetadataStore} from '../src/metadata-store.js';
 
 const temp = (prefix: string) => mkdtemp(path.join(tmpdir(), prefix));
 
 describe('local Sotto STT configuration and proxy', () => {
+  it('probes candidates without publishing them or rolling back another successful save', async () => {
+    let reject!: (error: Error) => void;
+    const slow = new Promise<Response>((_resolve, r) => {reject = r;});
+    const setSetting = vi.fn();
+    const fetcher = vi.fn((url: any) => String(url).includes(':20000/') ? slow : Promise.resolve(new Response(JSON.stringify({
+      stt: true, format: 'pcm-f32le', sample_rate: 16000, stream_port: 30002
+    }))));
+    const service = new SottoSttService({setSetting} as unknown as MetadataStore, fetcher);
+    const original = service.getSettings();
+    const pending = service.update({enabled: true, endpoint: 'http://127.0.0.1:20000'}).catch(error => error);
+    expect(service.getSettings()).toEqual(original);
+    expect(setSetting).not.toHaveBeenCalled();
+    const saved = await service.update({enabled: true, endpoint: 'http://127.0.0.1:30000'});
+    reject(new Error('probe failed'));
+    expect((await pending).code).toBe('SOTTO_UNAVAILABLE');
+    expect(service.getSettings()).toEqual(saved);
+    expect(setSetting).toHaveBeenCalledExactlyOnceWith('sottoStt', saved);
+  });
+
+  it('does not publish settings if persistence fails', async () => {
+    const service = new SottoSttService({setSetting: () => {throw Error('disk full');}} as unknown as MetadataStore);
+    const original = service.getSettings();
+    await expect(service.update({enabled: false, endpoint: 'http://127.0.0.1:20000'})).rejects.toThrow('disk full');
+    expect(service.getSettings()).toEqual(original);
+  });
+
   it('denies the restricted Sotto draft token access to STT configuration', async () => {
     const server = new RemotePiServer({port: 0, dataDir: await temp('pi2web-sotto-auth-')});
     const {token} = await server.auth.init();

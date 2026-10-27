@@ -341,6 +341,11 @@
     }
   }
 
+  function applyVoiceStatus(backend, statusInfo) {
+    backend.statusInfo = statusInfo;
+    backend.voiceEnabled = Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled);
+    backend.voiceSttEnabled = Boolean(statusInfo.voiceCapabilities?.stt ?? statusInfo.voiceEnabled);
+  }
   function updateVoiceAvailability() {
     const backends = connectedBackends();
     state.voiceEnabled = backends.some(backend => backend.voiceEnabled);
@@ -391,11 +396,9 @@
       statusInfo,
       authRequired,
       serverInfo: `v${statusInfo.version} · Pi ${statusInfo.piVersion}`,
-      reconnectAttempt: 0,
-      voiceEnabled: Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled),
-      voiceServerSttEnabled: Boolean(statusInfo.voiceEnabled && statusInfo.voiceCapabilities?.stt),
-      voiceSttEnabled: Boolean(statusInfo.voiceCapabilities?.stt ?? statusInfo.voiceEnabled)
+      reconnectAttempt: 0
     });
+    applyVoiceStatus(backend, statusInfo);
 
     try {
       await refreshBackendData(backend);
@@ -2358,124 +2361,137 @@
     input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
     voice.inserted = text;
   }
-  function finishSottoStream(voice, abort = false) {
+  function finishSottoStream(voice, abort = false, reason = '') {
     if (state.voiceStream !== voice) return;
     state.voiceStream = null;
     clearTimeout(voice.timer);
-    voice.stream.getTracks().forEach(track => track.stop());
+    voice.stream?.getTracks().forEach(track => { track.onended = null; track.stop(); });
     voice.node?.disconnect();
     voice.source?.disconnect();
     voice.sink?.disconnect();
-    voice.node && (voice.node.onaudioprocess = null);
-    void voice.context.close().catch(() => {});
-    if (voice.socket.readyState === WebSocket.OPEN || voice.socket.readyState === WebSocket.CONNECTING)
+    if (voice.node?.port) voice.node.port.onmessage = null;
+    if (voice.node) voice.node.onaudioprocess = null;
+    if (voice.context) void voice.context.close().catch(() => {});
+    if (voice.socket?.readyState === WebSocket.OPEN || voice.socket?.readyState === WebSocket.CONNECTING)
       voice.socket.close();
     $('voiceInput').disabled = false;
     $('voiceInput').classList.remove('recording');
     $('voiceInput').textContent = '🎙';
     $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
     if (abort && voice.partial && voice.input.value.slice(voice.at, voice.at + voice.inserted.length) === voice.inserted) {
-      voice.partial = '';
-      updateSottoDraftAfterAbort(voice);
+      const text = [...voice.finals.values()].filter(Boolean).join(' ');
+      voice.input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
     }
+    if (reason) toast(reason);
   }
-  function updateSottoDraftAfterAbort(voice) {
-    const text = [...voice.finals.values()].filter(Boolean).join(' ');
-    voice.input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
+  function finishSottoAudio(voice) {
+    if (state.voiceStream !== voice || voice.phase !== 'draining') return;
+    if (voice.socket.readyState !== WebSocket.OPEN)
+      return finishSottoStream(voice, true, '语音连接已断开，无法完成识别');
+    voice.phase = 'finishing';
+    voice.node?.disconnect();
+    voice.socket.send(JSON.stringify({type: 'stop'}));
+    clearTimeout(voice.timer);
+    voice.timer = setTimeout(() => finishSottoStream(voice, true, '等待语音识别结果超时'), 12000);
   }
   function stopSottoStream(voice) {
-    if (voice.stopping) return;
-    voice.stopping = true;
-    clearTimeout(voice.timer);
-    voice.stream.getTracks().forEach(track => track.stop());
-    voice.node?.disconnect();
+    if (state.voiceStream !== voice) return;
+    if (voice.phase === 'starting') return finishSottoStream(voice, true);
+    if (voice.phase !== 'recording') return;
+    voice.phase = 'draining';
+    voice.source?.disconnect();
+    voice.stream.getTracks().forEach(track => { track.onended = null; track.stop(); });
     $('voiceInput').classList.remove('recording');
     $('voiceInput').textContent = '…';
     $('voiceInput').disabled = true;
-    if (voice.socket.readyState === WebSocket.OPEN) voice.socket.send(JSON.stringify({type: 'stop'}));
-    else { finishSottoStream(voice, true); return; }
-    voice.timer = setTimeout(() => {
-      if (state.voiceStream === voice) { finishSottoStream(voice, true); toast('语音识别超时'); }
-    }, 12000);
+    // Keep accepting queued PCM until the worklet confirms that its final buffer was sent.
+    if (voice.node?.port) {
+      voice.timer = setTimeout(() => finishSottoStream(voice, true, '麦克风尾部音频处理超时'), 3000);
+      voice.node.port.postMessage({type: 'flush'});
+    } else finishSottoAudio(voice);
   }
   function sendSottoPcm(voice, pcm) {
-    if (state.voiceStream !== voice || voice.stopping) return;
-    if (voice.socket.readyState !== WebSocket.OPEN || voice.socket.bufferedAmount >= 500000) {
-      finishSottoStream(voice, true);
-      toast('实时语音服务处理不过来，已停止以避免丢失音频');
-      return;
-    }
+    if (state.voiceStream !== voice || !['recording', 'draining'].includes(voice.phase)) return;
+    if (voice.socket.readyState !== WebSocket.OPEN || voice.socket.bufferedAmount >= 500000)
+      return finishSottoStream(voice, true, '实时语音连接中断或处理不过来，录音已停止');
     voice.socket.send(pcm);
   }
   async function startSottoStream() {
+    if (state.voiceStream) return;
     if (!navigator.mediaDevices?.getUserMedia) return toast('当前浏览器不支持麦克风录音');
     const Audio = window.AudioContext || window.webkitAudioContext;
     if (!Audio) return toast('当前浏览器不支持实时音频采集');
-    const agentId = state.agent.agentId;
-    let stream, context;
+    const agentId = state.agent.agentId, input = $('input');
+    // One owner from permission acquisition through final result. Cancelling invalidates pending awaits.
+    const voice = {agentId, input, at: input.selectionStart, inserted: '', finals: new Map(), partial: '',
+      phase: 'starting', stream: null, context: null, socket: null, timer: null, node: null, source: null, sink: null};
+    state.voiceStream = voice;
+    $('voiceInput').textContent = '…';
+    $('voiceInput').title = '正在启动语音输入，点击取消';
     try {
-      stream = await navigator.mediaDevices.getUserMedia({audio: true});
-      context = new Audio();
+      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      if (state.voiceStream !== voice) { stream.getTracks().forEach(track => track.stop()); return; }
+      voice.stream = stream;
+      stream.getTracks().forEach(track => {
+        track.onended = () => finishSottoStream(voice, true, '麦克风已断开或录音权限被撤销');
+      });
+      const context = voice.context = new Audio();
+      voice.timer = setTimeout(() => finishSottoStream(voice, true, '启动实时语音服务超时'), 30000);
       if (context.audioWorklet && window.AudioWorkletNode) await context.audioWorklet.addModule('/voice-pcm.js');
+      if (state.voiceStream !== voice) return;
       if (state.agent?.agentId !== agentId) throw Error('会话已切换');
       const backend = backendOf(state.agent.backendId);
       const {remoteId} = splitResourceKey(agentId);
       const url = backend.base.replace(/^http/, 'ws') + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe/ws`;
-      const socket = new WebSocket(url, ['access-token.' + backend.token]);
-      const input = $('input');
-      const voice = {agentId, input, at: input.selectionStart, inserted: '', finals: new Map(), partial: '',
-        stream, context, socket, stopping: false, timer: null, node: null, source: null, sink: null};
-      state.voiceStream = voice;
+      const socket = voice.socket = new WebSocket(url, ['access-token.' + backend.token]);
       socket.onmessage = event => {
         if (state.voiceStream !== voice) return;
         let msg;
         try { msg = JSON.parse(event.data); } catch { return; }
         if (msg.type === 'ready') {
-          if (voice.stopping) return;
-          socket.send(JSON.stringify({type: 'start', sample_rate: context.sampleRate, format: 'float32'}));
-          voice.source = context.createMediaStreamSource(stream);
-          voice.sink = context.createGain();
-          voice.sink.gain.value = 0;
-          if (context.audioWorklet && window.AudioWorkletNode) {
-            voice.node = new AudioWorkletNode(context, 'voice-pcm');
-            voice.node.port.onmessage = e => sendSottoPcm(voice, e.data);
-          } else {
-            voice.node = context.createScriptProcessor(4096, 1, 1);
-            voice.node.onaudioprocess = e => sendSottoPcm(voice, new Float32Array(e.inputBuffer.getChannelData(0)).buffer);
-          }
-          voice.source.connect(voice.node);
-          voice.node.connect(voice.sink);
-          voice.sink.connect(context.destination);
-          void context.resume();
-          $('voiceInput').textContent = '■';
-          $('voiceInput').title = '停止语音输入';
-          $('voiceInput').classList.add('recording');
-          voice.timer = setTimeout(() => stopSottoStream(voice), 58000);
-        } else if (msg.type === 'partial' && !voice.stopping) {
+          if (voice.phase !== 'starting') return;
+          try {
+            socket.send(JSON.stringify({type: 'start', sample_rate: context.sampleRate, format: 'float32'}));
+            voice.source = context.createMediaStreamSource(stream);
+            voice.sink = context.createGain();
+            voice.sink.gain.value = 0;
+            if (context.audioWorklet && window.AudioWorkletNode) {
+              voice.node = new AudioWorkletNode(context, 'voice-pcm');
+              voice.node.port.onmessage = e => e.data?.type === 'flushed'
+                ? finishSottoAudio(voice) : sendSottoPcm(voice, e.data);
+            } else {
+              voice.node = context.createScriptProcessor(4096, 1, 1);
+              voice.node.onaudioprocess = e => sendSottoPcm(voice, new Float32Array(e.inputBuffer.getChannelData(0)).buffer);
+            }
+            voice.phase = 'recording';
+            voice.source.connect(voice.node);
+            voice.node.connect(voice.sink);
+            voice.sink.connect(context.destination);
+            void context.resume().catch(error => finishSottoStream(voice, true, `无法启动麦克风：${error.message}`));
+            clearTimeout(voice.timer);
+            $('voiceInput').textContent = '■';
+            $('voiceInput').title = '正在录音，点击停止（停顿不会结束录音）';
+            $('voiceInput').classList.add('recording');
+          } catch (error) { finishSottoStream(voice, true, `无法采集音频：${error.message}`); }
+        } else if (msg.type === 'partial' && voice.phase === 'recording') {
           voice.partial = String(msg.text || '');
           updateSottoDraft(voice);
         } else if (msg.type === 'final') {
+          // A final ends one sentence, not the recording. Only the user's stop ends capture.
           voice.finals.set(msg.segment, String(msg.text || ''));
           voice.partial = '';
           updateSottoDraft(voice);
         } else if (msg.type === 'error') {
-          toast(`Sotto 语音识别：${msg.message || '未知错误'}`);
-          finishSottoStream(voice, true);
+          finishSottoStream(voice, true, `Sotto 语音识别：${msg.message || '未知错误'}`);
         }
       };
-      socket.onerror = () => { if (state.voiceStream === voice) toast('无法连接 Sotto 实时语音服务'); };
-      socket.onclose = () => {
-        if (state.voiceStream === voice) {
-          if (!voice.stopping) toast('实时语音连接已断开');
-          finishSottoStream(voice, !voice.stopping);
-        }
+      socket.onerror = () => finishSottoStream(voice, true, '无法连接 Sotto 实时语音服务');
+      socket.onclose = event => {
+        const expected = voice.phase === 'finishing' && event.code === 1000;
+        finishSottoStream(voice, !expected, expected ? '' : `实时语音连接意外断开（${event.code}）`);
       };
-      $('voiceInput').textContent = '…';
-      $('voiceInput').title = '连接 Sotto 实时语音服务…';
     } catch (error) {
-      stream?.getTracks().forEach(track => track.stop());
-      if (context) await context.close().catch(() => {});
-      toast(`无法开始语音输入：${error.message}`);
+      finishSottoStream(voice, true, `无法开始语音输入：${error.message}`);
     }
   }
   async function toggleVoiceInput() {
@@ -2992,13 +3008,9 @@
       const settings = await requestBackend(backendId, '/api/v1/sotto-stt', {
         method: 'PUT', body: JSON.stringify({enabled: $('sottoEnabled').checked, endpoint: $('sottoEndpoint').value.trim()})
       });
+      const statusInfo = await requestBackend(backendId, '/api/v1/system/status');
       const backend = backendOf(backendId);
-      if (backend) {
-        backend.statusInfo.sottoStt = settings;
-        backend.statusInfo.voiceCapabilities ??= {tts: false, stt: false};
-        backend.statusInfo.voiceCapabilities.stt = Boolean(settings.enabled || backend.voiceServerSttEnabled);
-        backend.voiceSttEnabled = backend.statusInfo.voiceCapabilities.stt;
-      }
+      if (backend) applyVoiceStatus(backend, statusInfo);
       updateVoiceAvailability();
       $('sottoSettingsStatus').textContent = settings.enabled
         ? 'Sotto 已连通；输入框旁的麦克风可用，转写使用 Sotto 的同一个 ASR 实例。'
@@ -4039,7 +4051,7 @@
   $('input').onkeydown = event => {
     if (event.altKey && event.shiftKey && event.key.toLowerCase() === 'v' && !event.isComposing) {
       event.preventDefault();
-      void toggleVoiceInput();
+      if (!event.repeat) void toggleVoiceInput();
       return;
     }
     if (!$('commandPicker').hidden) {
