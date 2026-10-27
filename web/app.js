@@ -258,6 +258,7 @@
     state.mediaChunks = [];
     state.mediaAgentId = null;
     $('voiceInput').textContent = '🎙';
+    $('voiceInput').disabled = false;
     $('voiceInput').classList.remove('recording');
   }
 
@@ -339,7 +340,10 @@
     state.voiceEnabled = backends.some(backend => backend.voiceEnabled);
     state.voiceSttEnabled = backends.some(backend => backend.voiceSttEnabled);
     $('voicePlayback').hidden = !state.voiceEnabled;
-    $('voiceInput').hidden = !state.voiceSttEnabled;
+    $('voiceInput').hidden = false;
+    $('voiceInput').title = state.voiceSttEnabled
+      ? '开始语音输入（输入框内 Alt+Shift+V）'
+      : '需在 Backend 配置语音识别服务（--voice-stt-model）';
     if (!state.voiceEnabled) stopVoiceAudio();
     updateVoiceButton();
   }
@@ -1253,6 +1257,12 @@
     sessionKeyboard.updateAgent(agent);
     renderAgentList();
     updateAgentHeader();
+    if (state.agent?.agentId === agentId) {
+      const picker = $('sendMode');
+      if (status === 'streaming' || status === 'waiting_for_user') {
+        if (picker.value === 'prompt') picker.value = 'follow-up';
+      } else picker.value = 'prompt';
+    }
     return agent;
   }
   function updateAgentHeader(agent = state.agent) {
@@ -1490,23 +1500,9 @@
   }
   const autoBindNewSession = agent => sessionKeyboard.autoBind(agent.agentId);
   async function startAgent(relativePath) {
-    if (!state.workspace) return toast('请先选择 Workspace');
     $('contextMenu').hidden = true;
-    try {
-      const backendId = state.workspace.backendId;
-      const created = await postBackend(backendId, '/api/v1/agents', {
-        workspaceId: state.workspace.id,
-        relativeCwd: relativePath
-      });
-      const agent = stampNewItem(backendId, created);
-      const binding = autoBindNewSession(agent);
-      $('agentCwd').value = relativePath;
-      await refreshAgents();
-      await selectAgent(agent);
-      if (binding) toast(`新 Session 已自动绑定到按键 ${binding.slot + 1}`);
-    } catch (error) {
-      toast(error.message);
-    }
+    $('agentCwd').value = relativePath;
+    await createAgent();
   }
   async function openTerminal(relativePath) {
     if (!state.workspace) return toast('请先选择 Workspace');
@@ -1550,6 +1546,8 @@
     localStorage.rpSelectedKind = 'agent';
     showAgentView();
     updateAgentHeader();
+    $('sendMode').value = agent.status === 'streaming' || agent.status === 'waiting_for_user'
+      ? 'follow-up' : 'prompt';
     if (openView) navigateMobile('agent');
     void syncWorkspaceForSelection(agent);
     if (ownsPath(state.workspace, agent))
@@ -2188,6 +2186,7 @@
       bar = $('queueBar');
     if (!queue) {
       bar.hidden = true;
+      $('queueItems').replaceChildren();
       return;
     }
     const parts = [];
@@ -2196,6 +2195,32 @@
     const preview = [...queue.steering, ...queue.followUp][0] || '';
     $('queueText').textContent =
       `排队中：${parts.join(' · ')}${preview ? ` — ${preview.replace(/\s+/g, ' ').slice(0, 60)}` : ''}`;
+    const items = $('queueItems');
+    items.replaceChildren();
+    for (const [from, label, target] of [['steering', 'Steer', 'Follow-up'], ['followUp', 'Follow-up', 'Steer']]) {
+      queue[from].forEach((text, index) => {
+        const row = document.createElement('div');
+        row.className = 'queue-item';
+        const preview = document.createElement('span');
+        preview.textContent = `${label}: ${text}`;
+        preview.title = text;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = `改为 ${target}`;
+        button.onclick = async () => {
+          const agentId = state.agent.agentId;
+          button.disabled = true;
+          try {
+            await postAgent(agentId, '/queue/move', {from, index, expected: text});
+          } catch (error) {
+            toast(`切换失败：${error.message}`);
+            try { setAgentQueue(agentId, await requestAgent(agentId, '/queue')); } catch {}
+          } finally { button.disabled = false; }
+        };
+        row.append(preview, button);
+        items.append(row);
+      });
+    }
     bar.hidden = false;
   }
   function restoreExtensionRequests(agentId, activity) {
@@ -2314,10 +2339,14 @@
     } else stopVoiceAudio();
   }
   async function toggleVoiceInput() {
+    if ($('voiceInput').disabled) return;
     if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
     if (!state.agent) return toast('请先选择 Agent');
-    if (state.mediaRecorder && state.mediaRecorder.state === 'recording') {
-      state.mediaRecorder.stop();
+    if (state.mediaRecorder) {
+      if (state.mediaRecorder.state === 'recording') {
+        $('voiceInput').disabled = true;
+        state.mediaRecorder.stop();
+      }
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder)
@@ -2344,6 +2373,12 @@
         60000
       );
     } catch (error) {
+      state.mediaStream?.getTracks().forEach(track => track.stop());
+      state.mediaStream = null;
+      state.mediaRecorder = null;
+      state.mediaChunks = [];
+      state.mediaAgentId = null;
+      $('voiceInput').disabled = false;
       toast(`无法录音：${error.message}`);
     }
   }
@@ -2359,15 +2394,18 @@
     state.mediaChunks = [];
     state.mediaAgentId = null;
     $('voiceInput').textContent = '…';
+    $('voiceInput').disabled = true;
     $('voiceInput').classList.remove('recording');
     if (!agentId) {
       $('voiceInput').textContent = '🎙';
+      $('voiceInput').disabled = false;
       return;
     }
     const {backendId, remoteId} = splitResourceKey(agentId),
       transcribeBackend = backendOf(backendId);
     if (!transcribeBackend) {
       $('voiceInput').textContent = '🎙';
+      $('voiceInput').disabled = false;
       return toast('该 Session 的 backend 已断开');
     }
     try {
@@ -2397,7 +2435,8 @@
       toast(`语音识别失败：${error.message}`);
     } finally {
       $('voiceInput').textContent = '🎙';
-      $('voiceInput').title = '开始语音输入';
+      $('voiceInput').disabled = false;
+      $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
     }
   }
   const handledDrafts = new Set();
@@ -2931,6 +2970,7 @@
     const workspace = state.workspace;
     if (!workspace) return toast('请先选择 Workspace');
     const cwd = $('agentCwd').value.trim() || '.';
+    const preferenceKey = `rpLastTemplate:${workspace.backendId}`;
     let sessions,
       templates = [];
     try {
@@ -2965,6 +3005,12 @@
         l.append(s);
         body.append(l);
         const t = templateSelect(body, templates);
+        const preferred = globalThis.localStorage?.getItem(preferenceKey);
+        if (preferred && [...t.options].some(option => option.value === preferred)) t.value = preferred;
+        else if (preferred) {
+          globalThis.localStorage?.removeItem(preferenceKey);
+          toast('上次使用的 System Prompt 模板已删除，改用 Pi 默认');
+        }
         const preview = promptPreviewBox(body, () => ({
           backendId: workspace.backendId,
           workspaceId: workspace.id,
@@ -2989,6 +3035,7 @@
         sessionFile: result.sessionFile,
         templateId: result.templateId
       });
+      localStorage.setItem(preferenceKey, result.templateId || '');
       const agent = stampNewItem(workspace.backendId, created);
       const binding = result.sessionFile ? null : autoBindNewSession(agent);
       await refreshAgents();
@@ -3113,6 +3160,27 @@
       },
       '关闭'
     );
+  }
+  async function switchAgentPrompt() {
+    const agent = state.agent;
+    if (!agent) return toast('请先选择 Agent');
+    const [session, catalog] = await Promise.all([
+      requestAgent(agent.agentId, '/session'),
+      requestBackend(agent.backendId, '/api/v1/agent-templates')
+    ]);
+    if (agent.profile !== 'default' || session.entries?.some(entry => entry.type === 'message'))
+      return toast('会话开始后不能切换 System Prompt，请新建会话');
+    const choice = await modal('切换 System Prompt（仅首次对话前）', body => {
+      const picker = templateSelect(body, catalog.templates || []);
+      picker.value = agent.template?.id || '';
+      return () => picker.value;
+    }, '切换');
+    if (choice === null) return;
+    await postAgent(agent.agentId, '/system-prompt', {templateId: choice});
+    localStorage.setItem(`rpLastTemplate:${agent.backendId}`, choice);
+    agent.template = (catalog.templates || []).find(item => item.id === choice) || undefined;
+    await refreshAgents(true);
+    toast('System Prompt 已切换');
   }
   /** Manage Pi's global prompt files and the shareable Agent templates of one backend. */
   async function systemPromptManager() {
@@ -3713,6 +3781,7 @@
   };
   $('mcp').onclick = () => mcpControls().catch(e => toast(e.message));
   $('systemPrompt').onclick = () => showAgentSystemPrompt().catch(e => toast(e.message));
+  $('switchPrompt').onclick = () => switchAgentPrompt().catch(e => toast(e.message));
   $('openSystemPrompts').onclick = () => systemPromptManager().catch(e => toast(e.message));
   $('sessionTree').onclick = () => showSessionTree().catch(e => toast(e.message));
   $('undo').onclick = () => revert().catch(e => toast(e.message));
@@ -3738,7 +3807,9 @@
     const text = $('input').value.trim();
     if (!text) return;
     closeCommandPicker();
-    const mode = $('sendMode').value,
+    const selectedMode = $('sendMode').value,
+      mode = state.agent.status === 'streaming' || state.agent.status === 'waiting_for_user'
+        ? (selectedMode === 'steer' ? 'steer' : 'follow-up') : 'prompt',
       agentId = state.agent.agentId;
     $('messages').querySelector('.empty')?.remove();
     // `!cmd` runs inside the Agent session (output is recorded in the Session); `!!cmd` keeps the output out of the model context.
@@ -3763,10 +3834,16 @@
       if (mode !== 'prompt' && sent?.disposition)
         toast(sent.disposition === 'queued' ? '已排队，等待当前回合' : '已送达当前回合');
     } catch (e) {
+      $('input').value = text + ($('input').value ? `\n${$('input').value}` : '');
       addCard('发送失败', e.message, 'error', true);
     }
   };
   $('input').onkeydown = event => {
+    if (event.altKey && event.shiftKey && event.key.toLowerCase() === 'v' && !event.isComposing) {
+      event.preventDefault();
+      void toggleVoiceInput();
+      return;
+    }
     if (!$('commandPicker').hidden) {
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault();

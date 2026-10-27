@@ -103,6 +103,7 @@ export interface AgentBackend {
   followUp(message: string): Promise<QueuedInputDisposition>;
   getQueue(): Promise<AgentQueue>;
   clearQueue(): Promise<AgentQueue>;
+  moveQueue(from: keyof AgentQueue, index: number, expected: string): Promise<AgentQueue>;
   abort(): Promise<void>;
   getState(): Promise<AgentState>;
   /** The session's current branch, for the timeline. Must be cheap when the leaf has not moved. */
@@ -200,6 +201,15 @@ export class MockBackend implements AgentBackend {
     this.queue = {steering: [], followUp: []};
     this.emitQueue();
     return cleared;
+  }
+  async moveQueue(from: keyof AgentQueue, index: number, expected: string) {
+    if (this.state.status !== 'streaming' || this.queue[from][index] !== expected)
+      throw Object.assign(new Error('Queued message has changed or already been consumed'), {code: 'QUEUE_CHANGED'});
+    const to = from === 'steering' ? 'followUp' : 'steering';
+    this.queue[from].splice(index, 1);
+    this.queue[to].push(expected);
+    this.emitQueue();
+    return this.getQueue();
   }
   private emitQueue() {
     this.emit({type: 'queue_update', steering: [...this.queue.steering], followUp: [...this.queue.followUp]});
@@ -318,6 +328,8 @@ type AgentEntry = {
   dialogRequests: Map<string, AgentEvent>;
   queue: AgentQueue;
   streaming?: boolean;
+  promptPending?: boolean;
+  templateChanging?: boolean;
 };
 const toStringList = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
@@ -537,12 +549,21 @@ export class AgentManager {
     if (kind === 'abort' && !entry.backend) return;
     if (entry.record.status === 'stopped')
       throw Object.assign(new Error('Agent is not running'), {code: 'AGENT_NOT_RUNNING'});
+    if (entry.templateChanging)
+      throw Object.assign(new Error('System Prompt is being changed'), {code: 'SESSION_BUSY'});
     const backend = await this.ensureLoaded(id);
     if (kind === 'abort') {
       if (entry.activity.stopping()) this.publishActivity(entry);
       return backend.abort();
     }
-    return backend[kind === 'follow-up' ? 'followUp' : kind](message);
+    const busy = entry.promptPending || entry.streaming || (await backend.getState()).status === 'streaming';
+    const effective = busy ? (kind === 'prompt' ? 'follow-up' : kind) : 'prompt';
+    if (effective === 'prompt') entry.promptPending = true;
+    try {
+      return await backend[effective === 'follow-up' ? 'followUp' : effective](message);
+    } finally {
+      if (effective === 'prompt') entry.promptPending = false;
+    }
   }
   /** Queued steering and follow-up messages waiting for the running turn. */
   // Both read through to the backend and leave the cache to `queue_update`, which stays correct when a
@@ -557,6 +578,10 @@ export class AgentManager {
   async clearQueue(id: string) {
     const entry = this.get(id);
     return entry.backend ? entry.backend.clearQueue() : emptyQueue();
+  }
+  async moveQueue(id: string, from: keyof AgentQueue, index: number, expected: string) {
+    const backend = await this.ensureLoaded(id);
+    return backend.moveQueue(from, index, expected);
   }
   snapshotState(id: string): AgentSnapshotState {
     const a = this.get(id);
@@ -645,6 +670,41 @@ export class AgentManager {
   async systemPrompt(id: string) {
     const info = await (await this.ensureLoaded(id)).getSystemPrompt();
     return {...info, template: this.get(id).record.template ?? null};
+  }
+  /** Replace the disposable, still-empty session. Never rewrite a conversation's system prompt. */
+  async setTemplate(id: string, template?: AgentTemplateSnapshot) {
+    const entry = this.get(id);
+    if (entry.record.profile !== 'default' || entry.record.status === 'stopped' || entry.streaming || entry.promptPending)
+      throw Object.assign(new Error('System Prompt can only change before the first turn'), {code: 'SESSION_STARTED'});
+    if (entry.templateChanging) throw Object.assign(new Error('System Prompt is being changed'), {code: 'SESSION_BUSY'});
+    entry.templateChanging = true;
+    try {
+      const old = await this.ensureLoaded(id);
+      const session = await old.getSession();
+      if ((session.entries as any[]).some(x => x.type === 'message'))
+        throw Object.assign(new Error('This session already has messages'), {code: 'SESSION_STARTED'});
+      const capabilities = await old.getCapabilities();
+      const replacement = await this.factory(
+        id, entry.record.cwd, entry.record.sessionFile, entry.record.profile, template ? {template} : {}
+      );
+      try {
+        const model = capabilities.model as {provider?: string; id?: string} | undefined;
+        if (model?.provider && model?.id) await replacement.setModel(model.provider, model.id);
+        if (typeof capabilities.thinkingLevel === 'string') await replacement.setThinkingLevel(capabilities.thinkingLevel);
+        if (entry.record.sessionName) await replacement.setSessionName(entry.record.sessionName);
+        const state = await replacement.getState();
+        entry.record = {...entry.record, ...state, template};
+        this.connect(entry, replacement);
+        await old.dispose().catch(() => {});
+        this.publish(entry, {type: 'agent_loaded'});
+        return entry.record;
+      } catch (error) {
+        await replacement.dispose();
+        throw error;
+      }
+    } finally {
+      entry.templateChanging = false;
+    }
   }
   async capabilities(id: string) {
     return (await this.ensureLoaded(id)).getCapabilities();

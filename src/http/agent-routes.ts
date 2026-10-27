@@ -127,6 +127,15 @@ export async function handleAgentRoutes(
     }
     if (req.method === 'GET' && parts[4] === 'system-prompt')
       return send(200, {data: await ctx.agents.systemPrompt(id)});
+    if (req.method === 'POST' && parts[4] === 'system-prompt') {
+      const b = await ctx.body();
+      if (b.templateId !== undefined && typeof b.templateId !== 'string')
+        throw Object.assign(new Error('templateId must be a string'), {code: 'INVALID_REQUEST'});
+      const template = b.templateId ? ctx.templates.snapshot(b.templateId) : undefined;
+      const record = await ctx.agents.setTemplate(id, template);
+      ctx.metadata.saveAgent(record);
+      return send(200, {data: {template: record.template ?? null}});
+    }
     if (req.method === 'GET' && parts[4] === 'capabilities')
       return send(200, {data: await ctx.agents.capabilities(id)});
     if (req.method === 'GET' && parts[4] === 'session')
@@ -190,6 +199,12 @@ export async function handleAgentRoutes(
     if (parts[4] === 'queue') {
       if (req.method === 'GET') return send(200, {data: await ctx.agents.queue(id)});
       if (req.method === 'DELETE') return send(200, {data: await ctx.agents.clearQueue(id)});
+      if (req.method === 'POST' && parts[5] === 'move') {
+        const {from, index, expected} = await ctx.body();
+        if ((from !== 'steering' && from !== 'followUp') || !Number.isSafeInteger(index) || index < 0 || typeof expected !== 'string')
+          throw Object.assign(new Error('from, index and expected are required'), {code: 'INVALID_REQUEST'});
+        return send(200, {data: await ctx.agents.moveQueue(id, from, index, expected)});
+      }
     }
     if (parts[4] === 'mcp') {
       const cwd = ctx.agents.get(id).record.cwd;
