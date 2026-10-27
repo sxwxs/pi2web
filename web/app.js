@@ -2839,7 +2839,8 @@
   }
 
   function sottoConfigBackend() {
-    return backendOf(state.workspace?.backendId) || primaryBackend();
+    const workspaceBackend = backendOf(state.workspace?.backendId);
+    return workspaceBackend?.status === 'connected' ? workspaceBackend : primaryBackend();
   }
   async function loadSottoSettings() {
     const backend = sottoConfigBackend();
