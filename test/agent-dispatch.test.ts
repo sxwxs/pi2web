@@ -28,7 +28,7 @@ async function setup() {
     return backend;
   });
   const agent = await agents.create(workspaces.list()[0].id);
-  return {agents, id: agent.agentId, backend: backends[0]};
+  return {agents, id: agent.agentId, backend: backends[0], backends};
 }
 const template = {id: 't', name: 'T', mode: 'append' as const, systemPrompt: 'Review only.'};
 
@@ -54,7 +54,7 @@ describe('Agent command admission', () => {
     const {agents, id, backend} = await setup();
     const prompt = vi.spyOn(backend, 'prompt');
     const pending = agents.command(id, 'prompt', 'one').catch(error => error);
-    await agents.setTemplate(id, template);
+    await agents.setTemplate(id, template, vi.fn());
     expect((await pending).code).toBe('SESSION_BUSY');
     expect(prompt).not.toHaveBeenCalled();
     expect(agents.get(id).backend).not.toBe(backend);
@@ -69,10 +69,28 @@ describe('Agent command admission', () => {
     const prompt = vi.spyOn(backend, 'prompt');
     const pending = agents.command(id, 'prompt', 'one').catch(error => error);
     await Promise.resolve();
-    await agents.setTemplate(id, template);
+    await agents.setTemplate(id, template, vi.fn());
     state.resolve(snapshot);
     expect((await pending).code).toBe('SESSION_BUSY');
     expect(prompt).not.toHaveBeenCalled();
+    await agents.dispose(id);
+  });
+
+  it('disposes only the candidate when template persistence fails', async () => {
+    const {agents, id, backend, backends} = await setup();
+    const original = agents.get(id).record;
+    const persist = vi.fn(() => {
+      expect(agents.get(id).record).toBe(original);
+      expect(agents.get(id).backend).toBe(backend);
+      throw Error('save failed');
+    });
+    await expect(agents.setTemplate(id, template, persist)).rejects.toThrow('save failed');
+    expect(persist).toHaveBeenCalledOnce();
+    expect(agents.get(id).record).toBe(original);
+    expect(agents.get(id).backend).toBe(backend);
+    expect((await backend.getState()).status).toBe('idle');
+    expect((await backends[1].getState()).status).toBe('stopped');
+    expect(agents.get(id).templateChanging).toBe(false);
     await agents.dispose(id);
   });
 
@@ -80,7 +98,9 @@ describe('Agent command admission', () => {
     const {agents, id, backend} = await setup();
     const running = agents.command(id, 'prompt', 'one');
     await vi.waitFor(() => expect(agents.get(id).promptPending).toBe(true));
-    await expect(agents.setTemplate(id, template)).rejects.toMatchObject({code: 'SESSION_STARTED'});
+    const persist = vi.fn();
+    await expect(agents.setTemplate(id, template, persist)).rejects.toMatchObject({code: 'SESSION_STARTED'});
+    expect(persist).not.toHaveBeenCalled();
     await agents.command(id, 'abort');
     expect((await backend.getState()).status).toBe('idle');
     backend.turn.resolve();

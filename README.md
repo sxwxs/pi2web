@@ -196,7 +196,7 @@ python scripts/migrate_data_dir.py             # 复制 ~/.pi/remote-pi -> ~/.pi
 - `workspaces`：Workspace ID、名称、根目录和创建时间。
 - `agents`：Agent 与 Workspace/Session 的映射、cwd、状态、创建/最后活动时间以及 Archive 状态。
 - `sessions`：用于 Session 列表、排序和分页的轻量索引，包括名称、文件路径、消息数量、文件 mtime/size 和最后活动时间。
-- `agents.template`：Agent 创建时选定的 System Prompt 模板快照（JSON），之后不可修改。
+- `agents.template`：Agent 的 System Prompt 模板快照（JSON）。仅在第一条会话消息前可修改，保存成功后才生效；对话开始后固定，卸载或重启不会改变。
 - `agent-templates/*.md`：可分享的 Agent 模板文件，见下文「System Prompt 与 Agent 模板」。
 - `auth.json`：配对码的 SHA-256 hash、创建和轮换时间；认证数据仍单独保存，不保存配对码明文，文件权限为 `0600`。
 
@@ -384,7 +384,7 @@ mode: append        # append：追加在 Pi Prompt 之后；replace：替换 Pi 
 You are a meticulous code reviewer. ...
 ```
 
-新建 Agent 时可选择模板（默认是 Pi 自己的 Prompt）。模板内容在创建时复制到 Agent 记录中，**之后不能更改**：修改或删除模板文件不影响已有 Agent，Fork 出的 Agent 沿用同一模板。两种模式下 Pi 仍会加上 AGENTS.md 等项目上下文、skills 和 cwd；`replace` 会去掉 Pi 内置的工具说明、规则和文档段落，`APPEND_SYSTEM.md` 仍然生效。Agent 工具栏的「Prompt」按钮显示该 Agent 当前生效的完整 System Prompt。
+新建 Agent 时可选择模板（默认是 Pi 自己的 Prompt）。模板内容复制为 Agent 自己的快照；**第一条会话消息前可以修改，开始对话后不能更改**。修改操作先保存到数据库再启用，保存失败则保留原模板；后端重启或 Agent 重新加载仍使用最后保存的快照，不会退回创建时的选择。修改或删除模板文件不影响已有 Agent，Fork 出的 Agent 沿用同一模板。两种模式下 Pi 仍会加上 AGENTS.md 等项目上下文、skills 和 cwd；`replace` 会去掉 Pi 内置的工具说明、规则和文档段落，`APPEND_SYSTEM.md` 仍然生效。Agent 工具栏的「Prompt」按钮显示该 Agent 当前生效的完整 System Prompt。
 
 运行时使用真实 `@earendil-works/pi-coding-agent` SDK，并复用 Pi CLI 的 `~/.pi/agent` 模型、认证和设置。`MockBackend` 只用于自动化测试。
 

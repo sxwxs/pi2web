@@ -134,8 +134,9 @@ export async function handleAgentRoutes(
       if (b.templateId !== undefined && typeof b.templateId !== 'string')
         throw Object.assign(new Error('templateId must be a string'), {code: 'INVALID_REQUEST'});
       const template = b.templateId ? ctx.templates.snapshot(b.templateId) : undefined;
-      const record = await ctx.agents.setTemplate(id, template);
-      ctx.metadata.saveAgent(record);
+      const record = await ctx.agents.setTemplate(id, template, candidate =>
+        ctx.metadata.commitAgentTemplate(candidate)
+      );
       return send(200, {data: {template: record.template ?? null}});
     }
     if (req.method === 'GET' && parts[4] === 'capabilities')

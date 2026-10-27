@@ -313,7 +313,7 @@ export type AgentProfile = 'default' | 'collab';
 export type AgentRecord = AgentState & {
   workspaceId: string;
   profile: AgentProfile;
-  /** System prompt template chosen at creation. Fixed for the Agent's lifetime, including forks. */
+  /** System prompt snapshot. Editable only before the first conversation message; inherited by forks. */
   template?: AgentTemplateSnapshot;
   createdAt: string;
   lastActiveAt: string;
@@ -678,8 +678,12 @@ export class AgentManager {
     const info = await (await this.ensureLoaded(id)).getSystemPrompt();
     return {...info, template: this.get(id).record.template ?? null};
   }
-  /** Replace the disposable, still-empty session. Never rewrite a conversation's system prompt. */
-  async setTemplate(id: string, template?: AgentTemplateSnapshot) {
+  /** Prepare → persist → activate under the template lock. A failed save leaves the old session intact. */
+  async setTemplate(
+    id: string,
+    template: AgentTemplateSnapshot | undefined,
+    persist: (record: AgentRecord) => void
+  ) {
     const entry = this.get(id);
     if (
       entry.record.profile !== 'default' ||
@@ -713,7 +717,10 @@ export class AgentManager {
           await replacement.setThinkingLevel(capabilities.thinkingLevel);
         if (entry.record.sessionName) await replacement.setSessionName(entry.record.sessionName);
         const state = await replacement.getState();
-        entry.record = {...entry.record, ...state, template};
+        const record = {...entry.record, ...state, template};
+        // Persistence is synchronous: no command can observe a choice that has not been committed.
+        persist(record);
+        entry.record = record;
         this.connect(entry, replacement);
         await old.dispose().catch(() => {});
         this.publish(entry, {type: 'agent_loaded'});
