@@ -85,6 +85,8 @@
     mediaAgentId: null,
     mailBackendId: null,
     mailRequest: 0,
+    sottoBackendId: null,
+    sottoSettingsRequest: 0,
     mailNotificationsAvailable: false,
     mailSettings: {
       enabled: false,
@@ -266,6 +268,7 @@
     cancelVoiceRecording(backendId);
     if (backendId && state.agent?.backendId !== backendId) return;
     state.agent = null;
+    updateVoiceAvailability();
     state.timeline = null;
     sendFocus();
     localStorage.removeItem('rpAgentId');
@@ -338,12 +341,11 @@
   function updateVoiceAvailability() {
     const backends = connectedBackends();
     state.voiceEnabled = backends.some(backend => backend.voiceEnabled);
-    state.voiceSttEnabled = backends.some(backend => backend.voiceSttEnabled);
+    const agentBackend = state.agent && backendOf(state.agent.backendId);
+    state.voiceSttEnabled = Boolean(agentBackend?.status === 'connected' && agentBackend.voiceSttEnabled);
     $('voicePlayback').hidden = !state.voiceEnabled;
-    $('voiceInput').hidden = false;
-    $('voiceInput').title = state.voiceSttEnabled
-      ? '开始语音输入（输入框内 Alt+Shift+V）'
-      : '需在 Backend 配置语音识别服务（--voice-stt-model）';
+    $('voiceInput').hidden = !state.voiceSttEnabled;
+    $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
     if (!state.voiceEnabled) stopVoiceAudio();
     updateVoiceButton();
   }
@@ -388,6 +390,7 @@
       serverInfo: `v${statusInfo.version} · Pi ${statusInfo.piVersion}`,
       reconnectAttempt: 0,
       voiceEnabled: Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled),
+      voiceServerSttEnabled: Boolean(statusInfo.voiceEnabled && statusInfo.voiceCapabilities?.stt),
       voiceSttEnabled: Boolean(statusInfo.voiceCapabilities?.stt ?? statusInfo.voiceEnabled)
     });
 
@@ -1542,6 +1545,7 @@
     state.terminalWs?.close();
     state.terminalWs = null;
     state.agent = agent;
+    updateVoiceAvailability();
     localStorage.rpAgentId = agent.agentId;
     localStorage.rpSelectedKind = 'agent';
     showAgentView();
@@ -2368,10 +2372,12 @@
       $('voiceInput').textContent = '■';
       $('voiceInput').title = '停止并识别';
       $('voiceInput').classList.add('recording');
-      state.mediaTimer = setTimeout(
-        () => state.mediaRecorder?.state === 'recording' && state.mediaRecorder.stop(),
-        60000
-      );
+      state.mediaTimer = setTimeout(() => {
+        if (state.mediaRecorder?.state === 'recording') {
+          $('voiceInput').disabled = true;
+          state.mediaRecorder.stop();
+        }
+      }, 60000);
     } catch (error) {
       state.mediaStream?.getTracks().forEach(track => track.stop());
       state.mediaStream = null;
@@ -2381,6 +2387,24 @@
       $('voiceInput').disabled = false;
       toast(`无法录音：${error.message}`);
     }
+  }
+  async function recordingToSottoPcm(blob) {
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    if (!Audio) throw Error('当前浏览器不支持音频解码');
+    const context = new Audio();
+    try {
+      const decoded = await context.decodeAudioData(await blob.arrayBuffer());
+      if (!decoded.length || decoded.duration > 61) throw Error('录音必须在 60 秒以内');
+      const length = Math.min(60 * 16000, Math.floor(decoded.duration * 16000));
+      if (!length) throw Error('录音为空');
+      const channels = Array.from({length: decoded.numberOfChannels}, (_, i) => decoded.getChannelData(i));
+      const result = new Float32Array(length);
+      for (let i = 0; i < length; i++) {
+        const sample = i * decoded.sampleRate / 16000, a = Math.floor(sample), b = Math.min(a + 1, decoded.length - 1);
+        for (const channel of channels) result[i] += (channel[a] * (1 - (sample - a)) + channel[b] * (sample - a)) / channels.length;
+      }
+      return result.buffer;
+    } finally { await context.close(); }
   }
   async function transcribeVoice() {
     clearTimeout(state.mediaTimer);
@@ -2409,16 +2433,18 @@
       return toast('该 Session 的 backend 已断开');
     }
     try {
+      const useSotto = Boolean(transcribeBackend.statusInfo?.sottoStt?.enabled);
+      const audio = useSotto ? await recordingToSottoPcm(blob) : blob;
       const response = await fetch(
         transcribeBackend.base + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe`,
         {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${transcribeBackend.token}`,
-            'Content-Type': mime,
-            'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'
+            ...(transcribeBackend.token ? {Authorization: `Bearer ${transcribeBackend.token}`} : {}),
+            'Content-Type': useSotto ? 'application/octet-stream' : mime,
+            ...(!useSotto ? {'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'} : {})
           },
-          body: blob
+          body: audio
         }
       );
       const body = await response.json().catch(() => ({}));
@@ -2812,6 +2838,56 @@
           : `Backend「${backend.name}」未配置 MailDispatch endpoint、API key 和通知邮箱。`;
   }
 
+  function sottoConfigBackend() {
+    return backendOf(state.workspace?.backendId) || primaryBackend();
+  }
+  async function loadSottoSettings() {
+    const backend = sottoConfigBackend();
+    const requestId = ++state.sottoSettingsRequest;
+    state.sottoBackendId = null;
+    $('saveSotto').disabled = true;
+    if (!backend) {
+      $('sottoSettingsStatus').textContent = '请先连接 Backend';
+      return;
+    }
+    $('sottoSettingsStatus').textContent = `正在读取「${backend.name}」的语音输入设置…`;
+    try {
+      const settings = await requestBackend(backend.id, '/api/v1/sotto-stt');
+      if (requestId !== state.sottoSettingsRequest || !$('configDialog').open) return;
+      state.sottoBackendId = backend.id;
+      $('sottoEnabled').checked = settings.enabled;
+      $('sottoEndpoint').value = settings.endpoint;
+      $('saveSotto').disabled = false;
+      $('sottoSettingsStatus').textContent = `设置属于 Backend「${backend.name}」。本机指它所在机器的 127.0.0.1，不是浏览器的 localhost。`;
+    } catch (error) {
+      if (requestId === state.sottoSettingsRequest)
+        $('sottoSettingsStatus').textContent = `读取失败：${error.message}`;
+    }
+  }
+  async function saveSottoSettings() {
+    const backendId = state.sottoBackendId;
+    if (!backendId) return toast('请先连接 Backend 并读取设置');
+    $('saveSotto').disabled = true;
+    try {
+      const settings = await requestBackend(backendId, '/api/v1/sotto-stt', {
+        method: 'PUT', body: JSON.stringify({enabled: $('sottoEnabled').checked, endpoint: $('sottoEndpoint').value.trim()})
+      });
+      const backend = backendOf(backendId);
+      if (backend) {
+        backend.statusInfo.sottoStt = settings;
+        backend.statusInfo.voiceCapabilities ??= {tts: false, stt: false};
+        backend.statusInfo.voiceCapabilities.stt = Boolean(settings.enabled || backend.voiceServerSttEnabled);
+        backend.voiceSttEnabled = backend.statusInfo.voiceCapabilities.stt;
+      }
+      updateVoiceAvailability();
+      $('sottoSettingsStatus').textContent = settings.enabled
+        ? 'Sotto 已连通；输入框旁的麦克风可用，转写使用 Sotto 的同一个 ASR 实例。'
+        : 'Sotto 语音输入已关闭。';
+      toast('语音输入设置已保存');
+    } catch (error) {
+      toast(`Sotto 设置失败：${error.message}`);
+    } finally { $('saveSotto').disabled = !backendOf(backendId); }
+  }
   function updateConfigUi() {
     const connected = connectedBackends().length;
     $('configConnectionStatus').textContent = connected ? `已连接 ${connected} 个 backend` : '当前未配对';
@@ -2826,6 +2902,7 @@
     updateConfigUi();
     renderKeyboardBindings();
     if (!$('configDialog').open) $('configDialog').showModal();
+    void loadSottoSettings();
   }
 
   async function saveMailSettings() {
@@ -3630,6 +3707,7 @@
   $('openConfig').onclick = openConfig;
   $('configClose').onclick = () => $('configDialog').close();
   $('configSave').onclick = saveMailSettings;
+  $('saveSotto').onclick = saveSottoSettings;
   $('connect').onclick = () => openPair();
   $('keyboardConnect').onclick = async () => {
     try {

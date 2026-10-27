@@ -110,10 +110,16 @@ pi2web \
 - 摘要 LLM 使用流式 Chat Completions；Remote Pi 在完整句子出现后立即调用流式 TTS，因此无需等待整段摘要完成。
 - Web UI 中点击“启用语音”后，会播放服务端推送的 PCM16 或 MP3 音频；新的 Agent 运行会取消该 Agent 尚未完成的播报。
 - 多个 Session 接近同时完成时，语音摘要会进入全局队列依次播放，不会重叠；有 Session 名称时以“会话{name}已完成：”开头。
-- 只有配置 `--voice-stt-model` 时，Web UI 才显示麦克风按钮；识别文字只插入输入框，不会自动发送。
+- 只有配置 `--voice-stt-model`，或在 Web UI「配置 → Sotto 语音输入」开启 Sotto 时，才显示麦克风按钮；识别文字只插入输入框，不会自动发送。
 - API key 通过 `--voice-api-key-env` 和 `--voice-summary-api-key-env` 指定环境变量名，避免把密钥放入命令行参数。
 
 语音流目前通过已认证的 Agent WebSocket 发送，只会实时投递，不写入 Session 或事件 replay。浏览器麦克风通常要求 HTTPS 安全上下文（`localhost` 例外）。
+
+### 使用本机 Sotto 进行语音输入（无需另一份 STT 模型）
+
+先在**与 pi2web Backend 同一台机器**启动支持 `/api/capabilities` 和 `/api/transcribe` 的 Sotto Web 版本，再在 pi2web 网页「配置 → Sotto 语音输入」勾选启用并保存。默认 endpoint 为 `http://127.0.0.1:8766`，指的是 **Backend 所在机器**，不是访问网页的手机或电脑；服务端只允许配置 IPv4 回环 HTTP 地址，不允许指向公网。启用时会探测 endpoint，不可用则不会保存开启状态。设置保存在 pi2web 的数据目录，所有使用该 Backend 的网页共享；默认关闭，不配语音识别时麦克风按钮保持隐藏。
+
+网页录音停止后在浏览器转成 16 kHz 单声道 PCM，再由 pi2web 服务端代理到本机 Sotto。Sotto 复用已加载的 ASR（没有加载时首次请求只加载一次）；录音**不会自动发送给 Agent**。浏览器需支持 `MediaRecorder`、`AudioContext.decodeAudioData` 并授予麦克风权限；语音按钮也可以在输入框内按 `Alt+Shift+V` 切换。Sotto 自己的 ASR 实时测试需要先停止才能使用此输入接口，普通监听可并存但共享同一个识别器。原有 `--voice-*` 语音摘要和 STT 功能保持独立；不要同时配置另一套 STT 模型，除非你确实需要第二个识别服务。
 
 ### Edge TTS（仅语音合成）
 

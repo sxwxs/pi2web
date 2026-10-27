@@ -38,7 +38,8 @@ export async function readJsonBody(req: http.IncomingMessage, maxBytes = 2 * 102
 export function errorStatus(code: string | undefined) {
   if (code === 'WORKSPACE_PATH_OUTSIDE_ROOT') return 403;
   if (code === 'FILE_TOO_LARGE' || code === 'REQUEST_TOO_LARGE') return 413;
-  if (code === 'VOICE_DISABLED' || code === 'VOICE_STT_DISABLED' || code === 'MAIL_NOTIFICATIONS_DISABLED')
+  if (code === 'VOICE_DISABLED' || code === 'VOICE_STT_DISABLED' || code === 'SOTTO_DISABLED' ||
+      code === 'SOTTO_UNAVAILABLE' || code === 'MAIL_NOTIFICATIONS_DISABLED')
     return 503;
   if (code?.endsWith('NOT_FOUND')) return 404;
   return 400;

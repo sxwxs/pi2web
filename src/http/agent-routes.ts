@@ -5,6 +5,7 @@ import type {MetadataStore} from '../metadata-store.js';
 import type {AgentTemplateStore} from '../agent-templates.js';
 import type {Workspace, WorkspaceStore} from '../workspaces.js';
 import type {VoiceManager} from '../voice.js';
+import type {SottoSttService} from '../sotto-stt.js';
 import type {SessionNamer} from '../session-namer.js';
 import {json} from './utils.js';
 
@@ -14,6 +15,7 @@ export type AgentRouteContext = {
   templates: AgentTemplateStore;
   workspaces: WorkspaceStore;
   voice?: VoiceManager;
+  sottoStt: SottoSttService;
   sessionNamer?: SessionNamer;
   ensureSessionIndex(workspace: Workspace, cwd: string, force?: boolean): Promise<void>;
   indexAgentSession(agentId: string): Promise<void>;
@@ -222,10 +224,16 @@ export async function handleAgentRoutes(
       return send(200, {data: {success: true}});
     }
     if (req.method === 'POST' && parts[4] === 'transcribe') {
-      if (!ctx.voice) throw Object.assign(new Error('Voice service is disabled'), {code: 'VOICE_DISABLED'});
       ctx.agents.get(id);
+      const mime = String(req.headers['content-type'] ?? 'audio/webm').split(';')[0];
+      if (ctx.sottoStt.getSettings().enabled) {
+        if (mime !== 'application/octet-stream')
+          throw Object.assign(new Error('Sotto requires 16 kHz float32 PCM'), {code: 'INVALID_REQUEST'});
+        const audio = await ctx.binaryBody();
+        return send(200, {data: await ctx.sottoStt.transcribe(audio)});
+      }
+      if (!ctx.voice) throw Object.assign(new Error('Voice service is disabled'), {code: 'VOICE_DISABLED'});
       const audio = await ctx.binaryBody(),
-        mime = String(req.headers['content-type'] ?? 'audio/webm').split(';')[0],
         filename = String(req.headers['x-audio-filename'] ?? 'recording.webm');
       return send(200, {data: await ctx.voice.transcribe(audio, mime, filename)});
     }
