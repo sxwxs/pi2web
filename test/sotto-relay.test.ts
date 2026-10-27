@@ -11,10 +11,17 @@ vi.mock('ws', async () => {
     readyState = 1;
     bufferedAmount = 0;
     send = vi.fn();
-    close = vi.fn(() => {this.readyState = 2;});
-    terminate = vi.fn(() => {this.readyState = 3;});
+    close = vi.fn(() => {
+      this.readyState = 2;
+    });
+    terminate = vi.fn(() => {
+      this.readyState = 3;
+    });
     static latest: WebSocket;
-    constructor() {super(); WebSocket.latest = this;}
+    constructor() {
+      super();
+      WebSocket.latest = this;
+    }
   }
   return {WebSocket};
 });
@@ -23,7 +30,12 @@ function relay() {
   const client = new WebSocket('ws://browser');
   proxySottoStream(client, {streamUrl: () => 'ws://sotto/asr'} as SottoSttService);
   const upstream: WebSocket = (WebSocket as any).latest;
-  const start = () => client.emit('message', Buffer.from(JSON.stringify({type: 'start', format: 'float32', sample_rate: 16000})), false);
+  const start = () =>
+    client.emit(
+      'message',
+      Buffer.from(JSON.stringify({type: 'start', format: 'float32', sample_rate: 16000})),
+      false
+    );
   const pcm = () => client.emit('message', Buffer.alloc(4096 * 4), true);
   const stop = () => client.emit('message', Buffer.from('{"type":"stop"}'), false);
   return {client, upstream, start, pcm, stop};
@@ -50,7 +62,10 @@ describe('Sotto relay lifetime', () => {
     const r = relay();
     r.start();
     vi.advanceTimersByTime(30000);
-    expect(JSON.parse((r.client.send as any).mock.calls[0][0])).toMatchObject({type: 'error', message: expect.stringContaining('stalled')});
+    expect(JSON.parse((r.client.send as any).mock.calls[0][0])).toMatchObject({
+      type: 'error',
+      message: expect.stringContaining('stalled')
+    });
     expect(r.client.close).toHaveBeenCalledWith(1011);
     expect(r.upstream.close).toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);

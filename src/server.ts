@@ -406,7 +406,8 @@ export class RemotePiServer {
           ?.slice(13);
     const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname,
       voiceMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/transcribe\/ws$/),
-      isSocket = pathname === '/api/v1/ws' || /^\/api\/v1\/terminals\/[^/]+\/ws$/.test(pathname) || !!voiceMatch;
+      isSocket =
+        pathname === '/api/v1/ws' || /^\/api\/v1\/terminals\/[^/]+\/ws$/.test(pathname) || !!voiceMatch;
     if (!isSocket) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -647,8 +648,10 @@ export class RemotePiServer {
             terminalCount: this.terminals.list().length,
             webSocketConnections: this.clients.size,
             voiceEnabled: !!this.voice,
-            voiceCapabilities: {tts: this.voice?.capabilities().tts ?? false,
-              stt: (this.voice?.capabilities().stt ?? false) || this.sottoStt.getSettings().enabled},
+            voiceCapabilities: {
+              tts: this.voice?.capabilities().tts ?? false,
+              stt: (this.voice?.capabilities().stt ?? false) || this.sottoStt.getSettings().enabled
+            },
             sottoStt: this.sottoStt.getSettings(),
             sessionNamingEnabled: !!this.sessionNamer,
             mailNotificationsConfigured: !!this.mailNotifier,
@@ -657,7 +660,8 @@ export class RemotePiServer {
         });
       if (u.pathname === '/api/v1/sotto-stt') {
         if (req.method === 'GET') return json(res, 200, {data: this.sottoStt.getSettings()});
-        if (req.method === 'PUT') return json(res, 200, {data: await this.sottoStt.update(await readJsonBody(req))});
+        if (req.method === 'PUT')
+          return json(res, 200, {data: await this.sottoStt.update(await readJsonBody(req))});
       }
       if (
         await handleMailSettingsRoutes(

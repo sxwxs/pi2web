@@ -204,7 +204,9 @@ export class MockBackend implements AgentBackend {
   }
   async moveQueue(from: keyof AgentQueue, index: number, expected: string) {
     if (this.state.status !== 'streaming' || this.queue[from][index] !== expected)
-      throw Object.assign(new Error('Queued message has changed or already been consumed'), {code: 'QUEUE_CHANGED'});
+      throw Object.assign(new Error('Queued message has changed or already been consumed'), {
+        code: 'QUEUE_CHANGED'
+      });
     const to = from === 'steering' ? 'followUp' : 'steering';
     this.queue[from].splice(index, 1);
     this.queue[to].push(expected);
@@ -679,9 +681,17 @@ export class AgentManager {
   /** Replace the disposable, still-empty session. Never rewrite a conversation's system prompt. */
   async setTemplate(id: string, template?: AgentTemplateSnapshot) {
     const entry = this.get(id);
-    if (entry.record.profile !== 'default' || entry.record.status === 'stopped' || entry.streaming || entry.promptPending)
-      throw Object.assign(new Error('System Prompt can only change before the first turn'), {code: 'SESSION_STARTED'});
-    if (entry.templateChanging) throw Object.assign(new Error('System Prompt is being changed'), {code: 'SESSION_BUSY'});
+    if (
+      entry.record.profile !== 'default' ||
+      entry.record.status === 'stopped' ||
+      entry.streaming ||
+      entry.promptPending
+    )
+      throw Object.assign(new Error('System Prompt can only change before the first turn'), {
+        code: 'SESSION_STARTED'
+      });
+    if (entry.templateChanging)
+      throw Object.assign(new Error('System Prompt is being changed'), {code: 'SESSION_BUSY'});
     entry.templateChanging = true;
     try {
       const old = await this.ensureLoaded(id);
@@ -690,12 +700,17 @@ export class AgentManager {
         throw Object.assign(new Error('This session already has messages'), {code: 'SESSION_STARTED'});
       const capabilities = await old.getCapabilities();
       const replacement = await this.factory(
-        id, entry.record.cwd, entry.record.sessionFile, entry.record.profile, template ? {template} : {}
+        id,
+        entry.record.cwd,
+        entry.record.sessionFile,
+        entry.record.profile,
+        template ? {template} : {}
       );
       try {
         const model = capabilities.model as {provider?: string; id?: string} | undefined;
         if (model?.provider && model?.id) await replacement.setModel(model.provider, model.id);
-        if (typeof capabilities.thinkingLevel === 'string') await replacement.setThinkingLevel(capabilities.thinkingLevel);
+        if (typeof capabilities.thinkingLevel === 'string')
+          await replacement.setThinkingLevel(capabilities.thinkingLevel);
         if (entry.record.sessionName) await replacement.setSessionName(entry.record.sessionName);
         const state = await replacement.getState();
         entry.record = {...entry.record, ...state, template};

@@ -118,9 +118,14 @@ export class SdkBackend implements AgentBackend {
     return {steering: [...cleared.steering], followUp: [...cleared.followUp]};
   }
   async moveQueue(from: keyof AgentQueue, index: number, expected: string): Promise<AgentQueue> {
-    const before = {steering: [...this.session.getSteeringMessages()], followUp: [...this.session.getFollowUpMessages()]};
+    const before = {
+      steering: [...this.session.getSteeringMessages()],
+      followUp: [...this.session.getFollowUpMessages()]
+    };
     if (!this.session.isStreaming || before[from][index] !== expected)
-      throw Object.assign(new Error('Queued message has changed or already been consumed'), {code: 'QUEUE_CHANGED'});
+      throw Object.assign(new Error('Queued message has changed or already been consumed'), {
+        code: 'QUEUE_CHANGED'
+      });
     const to = from === 'steering' ? 'followUp' : 'steering';
     before[from].splice(index, 1);
     before[to].push(expected);

@@ -203,7 +203,12 @@ export async function handleAgentRoutes(
       if (req.method === 'DELETE') return send(200, {data: await ctx.agents.clearQueue(id)});
       if (req.method === 'POST' && parts[5] === 'move') {
         const {from, index, expected} = await ctx.body();
-        if ((from !== 'steering' && from !== 'followUp') || !Number.isSafeInteger(index) || index < 0 || typeof expected !== 'string')
+        if (
+          (from !== 'steering' && from !== 'followUp') ||
+          !Number.isSafeInteger(index) ||
+          index < 0 ||
+          typeof expected !== 'string'
+        )
           throw Object.assign(new Error('from, index and expected are required'), {code: 'INVALID_REQUEST'});
         return send(200, {data: await ctx.agents.moveQueue(id, from, index, expected)});
       }

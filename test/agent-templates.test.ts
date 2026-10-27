@@ -165,12 +165,15 @@ describe('system prompt and template API', () => {
     const root = await temp('pi2web-ws-');
     const workspace = (await call('POST', '/api/v1/workspaces', {label: 'w', rootPath: root})).data;
     await call('PUT', '/api/v1/agent-templates/reviewer', {
-      name: 'Reviewer', mode: 'append', systemPrompt: 'Review only.'
+      name: 'Reviewer',
+      mode: 'append',
+      systemPrompt: 'Review only.'
     });
     const agent = (await call('POST', '/api/v1/agents', {workspaceId: workspace.id})).data;
     const url = `/api/v1/agents/${agent.agentId}`;
-    expect((await call('POST', `${url}/system-prompt`, {templateId: 'reviewer'})).data.template.id)
-      .toBe('reviewer');
+    expect((await call('POST', `${url}/system-prompt`, {templateId: 'reviewer'})).data.template.id).toBe(
+      'reviewer'
+    );
     expect((await call('GET', `${url}/system-prompt`)).data.systemPrompt).toContain('Review only.');
     expect((await call('POST', `${url}/system-prompt`, {templateId: ''})).data.template).toBeNull();
     expect((await call('GET', `${url}/system-prompt`)).data.systemPrompt).not.toContain('Review only.');

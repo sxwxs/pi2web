@@ -58,8 +58,9 @@ describe('queued steering and follow-up messages', () => {
     backends[0].release();
     expect((await (await first).json()).data).toEqual({success: true});
     await expect.poll(() => agents.get(agent.agentId).record.status).toBe('idle');
-    expect((await (await fetch(base + `/api/v1/agents/${agent.agentId}/queue`, {headers})).json()).data)
-      .toEqual({steering: [], followUp: []});
+    expect(
+      (await (await fetch(base + `/api/v1/agents/${agent.agentId}/queue`, {headers})).json()).data
+    ).toEqual({steering: [], followUp: []});
 
     const running = post(`/api/v1/agents/${agent.agentId}/prompt`, {message: 'work'});
     await expect.poll(() => agents.get(agent.agentId).record.status).toBe('streaming');
@@ -76,13 +77,15 @@ describe('queued steering and follow-up messages', () => {
     expect(agents.snapshotState(agent.agentId).activity.queue).toEqual(queued);
     expect(events.filter(event => event.type === 'queue_update').at(-1)).toMatchObject(queued);
     const move = `/api/v1/agents/${agent.agentId}/queue/move`;
-    expect((await (await post(move, {from: 'steering', index: 0, expected: 'redirect'})).json()).data)
-      .toEqual({steering: [], followUp: ['and then', 'redirect']});
+    expect(
+      (await (await post(move, {from: 'steering', index: 0, expected: 'redirect'})).json()).data
+    ).toEqual({steering: [], followUp: ['and then', 'redirect']});
     const stale = await post(move, {from: 'steering', index: 0, expected: 'redirect'});
     expect(stale.status).toBe(400);
     expect((await stale.json()).error.code).toBe('QUEUE_CHANGED');
-    expect((await (await post(move, {from: 'followUp', index: 1, expected: 'redirect'})).json()).data)
-      .toEqual(queued);
+    expect(
+      (await (await post(move, {from: 'followUp', index: 1, expected: 'redirect'})).json()).data
+    ).toEqual(queued);
 
     // Clearing returns the messages so a client can restore them to its composer.
     expect(

@@ -5,14 +5,18 @@ import path from 'node:path';
 import {AgentManager, MockBackend} from '../src/agents.js';
 import {WorkspaceStore} from '../src/workspaces.js';
 
-const deferred = <T,>() => {
+const deferred = <T>() => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(r => {resolve = r;});
+  const promise = new Promise<T>(r => {
+    resolve = r;
+  });
   return {promise, resolve};
 };
 class HeldBackend extends MockBackend {
   turn = deferred<void>();
-  protected override runTurn() { return this.turn.promise; }
+  protected override runTurn() {
+    return this.turn.promise;
+  }
 }
 async function setup() {
   const workspaces = new WorkspaceStore();
@@ -29,18 +33,22 @@ async function setup() {
 const template = {id: 't', name: 'T', mode: 'append' as const, systemPrompt: 'Review only.'};
 
 describe('Agent command admission', () => {
-  it.each(['prompt', 'steer', 'follow-up'] as const)('reserves one first turn and queues a concurrent %s', async kind => {
-    const {agents, id, backend} = await setup();
-    const prompt = vi.spyOn(backend, 'prompt');
-    const first = agents.command(id, 'prompt', 'one');
-    expect(await agents.command(id, kind, 'two')).toBe('queued');
-    expect(prompt).toHaveBeenCalledOnce();
-    expect(await agents.queue(id)).toEqual(kind === 'steer'
-      ? {steering: ['two'], followUp: []} : {steering: [], followUp: ['two']});
-    backend.turn.resolve();
-    await first;
-    await agents.dispose(id);
-  });
+  it.each(['prompt', 'steer', 'follow-up'] as const)(
+    'reserves one first turn and queues a concurrent %s',
+    async kind => {
+      const {agents, id, backend} = await setup();
+      const prompt = vi.spyOn(backend, 'prompt');
+      const first = agents.command(id, 'prompt', 'one');
+      expect(await agents.command(id, kind, 'two')).toBe('queued');
+      expect(prompt).toHaveBeenCalledOnce();
+      expect(await agents.queue(id)).toEqual(
+        kind === 'steer' ? {steering: ['two'], followUp: []} : {steering: [], followUp: ['two']}
+      );
+      backend.turn.resolve();
+      await first;
+      await agents.dispose(id);
+    }
+  );
 
   it('does not dispatch an admitted command while its session is being replaced', async () => {
     const {agents, id, backend} = await setup();
@@ -55,7 +63,8 @@ describe('Agent command admission', () => {
 
   it('rejects a stale backend after a state read outlives the entire replacement', async () => {
     const {agents, id, backend} = await setup();
-    const snapshot = await backend.getState(), state = deferred<typeof snapshot>();
+    const snapshot = await backend.getState(),
+      state = deferred<typeof snapshot>();
     vi.spyOn(backend, 'getState').mockReturnValue(state.promise);
     const prompt = vi.spyOn(backend, 'prompt');
     const pending = agents.command(id, 'prompt', 'one').catch(error => error);

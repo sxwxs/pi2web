@@ -248,7 +248,10 @@
   }
 
   function cancelVoiceRecording(backendId) {
-    if (state.voiceStream && (!backendId || splitResourceKey(state.voiceStream.agentId).backendId === backendId))
+    if (
+      state.voiceStream &&
+      (!backendId || splitResourceKey(state.voiceStream.agentId).backendId === backendId)
+    )
       finishSottoStream(state.voiceStream, true);
     if (!state.mediaAgentId) return;
     if (backendId && splitResourceKey(state.mediaAgentId).backendId !== backendId) return;
@@ -1557,8 +1560,8 @@
     localStorage.rpSelectedKind = 'agent';
     showAgentView();
     updateAgentHeader();
-    $('sendMode').value = agent.status === 'streaming' || agent.status === 'waiting_for_user'
-      ? 'follow-up' : 'prompt';
+    $('sendMode').value =
+      agent.status === 'streaming' || agent.status === 'waiting_for_user' ? 'follow-up' : 'prompt';
     if (openView) navigateMobile('agent');
     void syncWorkspaceForSelection(agent);
     if (ownsPath(state.workspace, agent))
@@ -2208,7 +2211,10 @@
       `排队中：${parts.join(' · ')}${preview ? ` — ${preview.replace(/\s+/g, ' ').slice(0, 60)}` : ''}`;
     const items = $('queueItems');
     items.replaceChildren();
-    for (const [from, label, target] of [['steering', 'Steer', 'Follow-up'], ['followUp', 'Follow-up', 'Steer']]) {
+    for (const [from, label, target] of [
+      ['steering', 'Steer', 'Follow-up'],
+      ['followUp', 'Follow-up', 'Steer']
+    ]) {
       queue[from].forEach((text, index) => {
         const row = document.createElement('div');
         row.className = 'queue-item';
@@ -2225,8 +2231,12 @@
             await postAgent(agentId, '/queue/move', {from, index, expected: text});
           } catch (error) {
             toast(`切换失败：${error.message}`);
-            try { setAgentQueue(agentId, await requestAgent(agentId, '/queue')); } catch {}
-          } finally { button.disabled = false; }
+            try {
+              setAgentQueue(agentId, await requestAgent(agentId, '/queue'));
+            } catch {}
+          } finally {
+            button.disabled = false;
+          }
         };
         row.append(preview, button);
         items.append(row);
@@ -2351,7 +2361,8 @@
   }
   function updateSottoDraft(voice) {
     if (state.voiceStream !== voice || state.agent?.agentId !== voice.agentId) return;
-    const input = voice.input, text = [...voice.finals.values(), voice.partial].filter(Boolean).join(' ');
+    const input = voice.input,
+      text = [...voice.finals.values(), voice.partial].filter(Boolean).join(' ');
     if (text === voice.inserted) return;
     if (input.value.slice(voice.at, voice.at + voice.inserted.length) !== voice.inserted) {
       finishSottoStream(voice, true);
@@ -2365,7 +2376,10 @@
     if (state.voiceStream !== voice) return;
     state.voiceStream = null;
     clearTimeout(voice.timer);
-    voice.stream?.getTracks().forEach(track => { track.onended = null; track.stop(); });
+    voice.stream?.getTracks().forEach(track => {
+      track.onended = null;
+      track.stop();
+    });
     voice.node?.disconnect();
     voice.source?.disconnect();
     voice.sink?.disconnect();
@@ -2378,7 +2392,11 @@
     $('voiceInput').classList.remove('recording');
     $('voiceInput').textContent = '🎙';
     $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
-    if (abort && voice.partial && voice.input.value.slice(voice.at, voice.at + voice.inserted.length) === voice.inserted) {
+    if (
+      abort &&
+      voice.partial &&
+      voice.input.value.slice(voice.at, voice.at + voice.inserted.length) === voice.inserted
+    ) {
       const text = [...voice.finals.values()].filter(Boolean).join(' ');
       voice.input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
     }
@@ -2400,7 +2418,10 @@
     if (voice.phase !== 'recording') return;
     voice.phase = 'draining';
     voice.source?.disconnect();
-    voice.stream.getTracks().forEach(track => { track.onended = null; track.stop(); });
+    voice.stream.getTracks().forEach(track => {
+      track.onended = null;
+      track.stop();
+    });
     $('voiceInput').classList.remove('recording');
     $('voiceInput').textContent = '…';
     $('voiceInput').disabled = true;
@@ -2421,33 +2442,57 @@
     if (!navigator.mediaDevices?.getUserMedia) return toast('当前浏览器不支持麦克风录音');
     const Audio = window.AudioContext || window.webkitAudioContext;
     if (!Audio) return toast('当前浏览器不支持实时音频采集');
-    const agentId = state.agent.agentId, input = $('input');
+    const agentId = state.agent.agentId,
+      input = $('input');
     // One owner from permission acquisition through final result. Cancelling invalidates pending awaits.
-    const voice = {agentId, input, at: input.selectionStart, inserted: '', finals: new Map(), partial: '',
-      phase: 'starting', stream: null, context: null, socket: null, timer: null, node: null, source: null, sink: null};
+    const voice = {
+      agentId,
+      input,
+      at: input.selectionStart,
+      inserted: '',
+      finals: new Map(),
+      partial: '',
+      phase: 'starting',
+      stream: null,
+      context: null,
+      socket: null,
+      timer: null,
+      node: null,
+      source: null,
+      sink: null
+    };
     state.voiceStream = voice;
     $('voiceInput').textContent = '…';
     $('voiceInput').title = '正在启动语音输入，点击取消';
     try {
       const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-      if (state.voiceStream !== voice) { stream.getTracks().forEach(track => track.stop()); return; }
+      if (state.voiceStream !== voice) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
       voice.stream = stream;
       stream.getTracks().forEach(track => {
         track.onended = () => finishSottoStream(voice, true, '麦克风已断开或录音权限被撤销');
       });
-      const context = voice.context = new Audio();
+      const context = (voice.context = new Audio());
       voice.timer = setTimeout(() => finishSottoStream(voice, true, '启动实时语音服务超时'), 30000);
-      if (context.audioWorklet && window.AudioWorkletNode) await context.audioWorklet.addModule('/voice-pcm.js');
+      if (context.audioWorklet && window.AudioWorkletNode)
+        await context.audioWorklet.addModule('/voice-pcm.js');
       if (state.voiceStream !== voice) return;
       if (state.agent?.agentId !== agentId) throw Error('会话已切换');
       const backend = backendOf(state.agent.backendId);
       const {remoteId} = splitResourceKey(agentId);
-      const url = backend.base.replace(/^http/, 'ws') + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe/ws`;
-      const socket = voice.socket = new WebSocket(url, ['access-token.' + backend.token]);
+      const url =
+        backend.base.replace(/^http/, 'ws') + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe/ws`;
+      const socket = (voice.socket = new WebSocket(url, ['access-token.' + backend.token]));
       socket.onmessage = event => {
         if (state.voiceStream !== voice) return;
         let msg;
-        try { msg = JSON.parse(event.data); } catch { return; }
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
         if (msg.type === 'ready') {
           if (voice.phase !== 'starting') return;
           try {
@@ -2457,22 +2502,27 @@
             voice.sink.gain.value = 0;
             if (context.audioWorklet && window.AudioWorkletNode) {
               voice.node = new AudioWorkletNode(context, 'voice-pcm');
-              voice.node.port.onmessage = e => e.data?.type === 'flushed'
-                ? finishSottoAudio(voice) : sendSottoPcm(voice, e.data);
+              voice.node.port.onmessage = e =>
+                e.data?.type === 'flushed' ? finishSottoAudio(voice) : sendSottoPcm(voice, e.data);
             } else {
               voice.node = context.createScriptProcessor(4096, 1, 1);
-              voice.node.onaudioprocess = e => sendSottoPcm(voice, new Float32Array(e.inputBuffer.getChannelData(0)).buffer);
+              voice.node.onaudioprocess = e =>
+                sendSottoPcm(voice, new Float32Array(e.inputBuffer.getChannelData(0)).buffer);
             }
             voice.phase = 'recording';
             voice.source.connect(voice.node);
             voice.node.connect(voice.sink);
             voice.sink.connect(context.destination);
-            void context.resume().catch(error => finishSottoStream(voice, true, `无法启动麦克风：${error.message}`));
+            void context
+              .resume()
+              .catch(error => finishSottoStream(voice, true, `无法启动麦克风：${error.message}`));
             clearTimeout(voice.timer);
             $('voiceInput').textContent = '■';
             $('voiceInput').title = '正在录音，点击停止（停顿不会结束录音）';
             $('voiceInput').classList.add('recording');
-          } catch (error) { finishSottoStream(voice, true, `无法采集音频：${error.message}`); }
+          } catch (error) {
+            finishSottoStream(voice, true, `无法采集音频：${error.message}`);
+          }
         } else if (msg.type === 'partial' && voice.phase === 'recording') {
           voice.partial = String(msg.text || '');
           updateSottoDraft(voice);
@@ -2499,8 +2549,7 @@
     if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
     if (!state.agent) return toast('请先选择 Agent');
     if (state.voiceStream) return stopSottoStream(state.voiceStream);
-    if (backendOf(state.agent.backendId)?.statusInfo?.sottoStt?.enabled)
-      return startSottoStream();
+    if (backendOf(state.agent.backendId)?.statusInfo?.sottoStt?.enabled) return startSottoStream();
     if (state.mediaRecorder) {
       if (state.mediaRecorder.state === 'recording') {
         $('voiceInput').disabled = true;
@@ -2994,7 +3043,8 @@
       $('sottoEnabled').checked = settings.enabled;
       $('sottoEndpoint').value = settings.endpoint;
       $('saveSotto').disabled = false;
-      $('sottoSettingsStatus').textContent = `设置属于 Backend「${backend.name}」。本机指它所在机器的 127.0.0.1，不是浏览器的 localhost。`;
+      $('sottoSettingsStatus').textContent =
+        `设置属于 Backend「${backend.name}」。本机指它所在机器的 127.0.0.1，不是浏览器的 localhost。`;
     } catch (error) {
       if (requestId === state.sottoSettingsRequest)
         $('sottoSettingsStatus').textContent = `读取失败：${error.message}`;
@@ -3006,7 +3056,8 @@
     $('saveSotto').disabled = true;
     try {
       const settings = await requestBackend(backendId, '/api/v1/sotto-stt', {
-        method: 'PUT', body: JSON.stringify({enabled: $('sottoEnabled').checked, endpoint: $('sottoEndpoint').value.trim()})
+        method: 'PUT',
+        body: JSON.stringify({enabled: $('sottoEnabled').checked, endpoint: $('sottoEndpoint').value.trim()})
       });
       const statusInfo = await requestBackend(backendId, '/api/v1/system/status');
       const backend = backendOf(backendId);
@@ -3018,7 +3069,9 @@
       toast('语音输入设置已保存');
     } catch (error) {
       toast(`Sotto 设置失败：${error.message}`);
-    } finally { $('saveSotto').disabled = !backendOf(backendId); }
+    } finally {
+      $('saveSotto').disabled = !backendOf(backendId);
+    }
   }
   function updateConfigUi() {
     const connected = connectedBackends().length;
@@ -3379,11 +3432,15 @@
     ]);
     if (agent.profile !== 'default' || session.entries?.some(entry => entry.type === 'message'))
       return toast('会话开始后不能切换 System Prompt，请新建会话');
-    const choice = await modal('切换 System Prompt（仅首次对话前）', body => {
-      const picker = templateSelect(body, catalog.templates || []);
-      picker.value = agent.template?.id || '';
-      return () => picker.value;
-    }, '切换');
+    const choice = await modal(
+      '切换 System Prompt（仅首次对话前）',
+      body => {
+        const picker = templateSelect(body, catalog.templates || []);
+        picker.value = agent.template?.id || '';
+        return () => picker.value;
+      },
+      '切换'
+    );
     if (choice === null) return;
     await postAgent(agent.agentId, '/system-prompt', {templateId: choice});
     localStorage.setItem(`rpLastTemplate:${agent.backendId}`, choice);
@@ -4018,8 +4075,12 @@
     if (!text) return;
     closeCommandPicker();
     const selectedMode = $('sendMode').value,
-      mode = state.agent.status === 'streaming' || state.agent.status === 'waiting_for_user'
-        ? (selectedMode === 'steer' ? 'steer' : 'follow-up') : 'prompt',
+      mode =
+        state.agent.status === 'streaming' || state.agent.status === 'waiting_for_user'
+          ? selectedMode === 'steer'
+            ? 'steer'
+            : 'follow-up'
+          : 'prompt',
       agentId = state.agent.agentId;
     $('messages').querySelector('.empty')?.remove();
     // `!cmd` runs inside the Agent session (output is recorded in the Session); `!!cmd` keeps the output out of the model context.
