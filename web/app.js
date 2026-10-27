@@ -79,6 +79,7 @@
       generation: 0
     },
     mediaRecorder: null,
+    voiceStream: null,
     mediaChunks: [],
     mediaStream: null,
     mediaTimer: null,
@@ -247,6 +248,8 @@
   }
 
   function cancelVoiceRecording(backendId) {
+    if (state.voiceStream && (!backendId || splitResourceKey(state.voiceStream.agentId).backendId === backendId))
+      finishSottoStream(state.voiceStream, true);
     if (!state.mediaAgentId) return;
     if (backendId && splitResourceKey(state.mediaAgentId).backendId !== backendId) return;
     clearTimeout(state.mediaTimer);
@@ -1541,6 +1544,7 @@
     }
   }
   async function selectAgent(agent, openView = true) {
+    if (state.agent?.agentId !== agent.agentId) cancelVoiceRecording();
     state.selectedKind = 'agent';
     state.terminalWs?.close();
     state.terminalWs = null;
@@ -2342,10 +2346,145 @@
       }
     } else stopVoiceAudio();
   }
+  function updateSottoDraft(voice) {
+    if (state.voiceStream !== voice || state.agent?.agentId !== voice.agentId) return;
+    const input = voice.input, text = [...voice.finals.values(), voice.partial].filter(Boolean).join(' ');
+    if (text === voice.inserted) return;
+    if (input.value.slice(voice.at, voice.at + voice.inserted.length) !== voice.inserted) {
+      finishSottoStream(voice, true);
+      toast('输入框内容已被修改，语音输入已停止；现有文字不会覆盖');
+      return;
+    }
+    input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
+    voice.inserted = text;
+  }
+  function finishSottoStream(voice, abort = false) {
+    if (state.voiceStream !== voice) return;
+    state.voiceStream = null;
+    clearTimeout(voice.timer);
+    voice.stream.getTracks().forEach(track => track.stop());
+    voice.node?.disconnect();
+    voice.source?.disconnect();
+    voice.sink?.disconnect();
+    voice.node && (voice.node.onaudioprocess = null);
+    void voice.context.close().catch(() => {});
+    if (voice.socket.readyState === WebSocket.OPEN || voice.socket.readyState === WebSocket.CONNECTING)
+      voice.socket.close();
+    $('voiceInput').disabled = false;
+    $('voiceInput').classList.remove('recording');
+    $('voiceInput').textContent = '🎙';
+    $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+    if (abort && voice.partial && voice.input.value.slice(voice.at, voice.at + voice.inserted.length) === voice.inserted) {
+      voice.partial = '';
+      updateSottoDraftAfterAbort(voice);
+    }
+  }
+  function updateSottoDraftAfterAbort(voice) {
+    const text = [...voice.finals.values()].filter(Boolean).join(' ');
+    voice.input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
+  }
+  function stopSottoStream(voice) {
+    if (voice.stopping) return;
+    voice.stopping = true;
+    clearTimeout(voice.timer);
+    voice.stream.getTracks().forEach(track => track.stop());
+    voice.node?.disconnect();
+    $('voiceInput').classList.remove('recording');
+    $('voiceInput').textContent = '…';
+    $('voiceInput').disabled = true;
+    if (voice.socket.readyState === WebSocket.OPEN) voice.socket.send(JSON.stringify({type: 'stop'}));
+    else { finishSottoStream(voice, true); return; }
+    voice.timer = setTimeout(() => {
+      if (state.voiceStream === voice) { finishSottoStream(voice, true); toast('语音识别超时'); }
+    }, 12000);
+  }
+  function sendSottoPcm(voice, pcm) {
+    if (state.voiceStream !== voice || voice.stopping) return;
+    if (voice.socket.readyState !== WebSocket.OPEN || voice.socket.bufferedAmount >= 500000) {
+      finishSottoStream(voice, true);
+      toast('实时语音服务处理不过来，已停止以避免丢失音频');
+      return;
+    }
+    voice.socket.send(pcm);
+  }
+  async function startSottoStream() {
+    if (!navigator.mediaDevices?.getUserMedia) return toast('当前浏览器不支持麦克风录音');
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    if (!Audio) return toast('当前浏览器不支持实时音频采集');
+    const agentId = state.agent.agentId;
+    let stream, context;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      context = new Audio();
+      if (context.audioWorklet && window.AudioWorkletNode) await context.audioWorklet.addModule('/voice-pcm.js');
+      if (state.agent?.agentId !== agentId) throw Error('会话已切换');
+      const backend = backendOf(state.agent.backendId);
+      const {remoteId} = splitResourceKey(agentId);
+      const url = backend.base.replace(/^http/, 'ws') + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe/ws`;
+      const socket = new WebSocket(url, ['access-token.' + backend.token]);
+      const input = $('input');
+      const voice = {agentId, input, at: input.selectionStart, inserted: '', finals: new Map(), partial: '',
+        stream, context, socket, stopping: false, timer: null, node: null, source: null, sink: null};
+      state.voiceStream = voice;
+      socket.onmessage = event => {
+        if (state.voiceStream !== voice) return;
+        let msg;
+        try { msg = JSON.parse(event.data); } catch { return; }
+        if (msg.type === 'ready') {
+          if (voice.stopping) return;
+          socket.send(JSON.stringify({type: 'start', sample_rate: context.sampleRate, format: 'float32'}));
+          voice.source = context.createMediaStreamSource(stream);
+          voice.sink = context.createGain();
+          voice.sink.gain.value = 0;
+          if (context.audioWorklet && window.AudioWorkletNode) {
+            voice.node = new AudioWorkletNode(context, 'voice-pcm');
+            voice.node.port.onmessage = e => sendSottoPcm(voice, e.data);
+          } else {
+            voice.node = context.createScriptProcessor(4096, 1, 1);
+            voice.node.onaudioprocess = e => sendSottoPcm(voice, new Float32Array(e.inputBuffer.getChannelData(0)).buffer);
+          }
+          voice.source.connect(voice.node);
+          voice.node.connect(voice.sink);
+          voice.sink.connect(context.destination);
+          void context.resume();
+          $('voiceInput').textContent = '■';
+          $('voiceInput').title = '停止语音输入';
+          $('voiceInput').classList.add('recording');
+          voice.timer = setTimeout(() => stopSottoStream(voice), 58000);
+        } else if (msg.type === 'partial' && !voice.stopping) {
+          voice.partial = String(msg.text || '');
+          updateSottoDraft(voice);
+        } else if (msg.type === 'final') {
+          voice.finals.set(msg.segment, String(msg.text || ''));
+          voice.partial = '';
+          updateSottoDraft(voice);
+        } else if (msg.type === 'error') {
+          toast(`Sotto 语音识别：${msg.message || '未知错误'}`);
+          finishSottoStream(voice, true);
+        }
+      };
+      socket.onerror = () => { if (state.voiceStream === voice) toast('无法连接 Sotto 实时语音服务'); };
+      socket.onclose = () => {
+        if (state.voiceStream === voice) {
+          if (!voice.stopping) toast('实时语音连接已断开');
+          finishSottoStream(voice, !voice.stopping);
+        }
+      };
+      $('voiceInput').textContent = '…';
+      $('voiceInput').title = '连接 Sotto 实时语音服务…';
+    } catch (error) {
+      stream?.getTracks().forEach(track => track.stop());
+      if (context) await context.close().catch(() => {});
+      toast(`无法开始语音输入：${error.message}`);
+    }
+  }
   async function toggleVoiceInput() {
     if ($('voiceInput').disabled) return;
     if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
     if (!state.agent) return toast('请先选择 Agent');
+    if (state.voiceStream) return stopSottoStream(state.voiceStream);
+    if (backendOf(state.agent.backendId)?.statusInfo?.sottoStt?.enabled)
+      return startSottoStream();
     if (state.mediaRecorder) {
       if (state.mediaRecorder.state === 'recording') {
         $('voiceInput').disabled = true;
@@ -2388,24 +2527,6 @@
       toast(`无法录音：${error.message}`);
     }
   }
-  async function recordingToSottoPcm(blob) {
-    const Audio = window.AudioContext || window.webkitAudioContext;
-    if (!Audio) throw Error('当前浏览器不支持音频解码');
-    const context = new Audio();
-    try {
-      const decoded = await context.decodeAudioData(await blob.arrayBuffer());
-      if (!decoded.length || decoded.duration > 61) throw Error('录音必须在 60 秒以内');
-      const length = Math.min(60 * 16000, Math.floor(decoded.duration * 16000));
-      if (!length) throw Error('录音为空');
-      const channels = Array.from({length: decoded.numberOfChannels}, (_, i) => decoded.getChannelData(i));
-      const result = new Float32Array(length);
-      for (let i = 0; i < length; i++) {
-        const sample = i * decoded.sampleRate / 16000, a = Math.floor(sample), b = Math.min(a + 1, decoded.length - 1);
-        for (const channel of channels) result[i] += (channel[a] * (1 - (sample - a)) + channel[b] * (sample - a)) / channels.length;
-      }
-      return result.buffer;
-    } finally { await context.close(); }
-  }
   async function transcribeVoice() {
     clearTimeout(state.mediaTimer);
     const recorder = state.mediaRecorder,
@@ -2433,18 +2554,16 @@
       return toast('该 Session 的 backend 已断开');
     }
     try {
-      const useSotto = Boolean(transcribeBackend.statusInfo?.sottoStt?.enabled);
-      const audio = useSotto ? await recordingToSottoPcm(blob) : blob;
       const response = await fetch(
         transcribeBackend.base + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe`,
         {
           method: 'POST',
           headers: {
             ...(transcribeBackend.token ? {Authorization: `Bearer ${transcribeBackend.token}`} : {}),
-            'Content-Type': useSotto ? 'application/octet-stream' : mime,
-            ...(!useSotto ? {'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'} : {})
+            'Content-Type': mime,
+            'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'
           },
-          body: audio
+          body: blob
         }
       );
       const body = await response.json().catch(() => ({}));

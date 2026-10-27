@@ -28,7 +28,7 @@ describe('local Sotto STT configuration and proxy', () => {
     let loads = 0, calls = 0;
     const sotto = http.createServer(async (req, res) => {
       res.setHeader('content-type', 'application/json');
-      if (req.url === '/api/capabilities') { loads++; return res.end(JSON.stringify({stt: true, format: 'pcm-f32le', sample_rate: 16000})); }
+      if (req.url === '/api/capabilities') { loads++; return res.end(JSON.stringify({stt: true, format: 'pcm-f32le', sample_rate: 16000, stream_port: (sotto.address() as any).port + 2})); }
       if (req.url === '/api/transcribe') {
         expect(req.headers['content-type']).toBe('application/octet-stream');
         let bytes = 0;

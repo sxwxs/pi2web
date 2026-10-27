@@ -9,7 +9,7 @@ import {createSdkBackend} from './sdk-backend.js';
 import {TerminalManager} from './terminals.js';
 import {MetadataStore} from './metadata-store.js';
 import {VoiceManager} from './voice.js';
-import {SottoSttService} from './sotto-stt.js';
+import {SottoSttService, proxySottoStream} from './sotto-stt.js';
 import {SessionNamer} from './session-namer.js';
 import {MailNotifier, type MailNotificationSettings} from './mail-notifier.js';
 import {CollabHub} from './collab/hub.js';
@@ -405,7 +405,8 @@ export class RemotePiServer {
           .find(x => x.startsWith('access-token.'))
           ?.slice(13);
     const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname,
-      isSocket = pathname === '/api/v1/ws' || /^\/api\/v1\/terminals\/[^/]+\/ws$/.test(pathname);
+      voiceMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/transcribe\/ws$/),
+      isSocket = pathname === '/api/v1/ws' || /^\/api\/v1\/terminals\/[^/]+\/ws$/.test(pathname) || !!voiceMatch;
     if (!isSocket) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -438,6 +439,22 @@ export class RemotePiServer {
       return;
     }
     this.loginLimiter.clear(key);
+    if (voiceMatch) {
+      try {
+        this.agents.get(decodeURIComponent(voiceMatch[1]));
+        this.sottoStt.streamUrl();
+      } catch {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      this.wss.handleUpgrade(req, socket, head, ws => {
+        this.clients.add(ws);
+        ws.on('close', () => this.clients.delete(ws));
+        proxySottoStream(ws, this.sottoStt);
+      });
+      return;
+    }
     this.wss.handleUpgrade(req, socket, head, ws => this.wss.emit('connection', ws, req));
   }
   private clientKey(req: http.IncomingMessage) {

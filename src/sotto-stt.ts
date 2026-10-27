@@ -1,4 +1,5 @@
 import type {MetadataStore} from './metadata-store.js';
+import {WebSocket} from 'ws';
 
 export const DEFAULT_SOTTO_ENDPOINT = 'http://127.0.0.1:8766';
 export type SottoSttSettings = {enabled: boolean; endpoint: string};
@@ -15,6 +16,54 @@ export function validateSottoEndpoint(value: unknown): string {
   return url.origin;
 }
 
+/** An authenticated browser socket relays only audio and start/stop, never a Sotto control API. */
+export function proxySottoStream(client: WebSocket, service: SottoSttService) {
+  const upstream = new WebSocket(service.streamUrl(), {handshakeTimeout: 5000, maxPayload: 65536});
+  let started = false, sampleRate = 0, bytes = 0, finished = false;
+  const timer = setTimeout(() => { client.close(1000, 'recording timeout'); upstream.close(); }, 75000);
+  const close = () => {
+    clearTimeout(timer);
+    if (upstream.readyState === WebSocket.OPEN) upstream.close();
+    else if (upstream.readyState === WebSocket.CONNECTING) upstream.terminate();
+  };
+  client.on('close', close);
+  upstream.on('error', () => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({type: 'error', message: 'Sotto streaming service is unavailable'}));
+      client.close(1011);
+    }
+  });
+  upstream.on('close', () => {
+    clearTimeout(timer);
+    if (client.readyState === WebSocket.OPEN) client.close();
+  });
+  upstream.on('message', (data, binary) => {
+    if (binary || client.readyState !== WebSocket.OPEN) return;
+    if (client.bufferedAmount > 1_000_000) { client.close(1009); return; }
+    client.send(data.toString());
+  });
+  client.on('message', (data, binary) => {
+    if (upstream.readyState !== WebSocket.OPEN || finished) return;
+    if (!binary) {
+      try {
+        const value = JSON.parse(data.toString());
+        if (!started && value.type === 'start' && value.format === 'float32' &&
+            Number.isInteger(value.sample_rate) && value.sample_rate >= 16000 && value.sample_rate <= 96000) {
+          started = true;
+          sampleRate = value.sample_rate;
+          upstream.send(JSON.stringify({type: 'start', format: 'float32', sample_rate: sampleRate}));
+        } else if (started && value.type === 'stop') {
+          finished = true;
+          upstream.send(JSON.stringify({type: 'stop'}));
+        } else client.close(1008, 'invalid audio protocol');
+      } catch { client.close(1008, 'invalid audio protocol'); }
+    } else if (started && (data as Buffer).byteLength <= 32768 &&
+               (bytes += (data as Buffer).byteLength) <= sampleRate * 4 * 60 &&
+               upstream.bufferedAmount < 1_000_000) upstream.send(data, {binary: true});
+    else client.close(1009, 'audio too large');
+  });
+}
+
 export class SottoSttService {
   private settings: SottoSttSettings = {enabled: false, endpoint: DEFAULT_SOTTO_ENDPOINT};
   constructor(private readonly metadata: MetadataStore, private readonly fetcher: typeof fetch = fetch) {}
@@ -26,6 +75,12 @@ export class SottoSttService {
     }
   }
   getSettings(): SottoSttSettings { return {...this.settings}; }
+  streamUrl() {
+    if (!this.settings.enabled) throw invalid('Sotto transcription is disabled', 'SOTTO_DISABLED');
+    const port = Number(new URL(this.settings.endpoint).port) + 2;
+    if (port > 65535) throw invalid('Invalid Sotto streaming port');
+    return `ws://127.0.0.1:${port}/asr`;
+  }
   private async request(path: string, init: RequestInit, timeoutMs: number) {
     const response = await this.fetcher(`${this.settings.endpoint}${path}`, {
       ...init, redirect: 'error', signal: AbortSignal.timeout(timeoutMs)
@@ -46,8 +101,9 @@ export class SottoSttService {
       try {
         this.settings = next;
         const capabilities = await (await this.request('/api/capabilities', {method: 'GET'}, 4000)).json();
-        if (capabilities?.stt !== true || capabilities?.format !== 'pcm-f32le' || capabilities?.sample_rate !== 16000)
-          throw invalid('Sotto does not support 16 kHz PCM transcription', 'SOTTO_UNAVAILABLE');
+        if (capabilities?.stt !== true || capabilities?.format !== 'pcm-f32le' || capabilities?.sample_rate !== 16000 ||
+            capabilities?.stream_port !== Number(new URL(next.endpoint).port) + 2)
+          throw invalid('Sotto does not support live PCM transcription', 'SOTTO_UNAVAILABLE');
       } catch (error) { this.settings = previous; throw error; }
     }
     this.settings = next;

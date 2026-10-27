@@ -119,7 +119,7 @@ pi2web \
 
 先在**与 pi2web Backend 同一台机器**启动支持 `/api/capabilities` 和 `/api/transcribe` 的 Sotto Web 版本，再在 pi2web 网页「配置 → Sotto 语音输入」勾选启用并保存。默认 endpoint 为 `http://127.0.0.1:8766`，指的是 **Backend 所在机器**，不是访问网页的手机或电脑；服务端只允许配置 IPv4 回环 HTTP 地址，不允许指向公网。启用时会探测 endpoint，不可用则不会保存开启状态。设置保存在 pi2web 的数据目录，所有使用该 Backend 的网页共享；默认关闭，不配语音识别时麦克风按钮保持隐藏。
 
-网页录音停止后在浏览器转成 16 kHz 单声道 PCM，再由 pi2web 服务端代理到本机 Sotto。Sotto 复用已加载的 ASR（没有加载时首次请求只加载一次）；录音**不会自动发送给 Agent**。浏览器需支持 `MediaRecorder`、`AudioContext.decodeAudioData` 并授予麦克风权限；语音按钮也可以在输入框内按 `Alt+Shift+V` 切换。Sotto 自己的 ASR 实时测试需要先停止才能使用此输入接口，普通监听可并存但共享同一个识别器。原有 `--voice-*` 语音摘要和 STT 功能保持独立；不要同时配置另一套 STT 模型，除非你确实需要第二个识别服务。
+浏览器点击麦克风后持续采集单声道 float32 PCM，经 pi2web 已认证的 Agent WebSocket 转发至本机 Sotto；Sotto 持续返回 **partial/final**，网页边说边更新输入框；再次点击停止并定稿，**不会自动发送给 Agent**。Sotto 复用已加载的 ASR（首次请求才加载一次），使用独立本机 WS 端口（默认 `8768`，即 Web 端口 +2），不对外开放。浏览器需支持安全上下文、Web Audio、麦克风权限；`Alt+Shift+V` 可启停。Sotto 的 ASR 实时测试运行时不能并用实时输入，普通监听可并存但共享同一个识别器。原有 `--voice-*` 语音摘要和 STT 功能保持独立；不要同时配置另一套 STT 模型，除非确实需要第二个识别服务。
 
 ### Edge TTS（仅语音合成）
 

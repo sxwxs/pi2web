@@ -31,6 +31,8 @@ paths:
     put: {operationId: setSottoSttSettings, description: 'Body {enabled: boolean, endpoint: http://127.0.0.1:<port>}; probes local Sotto capabilities before enabling. Requires full access token.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
   /agents/{id}/transcribe:
     post: {operationId: transcribeAgentDraft, description: 'When Sotto is enabled, body is 16 kHz mono float32 little-endian PCM (application/octet-stream; max 60 s); otherwise uses configured OpenAI-compatible STT audio. Returns {data:{text}} without submitting to the Agent.', parameters: [{$ref: '#/components/parameters/Id'}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /agents/{id}/transcribe/ws:
+    get: {operationId: streamSottoDraft, description: 'Authenticated WebSocket: start {type:start,format:float32,sample_rate}, binary mono PCM chunks, stop {type:stop}; forwards Sotto ready/partial/final/error messages. Only when Sotto is enabled; never submits to Agent.', parameters: [{$ref: '#/components/parameters/Id'}], responses: {'101': {description: 'WebSocket upgrade'}}}
   /agents/{id}/queue/move:
     post: {operationId: moveQueuedMessage, description: 'Move one unconsumed message to the other queue during a run. Body {from: steering|followUp, index: integer, expected: string}; rejects stale entries.', parameters: [{$ref: '#/components/parameters/Id'}], requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
   /agents/{id}/{action}:
