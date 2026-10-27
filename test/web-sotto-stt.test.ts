@@ -189,6 +189,65 @@ describe('Web Sotto input', () => {
     h.api.cancelVoiceRecording();
   });
 
+  it.each(['current', 'terminal', 'other', 'failed'])(
+    'cancels recording only when its Agent is successfully archived (%s)',
+    async scenario => {
+      const h = harness();
+      await h.start();
+      h.state.extensionStatus = new Map();
+      h.state.widgets = new Map();
+      const elements: any = {input: h.input, voiceInput: h.mic};
+      const target = scenario === 'other' ? {agentId: 'a:two'} : h.state.agent;
+      const {selectTerminal} = runInNewContext(
+        `${section('  function clearAgentSelection(', '  function clearTerminalSelection(')}
+        ${section('  async function selectTerminal(', '  const autoBindNewSession')}
+        ${section("  $('menuArchiveAgent').onclick =", "  document.addEventListener('click'")}
+        ({selectTerminal})`,
+        {
+          state: h.state,
+          $: (id: string) => (elements[id] ??= {}),
+          localStorage: {removeItem: vi.fn()},
+          cancelVoiceRecording: h.api.cancelVoiceRecording,
+          agentContextTarget: {kind: 'agent', item: target},
+          confirm: () => true,
+          postAgent: async () => {
+            if (scenario === 'failed') throw Error('archive failed');
+          },
+          sessionKeyboard: {unbind: vi.fn()},
+          refreshAgents: vi.fn(),
+          toast: h.toast,
+          updateVoiceAvailability: vi.fn(),
+          sendFocus: vi.fn(),
+          renderExtensionStatus: vi.fn(),
+          renderWidgets: vi.fn(),
+          updateTerminalHeader: vi.fn(),
+          renderAgentList: vi.fn(),
+          syncWorkspaceForSelection: vi.fn(),
+          connectTerminalSocket: vi.fn()
+        }
+      );
+      if (scenario === 'terminal') {
+        await selectTerminal({terminalId: 'a:terminal', backendId: 'a'}, false);
+        expect(elements.prompt.hidden).toBe(true);
+        expect(h.state.voiceStream.phase).toBe('recording');
+        expect(h.track.stop).not.toHaveBeenCalled();
+      }
+      await elements.menuArchiveAgent.onclick();
+      const archived = scenario === 'current' || scenario === 'terminal';
+      expect(h.track.stop).toHaveBeenCalledTimes(archived ? 1 : 0);
+      expect(h.contexts[0].close).toHaveBeenCalledTimes(archived ? 1 : 0);
+      expect(h.sockets[0].close).toHaveBeenCalledTimes(archived ? 1 : 0);
+      if (archived) {
+        expect(h.state.agent).toBeNull();
+        expect(h.state.voiceStream).toBeNull();
+      } else {
+        expect(h.state.agent.agentId).toBe('a:one');
+        expect(h.state.voiceStream.phase).toBe('recording');
+        h.api.cancelVoiceRecording();
+      }
+    }
+  );
+
   it('drains queued PCM and the tail before stop, then accepts final results', async () => {
     const h = harness();
     await h.start();

@@ -4000,16 +4000,7 @@
     try {
       await postAgent(agent.agentId, '/archive');
       sessionKeyboard.unbind(agent.agentId);
-      if (state.agent?.agentId === agent.agentId) {
-        state.agent = null;
-        localStorage.removeItem('rpAgentId');
-        $('agentTitle').textContent = '请选择 Agent';
-        $('agentStatus').textContent = '';
-        $('agentStateBadge').textContent = '未选择';
-        $('agentStateBadge').className = 'state-badge state-none';
-        $('contextUsage').hidden = true;
-        $('messages').innerHTML = '<div class="empty">选择或创建 Agent 开始对话</div>';
-      }
+      if (state.agent?.agentId === agent.agentId) clearAgentSelection();
       await refreshAgents();
       toast('Agent 已 Archive');
     } catch (e) {
