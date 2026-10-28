@@ -272,16 +272,25 @@ describe('Web Sotto input', () => {
     h.api.cancelVoiceRecording();
   });
 
-  it('keeps recording across sentence finals, pauses and the old one-minute limit', async () => {
+  it('keeps recording while text keeps arriving and stops after one minute without new text', async () => {
     const h = harness();
     await h.start();
     h.message({type: 'partial', segment: 0, text: '正在说'});
     expect(h.input.value).toBe('draft 正在说');
+    vi.advanceTimersByTime(50000);
     h.message({type: 'final', segment: 0, text: '第一句'});
-    vi.advanceTimersByTime(120000);
+    vi.advanceTimersByTime(50000);
+    h.message({type: 'partial', segment: 1, text: '第二句'});
+    vi.advanceTimersByTime(50000);
+    h.message({type: 'partial', segment: 1, text: '第二句'}); // repeated text is not new input
     expect(h.state.voiceStream.phase).toBe('recording');
     expect(h.track.stop).not.toHaveBeenCalled();
-    h.message({type: 'partial', segment: 1, text: '第二句'});
+    expect(h.input.value).toBe('draft 第一句 第二句');
+    vi.advanceTimersByTime(10000);
+    // Same as a manual stop: drain and finalise, keeping the recognised text.
+    expect(h.state.voiceStream.phase).toBe('draining');
+    expect(h.track.stop).toHaveBeenCalledOnce();
+    expect(h.toast).toHaveBeenCalledWith('1 分钟没有新的识别文字，语音输入已自动停止');
     expect(h.input.value).toBe('draft 第一句 第二句');
     expect(h.prompt).not.toHaveBeenCalled();
     h.api.cancelVoiceRecording();

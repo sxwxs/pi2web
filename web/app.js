@@ -2392,6 +2392,7 @@
     if (state.voiceStream !== voice) return;
     state.voiceStream = null;
     clearTimeout(voice.timer);
+    clearTimeout(voice.idleTimer);
     voice.stream?.getTracks().forEach(track => {
       track.onended = null;
       track.stop();
@@ -2433,6 +2434,7 @@
     if (voice.phase === 'starting') return finishSottoStream(voice, true);
     if (voice.phase !== 'recording') return;
     voice.phase = 'draining';
+    clearTimeout(voice.idleTimer);
     voice.source?.disconnect();
     voice.stream.getTracks().forEach(track => {
       track.onended = null;
@@ -2452,6 +2454,16 @@
     if (voice.socket.readyState !== WebSocket.OPEN || voice.socket.bufferedAmount >= 500000)
       return finishSottoStream(voice, true, '实时语音连接中断或处理不过来，录音已停止');
     voice.socket.send(pcm);
+  }
+  // Dictation survives switching views; it ends when the user stops it or nothing new is recognised.
+  const SOTTO_IDLE_MS = 60000;
+  function touchSottoIdle(voice) {
+    clearTimeout(voice.idleTimer);
+    voice.idleTimer = setTimeout(() => {
+      if (state.voiceStream !== voice || voice.phase !== 'recording') return;
+      toast('1 分钟没有新的识别文字，语音输入已自动停止');
+      stopSottoStream(voice);
+    }, SOTTO_IDLE_MS);
   }
   async function startSottoStream() {
     if (state.voiceStream) return;
@@ -2473,6 +2485,7 @@
       context: null,
       socket: null,
       timer: null,
+      idleTimer: null,
       node: null,
       source: null,
       sink: null
@@ -2533,6 +2546,7 @@
               .resume()
               .catch(error => finishSottoStream(voice, true, `无法启动麦克风：${error.message}`));
             clearTimeout(voice.timer);
+            touchSottoIdle(voice);
             $('voiceInput').textContent = '■';
             $('voiceInput').title = '正在录音，点击停止（停顿不会结束录音）';
             $('voiceInput').classList.add('recording');
@@ -2540,11 +2554,15 @@
             finishSottoStream(voice, true, `无法采集音频：${error.message}`);
           }
         } else if (msg.type === 'partial' && voice.phase === 'recording') {
-          voice.partial = String(msg.text || '');
+          const text = String(msg.text || '');
+          if (text && text !== voice.partial) touchSottoIdle(voice);
+          voice.partial = text;
           updateSottoDraft(voice);
         } else if (msg.type === 'final') {
           // A final ends one sentence, not the recording. Only the user's stop ends capture.
-          voice.finals.set(msg.segment, String(msg.text || ''));
+          const text = String(msg.text || '');
+          if (text && voice.phase === 'recording') touchSottoIdle(voice);
+          voice.finals.set(msg.segment, text);
           voice.partial = '';
           updateSottoDraft(voice);
         } else if (msg.type === 'error') {
