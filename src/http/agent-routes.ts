@@ -120,6 +120,8 @@ export async function handleAgentRoutes(
           u.searchParams.get('before') ?? undefined
         )
       });
+    if (req.method === 'GET' && parts[4] === 'performance' && parts.length === 5)
+      return send(200, {data: await ctx.agents.performance(id)});
     // /agents/:id/sessions/:sessionId/items/:itemId — items never change, and the session is part of the
     // URL so a cached body is never served for another one: let the browser keep it for good.
     if (req.method === 'GET' && parts[4] === 'sessions' && parts[6] === 'items' && parts.length === 8) {

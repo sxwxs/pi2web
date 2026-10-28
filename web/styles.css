@@ -104,3 +104,4 @@
 .activity-run{margin-left:auto;color:var(--muted);white-space:nowrap}
 .agent-activity{display:flex;align-items:center;gap:6px;margin-top:5px;font-size:11px;color:#c9d1de}
 .agent-activity .activity-chip{flex:1;min-width:0}
+.performance-list{max-height:58vh;overflow:auto}.performance-run{border:1px solid var(--line);border-radius:6px;margin:8px 0;padding:8px}.performance-run summary{cursor:pointer}.performance-row{margin:9px 0;font-size:12px}.performance-label{display:block;white-space:normal;overflow-wrap:anywhere;margin-bottom:3px}.performance-track{position:relative;height:9px;background:#1a1e26;border-radius:4px}.performance-track i{position:absolute;height:100%;border-radius:4px;min-width:2px}.performance-model{background:var(--blue)}.performance-tool{background:var(--yellow)}.performance-compaction,.performance-retry{background:#b48ead}

@@ -19,6 +19,7 @@ import type {
 import type {AgentTemplateSnapshot} from './agent-templates.js';
 import type {TimelineSource} from './agent-feed.js';
 import type {TimelineEntry} from './timeline.js';
+import {PERFORMANCE_ENTRY, SessionPerformanceTracker} from './session-performance.js';
 
 export type BackendOptions = {
   /** System prompt template copied onto the Agent at creation time. */
@@ -44,7 +45,12 @@ export class SdkBackend implements AgentBackend {
     private readonly session: AgentSession,
     private readonly agentId: string,
     private readonly cwd: string
-  ) {}
+  ) {
+    const performance = new SessionPerformanceTracker(run =>
+      this.session.sessionManager.appendCustomEntry(PERFORMANCE_ENTRY, run)
+    );
+    this.session.subscribe(event => performance.apply(event as AgentEvent));
+  }
   static async create(
     agentId: string,
     cwd: string,

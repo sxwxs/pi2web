@@ -406,8 +406,12 @@ export class RemotePiServer {
           ?.slice(13);
     const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname,
       voiceMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/transcribe\/ws$/),
+      isTranscription = pathname === '/api/v1/transcribe/ws',
       isSocket =
-        pathname === '/api/v1/ws' || /^\/api\/v1\/terminals\/[^/]+\/ws$/.test(pathname) || !!voiceMatch;
+        pathname === '/api/v1/ws' ||
+        /^\/api\/v1\/terminals\/[^/]+\/ws$/.test(pathname) ||
+        !!voiceMatch ||
+        isTranscription;
     if (!isSocket) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -440,9 +444,9 @@ export class RemotePiServer {
       return;
     }
     this.loginLimiter.clear(key);
-    if (voiceMatch) {
+    if (voiceMatch || isTranscription) {
       try {
-        this.agents.get(decodeURIComponent(voiceMatch[1]));
+        if (voiceMatch) this.agents.get(decodeURIComponent(voiceMatch[1]));
         this.sottoStt.streamUrl();
       } catch {
         socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
@@ -662,6 +666,20 @@ export class RemotePiServer {
         if (req.method === 'GET') return json(res, 200, {data: this.sottoStt.getSettings()});
         if (req.method === 'PUT')
           return json(res, 200, {data: await this.sottoStt.update(await readJsonBody(req))});
+      }
+      if (req.method === 'POST' && u.pathname === '/api/v1/transcribe') {
+        const mime = String(req.headers['content-type'] ?? 'audio/webm').split(';')[0];
+        if (this.sottoStt.getSettings().enabled) {
+          if (mime !== 'application/octet-stream')
+            throw Object.assign(new Error('Sotto requires 16 kHz float32 PCM'), {code: 'INVALID_REQUEST'});
+          return json(res, 200, {data: await this.sottoStt.transcribe(await readBinaryBody(req))});
+        }
+        if (!this.voice)
+          throw Object.assign(new Error('Voice service is disabled'), {code: 'VOICE_DISABLED'});
+        const filename = String(req.headers['x-audio-filename'] ?? 'recording.webm');
+        return json(res, 200, {
+          data: await this.voice.transcribe(await readBinaryBody(req), mime, filename)
+        });
       }
       if (
         await handleMailSettingsRoutes(

@@ -19,8 +19,10 @@ afterEach(async () => {
 /** Exercise the public SDK adapter with a fake session: no model calls or user files. */
 async function createBackend() {
   const sessionEvents = new EventEmitter();
+  const manager = SessionManager.inMemory(process.cwd());
   let ui!: ExtensionUIContext;
   const session = {
+    sessionManager: manager,
     sessionId: 'test-session',
     isStreaming: false,
     state: {messages: [], model: null},
@@ -37,7 +39,7 @@ async function createBackend() {
       };
     }
   };
-  vi.spyOn(SessionManager, 'create').mockReturnValue(SessionManager.inMemory(process.cwd()));
+  vi.spyOn(SessionManager, 'create').mockReturnValue(manager);
   vi.mocked(createAgentSession).mockResolvedValue({session} as any);
   const backend = await SdkBackend.create('agent-a', process.cwd());
   backends.push(backend);
@@ -51,6 +53,24 @@ async function createBackend() {
 const bashResult = {output: '', exitCode: 0, cancelled: false, truncated: false};
 
 describe('SDK backend activity events', () => {
+  it('persists timing spans in the session branch without adding model context', async () => {
+    const {sessionEvents, session} = await createBackend();
+    sessionEvents.emit('event', {type: 'agent_start'});
+    sessionEvents.emit('event', {type: 'turn_start'});
+    sessionEvents.emit('event', {type: 'message_update'});
+    sessionEvents.emit('event', {type: 'message_end', message: {role: 'assistant'}});
+    sessionEvents.emit('event', {type: 'agent_end'});
+    expect(session.sessionManager.getBranch()).toEqual([
+      expect.objectContaining({
+        type: 'custom',
+        customType: 'pi2web.performance.v1',
+        data: expect.objectContaining({
+          spans: [expect.objectContaining({kind: 'model', firstResponse: expect.any(Number)})]
+        })
+      })
+    ]);
+  });
+
   it('announces a silent bash command before waiting for its completion', async () => {
     const {backend, session, events, otherClientEvents} = await createBackend();
     let finish!: (value: typeof bashResult) => void;

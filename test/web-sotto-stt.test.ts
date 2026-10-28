@@ -13,7 +13,11 @@ const deferred = () => {
   return {promise, resolve};
 };
 
-function harness({acquisition, moduleLoad}: {acquisition?: Promise<any>; moduleLoad?: Promise<any>} = {}) {
+function harness({
+  acquisition,
+  moduleLoad,
+  remote = false
+}: {acquisition?: Promise<any>; moduleLoad?: Promise<any>; remote?: boolean} = {}) {
   const sent: any[] = [],
     sockets: any[] = [],
     contexts: any[] = [];
@@ -57,22 +61,30 @@ function harness({acquisition, moduleLoad}: {acquisition?: Promise<any>; moduleL
     static CONNECTING = 0;
     readyState = 1;
     bufferedAmount = 0;
+    url: string;
     send = vi.fn(data => sent.push(data));
     close = vi.fn();
-    constructor() {
+    constructor(url: string) {
+      this.url = url;
       sockets.push(this);
     }
   }
-  const state: any = {agent: {agentId: 'a:one', backendId: 'a'}, voiceStream: null, voiceSttEnabled: true};
+  const state: any = {
+    agent: remote ? {agentId: 'b:remote', backendId: 'b'} : {agentId: 'a:one', backendId: 'a'},
+    voiceStream: null,
+    voiceSttEnabled: true
+  };
   const toast = vi.fn(),
     prompt = vi.fn();
   const backend = {
     id: 'a',
     status: 'connected',
+    voiceSttEnabled: true,
     base: 'http://127.0.0.1:11318',
     token: '',
     statusInfo: {sottoStt: {enabled: true}}
   };
+  const remoteBackend = {id: 'b', status: 'connected', voiceSttEnabled: false};
   const api = runInNewContext(
     `${voiceStatus}
     ${section('  function updateSottoDraft(', '  async function transcribeVoice(')}
@@ -80,12 +92,13 @@ function harness({acquisition, moduleLoad}: {acquisition?: Promise<any>; moduleL
     ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability})`,
     {
       state,
+      location: {origin: backend.base},
       $: (id: string) => (id === 'input' ? input : mic),
-      backendOf: () => backend,
-      connectedBackends: () => [backend],
+      backendOf: (id: string) => (id === 'b' ? remoteBackend : backend),
+      connectedBackends: () => (remote ? [remoteBackend, backend] : [backend]),
       stopVoiceAudio: vi.fn(),
       updateVoiceButton: vi.fn(),
-      splitResourceKey: () => ({remoteId: 'one', backendId: 'a'}),
+      splitResourceKey: (id: string) => ({remoteId: id.split(':')[1], backendId: id.split(':')[0]}),
       navigator: {mediaDevices: {getUserMedia}},
       window: {AudioContext, AudioWorkletNode},
       AudioWorkletNode,
@@ -124,15 +137,28 @@ describe('Web Sotto input', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('hides the mic until the selected Agent backend has STT enabled', () => {
+  it('uses only the page-serving local backend for speech, even on a remote Agent', () => {
     const mic = {hidden: false, title: ''},
       playback = {hidden: true};
-    const a = {id: 'a', status: 'connected', voiceEnabled: false, voiceSttEnabled: true};
-    const b = {id: 'b', status: 'connected', voiceEnabled: false, voiceSttEnabled: false};
+    const a = {
+      id: 'a',
+      base: 'http://127.0.0.1:11318',
+      status: 'connected',
+      voiceEnabled: false,
+      voiceSttEnabled: true
+    };
+    const b = {
+      id: 'b',
+      base: 'https://remote.example',
+      status: 'connected',
+      voiceEnabled: false,
+      voiceSttEnabled: false
+    };
     const state: any = {agent: null};
     const {updateVoiceAvailability} = runInNewContext(`${voiceStatus}\n({updateVoiceAvailability})`, {
       state,
-      connectedBackends: () => [a, b],
+      location: {origin: a.base},
+      connectedBackends: () => [b, a],
       backendOf: (id: string) => (id === 'a' ? a : b),
       $: (id: string) => (id === 'voiceInput' ? mic : playback),
       stopVoiceAudio: vi.fn(),
@@ -142,19 +168,36 @@ describe('Web Sotto input', () => {
     expect(mic.hidden).toBe(true);
     state.agent = {backendId: 'b'};
     updateVoiceAvailability();
-    expect(mic.hidden).toBe(true);
+    expect(mic.hidden).toBe(false);
     state.agent = {backendId: 'a'};
     updateVoiceAvailability();
     expect(mic.hidden).toBe(false);
     a.voiceSttEnabled = false;
+    b.voiceSttEnabled = true;
     updateVoiceAvailability();
-    expect(mic.hidden).toBe(true);
+    expect(mic.hidden).toBe(true); // Remote recognition is never a fallback.
+  });
+
+  it('always edits the page-serving backend settings, not the selected remote workspace', () => {
+    const local = {id: 'local', base: 'http://127.0.0.1:11318', status: 'connected'};
+    const remote = {id: 'remote', base: 'https://remote.example', status: 'connected'};
+    const {sottoConfigBackend} = runInNewContext(
+      `${voiceStatus}\n${section('  function sottoConfigBackend()', '  async function loadSottoSettings()')}\n({sottoConfigBackend})`,
+      {
+        state: {workspace: {backendId: 'remote'}},
+        location: {origin: local.base},
+        connectedBackends: () => [remote, local]
+      }
+    );
+    expect(sottoConfigBackend()).toBe(local);
+    local.status = 'off';
+    expect(sottoConfigBackend()).toBeNull();
   });
 
   it.each([false, true])(
     'refreshes authoritative STT capability after saving (independent STT: %s)',
     async independentStt => {
-      const backend: any = {id: 'a', status: 'connected'};
+      const backend: any = {id: 'a', base: 'http://127.0.0.1:11318', status: 'connected'};
       const elements: any = {sottoEnabled: {checked: false}, sottoEndpoint: {value: 'http://127.0.0.1:8766'}};
       const settings = {enabled: false, endpoint: 'http://127.0.0.1:8766'};
       const requestBackend = vi.fn(async (_id, url) =>
@@ -172,6 +215,7 @@ describe('Web Sotto input', () => {
       ({applyVoiceStatus, saveSottoSettings})`,
         {
           state: {agent: {backendId: 'a'}, sottoBackendId: 'a'},
+          location: {origin: 'http://127.0.0.1:11318'},
           backendOf: () => backend,
           connectedBackends: () => [backend],
           $: (id: string) => (elements[id] ??= {}),
@@ -191,6 +235,18 @@ describe('Web Sotto input', () => {
       expect(elements.voiceInput.hidden).toBe(!independentStt);
     }
   );
+
+  it('streams a remote Agent draft through the local speech backend and cancels when it changes', async () => {
+    const h = harness({remote: true});
+    h.api.updateVoiceAvailability();
+    expect(h.mic.hidden).toBe(false);
+    await h.start();
+    expect(h.sockets[0].url).toBe('ws://127.0.0.1:11318/api/v1/transcribe/ws');
+    expect(h.state.voiceStream.agentId).toBe('b:remote');
+    expect(h.state.voiceStream.transcribeBackendId).toBe('a');
+    h.api.applyVoiceStatus(h.backend, {sottoStt: {enabled: false}, voiceCapabilities: {stt: false}});
+    expect(h.state.voiceStream).toBeNull();
+  });
 
   it.each([false, true])(
     'stops Sotto before updating availability when it is disabled (other STT: %s)',
