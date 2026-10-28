@@ -123,6 +123,8 @@ function proxySottoStream(client: WebSocket, url: string) {
 export class SottoSttService {
   private streams = new Set<(reason: string) => void>();
   private settings: SottoSttSettings = {enabled: false, endpoint: DEFAULT_SOTTO_ENDPOINT};
+  /** Bumped by every update, so a slow enable probe cannot overwrite a newer choice. */
+  private updates = 0;
   constructor(
     private readonly metadata: MetadataStore,
     private readonly fetcher: typeof fetch = fetch
@@ -170,6 +172,7 @@ export class SottoSttService {
     const {enabled, endpoint} = input as Record<string, unknown>;
     if (typeof enabled !== 'boolean') throw invalid('enabled must be a boolean');
     const next = {enabled, endpoint: validateSottoEndpoint(endpoint)};
+    const update = ++this.updates;
     if (enabled) {
       const capabilities = await (
         await this.request(next.endpoint, '/api/capabilities', {method: 'GET'}, 4000)
@@ -181,6 +184,8 @@ export class SottoSttService {
         capabilities?.stream_port !== Number(new URL(next.endpoint).port) + 2
       )
         throw invalid('Sotto does not support live PCM transcription', 'SOTTO_UNAVAILABLE');
+      if (update !== this.updates)
+        throw invalid('Sotto settings were changed by a newer request', 'SOTTO_SETTINGS_SUPERSEDED');
     }
     this.metadata.setSetting('sottoStt', next);
     const changed = !next.enabled || next.endpoint !== this.settings.endpoint;

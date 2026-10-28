@@ -44,6 +44,28 @@ describe('local Sotto STT configuration and proxy', () => {
     expect(setSetting).toHaveBeenCalledExactlyOnceWith('sottoStt', saved);
   });
 
+  it('does not let an older pending enable reverse a newer disable', async () => {
+    let resolve!: (response: Response) => void;
+    const slow = new Promise<Response>(r => {
+      resolve = r;
+    });
+    const setSetting = vi.fn();
+    const service = new SottoSttService(
+      {setSetting} as unknown as MetadataStore,
+      vi.fn(() => slow)
+    );
+    const enabling = service
+      .update({enabled: true, endpoint: 'http://127.0.0.1:20000'})
+      .catch(error => error);
+    const disabled = await service.update({enabled: false, endpoint: 'http://127.0.0.1:20000'});
+    resolve(
+      new Response(JSON.stringify({stt: true, format: 'pcm-f32le', sample_rate: 16000, stream_port: 20002}))
+    );
+    expect((await enabling).code).toBe('SOTTO_SETTINGS_SUPERSEDED');
+    expect(service.getSettings()).toEqual(disabled);
+    expect(setSetting).toHaveBeenCalledExactlyOnceWith('sottoStt', disabled);
+  });
+
   it('does not publish settings if persistence fails', async () => {
     const service = new SottoSttService({
       setSetting: () => {
