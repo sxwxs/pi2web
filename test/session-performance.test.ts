@@ -26,9 +26,11 @@ describe('session performance', () => {
     send(1510, {type: 'turn_start'});
     send(1650, {type: 'message_end', message: {role: 'assistant'}});
     send(1700, {type: 'agent_end'});
+    expect(save).not.toHaveBeenCalled();
+    send(1710, {type: 'agent_settled'});
     expect(save).toHaveBeenCalledWith({
       start: 1000,
-      end: 1700,
+      end: 1710,
       spans: [
         {kind: 'model', start: 1010, end: 1300, firstResponse: 1100},
         {kind: 'tool', start: 1310, end: 1400, name: 'read', toolCallId: 'a'},
@@ -36,7 +38,7 @@ describe('session performance', () => {
         {kind: 'model', start: 1510, end: 1650}
       ]
     });
-    send(1800, {type: 'agent_end'});
+    send(1800, {type: 'agent_settled'});
     expect(save).toHaveBeenCalledOnce();
   });
 
@@ -51,12 +53,67 @@ describe('session performance', () => {
     t.apply({type: 'tool_execution_start', toolCallId: 'a', toolName: 'bash'});
     now = 20;
     t.apply({type: 'agent_end', aborted: true});
+    expect(save).not.toHaveBeenCalled();
+    now = 25;
+    t.apply({type: 'agent_settled'});
     expect(save).toHaveBeenCalledWith({
       start: 0,
-      end: 20,
+      end: 25,
       incomplete: true,
-      spans: [{kind: 'tool', name: 'bash', toolCallId: 'a', start: 15, end: 20, incomplete: true}]
+      spans: [{kind: 'tool', name: 'bash', toolCallId: 'a', start: 15, end: 25, incomplete: true}]
     });
+  });
+
+  it('includes compaction after agent_end without counting it as model time', () => {
+    let now = 0;
+    const save = vi.fn();
+    const tracker = new SessionPerformanceTracker(save, () => now);
+    tracker.apply({type: 'agent_start'});
+    now = 10;
+    tracker.apply({type: 'turn_start'});
+    now = 20;
+    tracker.apply({type: 'agent_end'});
+    now = 30;
+    tracker.apply({type: 'compaction_start'});
+    now = 90;
+    tracker.apply({type: 'compaction_end'});
+    now = 100;
+    tracker.apply({type: 'agent_settled'});
+    expect(save).toHaveBeenCalledWith({
+      start: 0,
+      end: 100,
+      spans: [
+        {kind: 'model', start: 10, end: 20},
+        {kind: 'compaction', start: 30, end: 90}
+      ]
+    });
+  });
+
+  it('closes a cancelled retry so the next prompt gets a separate run', () => {
+    let now = 0;
+    const save = vi.fn();
+    const tracker = new SessionPerformanceTracker(save, () => now);
+    tracker.apply({type: 'agent_start'});
+    now = 10;
+    tracker.apply({type: 'agent_end', willRetry: true});
+    now = 11;
+    tracker.apply({type: 'auto_retry_start'});
+    now = 30;
+    tracker.apply({type: 'auto_retry_end', success: false, finalError: 'Retry cancelled'});
+    now = 35;
+    tracker.apply({type: 'agent_settled'});
+    now = 50;
+    tracker.apply({type: 'agent_start'});
+    now = 60;
+    tracker.apply({type: 'agent_settled'});
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[0][0]).toEqual({
+      start: 0,
+      end: 35,
+      incomplete: true,
+      spans: [{kind: 'retry', start: 11, end: 30}]
+    });
+    expect(save.mock.calls[1][0]).toEqual({start: 50, end: 60, spans: []});
   });
 
   it('returns branch-local records and legacy tool durations without inventing model timings', () => {

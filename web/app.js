@@ -380,9 +380,22 @@
   // The page is opened on the user's own pi2web server. Never route microphone audio to a remote Backend.
   function localBackend() {
     return (
-      connectedBackends().find(
-        backend => backend.status === 'connected' && backend.base === location.origin
-      ) || null
+      connectedBackends().find(backend => {
+        if (backend.status !== 'connected') return false;
+        try {
+          const url = new URL(backend.base);
+          return (
+            url.origin === location.origin &&
+            url.pathname === '/' &&
+            !url.username &&
+            !url.password &&
+            !url.search &&
+            !url.hash
+          );
+        } catch {
+          return false;
+        }
+      }) || null
     );
   }
   function transcriptionBackend() {
@@ -3189,6 +3202,11 @@
     }
   }
 
+  const el = (tag, props = {}, ...children) => {
+    const node = Object.assign(document.createElement(tag), props);
+    node.append(...children);
+    return node;
+  };
   function modal(title, build, okText = '确定') {
     const dialog = $('modal'),
       body = $('modalBody');
@@ -3539,11 +3557,6 @@
       return toast(`读取失败：${error.message}（Backend 可能版本过旧）`);
     }
     if ($('configDialog').open) $('configDialog').close();
-    const el = (tag, props = {}, ...children) => {
-      const node = Object.assign(document.createElement(tag), props);
-      node.append(...children);
-      return node;
-    };
     const section = (title, note) =>
       el(
         'section',

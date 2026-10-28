@@ -15,7 +15,7 @@ export type PerformanceRun = {start: number; end: number; spans: PerformanceSpan
 
 /** Wall-clock spans, collected on the host running Pi. Parallel tool spans deliberately overlap. */
 export class SessionPerformanceTracker {
-  private run: {start: number; spans: PerformanceSpan[]} | null = null;
+  private run: {start: number; spans: PerformanceSpan[]; incomplete?: boolean} | null = null;
   private model: PerformanceSpan | null = null;
   private tools = new Map<string, PerformanceSpan>();
   private other: PerformanceSpan | null = null;
@@ -82,9 +82,15 @@ export class SessionPerformanceTracker {
       case 'auto_retry_end':
         this.finish(this.other, at);
         this.other = null;
+        if (event.type === 'auto_retry_end' && e.finalError === 'Retry cancelled') this.run.incomplete = true;
         break;
       case 'agent_end':
-        if (e.willRetry) break;
+        this.finish(this.model, at);
+        this.model = null;
+        if (e.aborted) this.run.incomplete = true;
+        break;
+      case 'agent_settled':
+        // Unlike agent_end, this also follows post-run compaction or a cancelled retry delay.
         this.finish(this.model, at);
         this.finish(this.other, at);
         for (const span of this.tools.values()) {
@@ -95,7 +101,7 @@ export class SessionPerformanceTracker {
           start: this.run.start,
           end: at,
           spans: this.run.spans,
-          ...(e.aborted ? {incomplete: true} : {})
+          ...(this.run.incomplete ? {incomplete: true} : {})
         });
         this.run = null;
         this.model = this.other = null;

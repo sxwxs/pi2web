@@ -93,6 +93,7 @@ function harness({
     {
       state,
       location: {origin: backend.base},
+      URL,
       $: (id: string) => (id === 'input' ? input : mic),
       backendOf: (id: string) => (id === 'b' ? remoteBackend : backend),
       connectedBackends: () => (remote ? [remoteBackend, backend] : [backend]),
@@ -158,6 +159,7 @@ describe('Web Sotto input', () => {
     const {updateVoiceAvailability} = runInNewContext(`${voiceStatus}\n({updateVoiceAvailability})`, {
       state,
       location: {origin: a.base},
+      URL,
       connectedBackends: () => [b, a],
       backendOf: (id: string) => (id === 'a' ? a : b),
       $: (id: string) => (id === 'voiceInput' ? mic : playback),
@@ -186,12 +188,27 @@ describe('Web Sotto input', () => {
       {
         state: {workspace: {backendId: 'remote'}},
         location: {origin: local.base},
+        URL,
         connectedBackends: () => [remote, local]
       }
     );
     expect(sottoConfigBackend()).toBe(local);
     local.status = 'off';
     expect(sottoConfigBackend()).toBeNull();
+  });
+
+  it('compares canonical local origins but never matches a non-root service', () => {
+    const backend = {base: 'https://example.com:443/', status: 'connected'};
+    const {localBackend} = runInNewContext(`${voiceStatus}\n({localBackend})`, {
+      connectedBackends: () => [backend],
+      location: {origin: 'https://example.com'},
+      URL
+    });
+    expect(localBackend()).toBe(backend);
+    for (const base of ['https://example.com/api', 'https://example.com/?x=1', 'https://other.example/']) {
+      backend.base = base;
+      expect(localBackend()).toBeNull();
+    }
   });
 
   it.each([false, true])(
@@ -216,6 +233,7 @@ describe('Web Sotto input', () => {
         {
           state: {agent: {backendId: 'a'}, sottoBackendId: 'a'},
           location: {origin: 'http://127.0.0.1:11318'},
+          URL,
           backendOf: () => backend,
           connectedBackends: () => [backend],
           $: (id: string) => (elements[id] ??= {}),

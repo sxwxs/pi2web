@@ -60,6 +60,7 @@ describe('SDK backend activity events', () => {
     sessionEvents.emit('event', {type: 'message_update'});
     sessionEvents.emit('event', {type: 'message_end', message: {role: 'assistant'}});
     sessionEvents.emit('event', {type: 'agent_end'});
+    sessionEvents.emit('event', {type: 'agent_settled'});
     expect(session.sessionManager.getBranch()).toEqual([
       expect.objectContaining({
         type: 'custom',
