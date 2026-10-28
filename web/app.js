@@ -84,6 +84,8 @@
     mediaStream: null,
     mediaTimer: null,
     mediaAgentId: null,
+    /** Messages that failed after the user switched away; restored when that Agent is selected again. */
+    failedSends: new Map(),
     mailBackendId: null,
     mailRequest: 0,
     sottoBackendId: null,
@@ -1564,6 +1566,12 @@
     state.terminalWs = null;
     state.agent = agent;
     updateVoiceAvailability();
+    const failed = state.failedSends.get(agent.agentId);
+    if (failed !== undefined) {
+      state.failedSends.delete(agent.agentId);
+      prependInput(failed);
+      toast('之前发送失败的消息已放回输入框');
+    }
     localStorage.rpAgentId = agent.agentId;
     localStorage.rpSelectedKind = 'agent';
     showAgentView();
@@ -4069,6 +4077,9 @@
       toast('Compact 完成');
     }
   };
+  function prependInput(text) {
+    $('input').value = text + ($('input').value ? `\n${$('input').value}` : '');
+  }
   $('prompt').onsubmit = async event => {
     event.preventDefault();
     if (!state.agent) return toast('请先创建或选择 Agent');
@@ -4106,8 +4117,16 @@
       if (mode !== 'prompt' && sent?.disposition)
         toast(sent.disposition === 'queued' ? '已排队，等待当前回合' : '已送达当前回合');
     } catch (e) {
-      $('input').value = text + ($('input').value ? `\n${$('input').value}` : '');
-      addCard('发送失败', e.message, 'error', true);
+      // The composer is shared: only restore into it while the failed Agent is still selected.
+      if (state.agent?.agentId === agentId) {
+        prependInput(text);
+        addCard('发送失败', e.message, 'error', true);
+      } else {
+        const pending = state.failedSends.get(agentId);
+        state.failedSends.set(agentId, pending === undefined ? text : `${text}\n${pending}`);
+        const agent = state.agents.find(item => item.agentId === agentId);
+        toast(`发送到「${agent ? agentLabel(agent) : agentId}」失败：${e.message}；切回该会话时会放回输入框`);
+      }
     }
   };
   $('input').onkeydown = event => {
