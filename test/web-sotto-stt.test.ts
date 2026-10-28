@@ -17,7 +17,13 @@ function harness({acquisition, moduleLoad}: {acquisition?: Promise<any>; moduleL
   const sent: any[] = [],
     sockets: any[] = [],
     contexts: any[] = [];
-  const mic = {disabled: false, textContent: '', title: '', classList: {add: vi.fn(), remove: vi.fn()}};
+  const mic = {
+    disabled: false,
+    hidden: false,
+    textContent: '',
+    title: '',
+    classList: {add: vi.fn(), remove: vi.fn()}
+  };
   const input = {
     value: 'draft ',
     selectionStart: 6,
@@ -60,14 +66,25 @@ function harness({acquisition, moduleLoad}: {acquisition?: Promise<any>; moduleL
   const state: any = {agent: {agentId: 'a:one', backendId: 'a'}, voiceStream: null, voiceSttEnabled: true};
   const toast = vi.fn(),
     prompt = vi.fn();
+  const backend = {
+    id: 'a',
+    status: 'connected',
+    base: 'http://127.0.0.1:11318',
+    token: '',
+    statusInfo: {sottoStt: {enabled: true}}
+  };
   const api = runInNewContext(
-    `${section('  function updateSottoDraft(', '  async function transcribeVoice(')}
+    `${voiceStatus}
+    ${section('  function updateSottoDraft(', '  async function transcribeVoice(')}
     ${section('  function cancelVoiceRecording(', '  function clearAgentSelection(')}
-    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording})`,
+    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability})`,
     {
       state,
       $: (id: string) => (id === 'input' ? input : mic),
-      backendOf: () => ({base: 'http://127.0.0.1:11318', token: '', statusInfo: {sottoStt: {enabled: true}}}),
+      backendOf: () => backend,
+      connectedBackends: () => [backend],
+      stopVoiceAudio: vi.fn(),
+      updateVoiceButton: vi.fn(),
       splitResourceKey: () => ({remoteId: 'one', backendId: 'a'}),
       navigator: {mediaDevices: {getUserMedia}},
       window: {AudioContext, AudioWorkletNode},
@@ -86,6 +103,7 @@ function harness({acquisition, moduleLoad}: {acquisition?: Promise<any>; moduleL
   };
   return {
     api,
+    backend,
     state,
     sent,
     sockets,
@@ -173,6 +191,86 @@ describe('Web Sotto input', () => {
       expect(elements.voiceInput.hidden).toBe(!independentStt);
     }
   );
+
+  it.each([false, true])(
+    'stops Sotto before updating availability when it is disabled (other STT: %s)',
+    async independentStt => {
+      const h = harness();
+      await h.start();
+      h.api.applyVoiceStatus(h.backend, {
+        sottoStt: {enabled: false},
+        voiceCapabilities: {tts: false, stt: independentStt}
+      });
+      h.api.updateVoiceAvailability();
+      expect(h.state.voiceStream).toBeNull();
+      expect(h.track.stop).toHaveBeenCalledOnce();
+      expect(h.contexts[0].close).toHaveBeenCalledOnce();
+      expect(h.sockets[0].close).toHaveBeenCalledOnce();
+      expect(h.mic.hidden).toBe(!independentStt);
+    }
+  );
+
+  it('invalidates pending microphone permission when Sotto is disabled', async () => {
+    const acquisition = deferred(),
+      h = harness({acquisition: acquisition.promise});
+    const starting = h.api.startSottoStream();
+    h.api.applyVoiceStatus(h.backend, {sottoStt: {enabled: false}, voiceCapabilities: {stt: false}});
+    acquisition.resolve(h.stream);
+    await starting;
+    expect(h.state.voiceStream).toBeNull();
+    expect(h.track.stop).toHaveBeenCalledOnce();
+    expect(h.contexts).toHaveLength(0);
+    expect(h.sockets).toHaveLength(0);
+  });
+
+  it('does not interrupt a different Backend and ends capture when its own endpoint changes', async () => {
+    const h = harness();
+    await h.start();
+    h.api.applyVoiceStatus({id: 'b'}, {sottoStt: {enabled: false}});
+    expect(h.state.voiceStream.phase).toBe('recording');
+    h.api.applyVoiceStatus(h.backend, {
+      sottoStt: {enabled: true, endpoint: 'http://127.0.0.1:9000'},
+      voiceCapabilities: {stt: true}
+    });
+    expect(h.state.voiceStream).toBeNull();
+    expect(h.track.stop).toHaveBeenCalledOnce();
+  });
+
+  it('applies a saved disable even if the subsequent status refresh fails', async () => {
+    const h = harness();
+    await h.start();
+    h.state.sottoBackendId = 'a';
+    const elements: any = {sottoEnabled: {checked: false}, sottoEndpoint: {value: 'http://127.0.0.1:8766'}};
+    const {saveSottoSettings} = runInNewContext(
+      `${section('  async function saveSottoSettings(', '  function updateConfigUi(')}\n({saveSottoSettings})`,
+      {
+        state: h.state,
+        $: (id: string) => (elements[id] ??= {}),
+        backendOf: () => h.backend,
+        applyVoiceStatus: h.api.applyVoiceStatus,
+        updateVoiceAvailability: h.api.updateVoiceAvailability,
+        requestBackend: async (_id: string, url: string) => {
+          if (url === '/api/v1/sotto-stt') return {enabled: false, endpoint: 'http://127.0.0.1:8766'};
+          throw Error('status unavailable');
+        },
+        toast: h.toast
+      }
+    );
+    await saveSottoSettings();
+    expect(h.state.voiceStream).toBeNull();
+    expect(h.track.stop).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an existing recording stoppable even when starting a new one is unavailable', async () => {
+    const h = harness();
+    await h.start();
+    h.state.voiceSttEnabled = false;
+    h.state.agent = null;
+    await h.api.toggleVoiceInput();
+    expect(h.state.voiceStream.phase).toBe('draining');
+    expect(h.track.stop).toHaveBeenCalledOnce();
+    h.api.cancelVoiceRecording();
+  });
 
   it('keeps recording across sentence finals, pauses and the old one-minute limit', async () => {
     const h = harness();

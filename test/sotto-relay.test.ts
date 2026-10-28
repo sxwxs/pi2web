@@ -1,6 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {proxySottoStream} from '../src/sotto-stt.js';
-import type {SottoSttService} from '../src/sotto-stt.js';
+import {SottoSttService} from '../src/sotto-stt.js';
 import {WebSocket} from 'ws';
 
 vi.mock('ws', async () => {
@@ -28,7 +27,23 @@ vi.mock('ws', async () => {
 
 function relay() {
   const client = new WebSocket('ws://browser');
-  proxySottoStream(client, {streamUrl: () => 'ws://sotto/asr'} as SottoSttService);
+  const setSetting = vi.fn();
+  const service = new SottoSttService(
+    {getSetting: () => ({enabled: true, endpoint: 'http://127.0.0.1:8766'}), setSetting} as any,
+    vi.fn(
+      async (url: any) =>
+        new Response(
+          JSON.stringify({
+            stt: true,
+            format: 'pcm-f32le',
+            sample_rate: 16000,
+            stream_port: Number(new URL(String(url)).port) + 2
+          })
+        )
+    )
+  );
+  service.load();
+  service.stream(client);
   const upstream: WebSocket = (WebSocket as any).latest;
   const start = () =>
     client.emit(
@@ -38,12 +53,52 @@ function relay() {
     );
   const pcm = () => client.emit('message', Buffer.alloc(4096 * 4), true);
   const stop = () => client.emit('message', Buffer.from('{"type":"stop"}'), false);
-  return {client, upstream, start, pcm, stop};
+  return {client, upstream, start, pcm, stop, service, setSetting};
 }
 
 describe('Sotto relay lifetime', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
+
+  it('ends an existing relay immediately when its service is disabled', async () => {
+    const r = relay();
+    r.start();
+    await r.service.update({enabled: false, endpoint: 'http://127.0.0.1:8766'});
+    expect(r.client.close).toHaveBeenCalled();
+    expect(r.upstream.close).toHaveBeenCalled();
+    const sent = vi.mocked(r.upstream.send).mock.calls.length;
+    r.pcm();
+    expect(r.upstream.send).toHaveBeenCalledTimes(sent);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('ends a stream when its endpoint changes but not when the same settings are saved', async () => {
+    const r = relay();
+    r.start();
+    await r.service.update({enabled: true, endpoint: 'http://127.0.0.1:8766'});
+    expect(r.client.close).not.toHaveBeenCalled();
+    await r.service.update({enabled: true, endpoint: 'http://127.0.0.1:9000'});
+    expect(r.client.close).toHaveBeenCalledOnce();
+    expect(r.upstream.close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps a stream when saving fails and unregisters a closed stream', async () => {
+    const r = relay();
+    r.start();
+    r.setSetting.mockImplementationOnce(() => {
+      throw Error('disk full');
+    });
+    await expect(r.service.update({enabled: false, endpoint: 'http://127.0.0.1:8766'})).rejects.toThrow(
+      'disk full'
+    );
+    expect(r.client.close).not.toHaveBeenCalled();
+    expect(r.service.getSettings().enabled).toBe(true);
+    r.client.emit('close');
+    await r.service.update({enabled: false, endpoint: 'http://127.0.0.1:8766'});
+    expect(r.client.send).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it('keeps silence/audio flowing beyond the former 75-second deadline', () => {
     const r = relay();

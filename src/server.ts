@@ -9,7 +9,7 @@ import {createSdkBackend} from './sdk-backend.js';
 import {TerminalManager} from './terminals.js';
 import {MetadataStore} from './metadata-store.js';
 import {VoiceManager} from './voice.js';
-import {SottoSttService, proxySottoStream} from './sotto-stt.js';
+import {SottoSttService} from './sotto-stt.js';
 import {SessionNamer} from './session-namer.js';
 import {MailNotifier, type MailNotificationSettings} from './mail-notifier.js';
 import {CollabHub} from './collab/hub.js';
@@ -452,7 +452,7 @@ export class RemotePiServer {
       this.wss.handleUpgrade(req, socket, head, ws => {
         this.clients.add(ws);
         ws.on('close', () => this.clients.delete(ws));
-        proxySottoStream(ws, this.sottoStt);
+        this.sottoStt.stream(ws);
       });
       return;
     }

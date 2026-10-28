@@ -30,17 +30,20 @@ export function validateSottoEndpoint(value: unknown): string {
 }
 
 /** An authenticated browser socket relays only audio and start/stop, never a Sotto control API. */
-export function proxySottoStream(client: WebSocket, service: SottoSttService) {
-  const upstream = new WebSocket(service.streamUrl(), {handshakeTimeout: 5000, maxPayload: 65536});
+function proxySottoStream(client: WebSocket, url: string) {
+  const upstream = new WebSocket(url, {handshakeTimeout: 5000, maxPayload: 65536});
   let started = false,
-    finished = false;
+    finished = false,
+    closed = false;
   let timer: ReturnType<typeof setTimeout>;
   const close = () => {
+    closed = true;
     clearTimeout(timer);
     if (upstream.readyState === WebSocket.OPEN) upstream.close();
     else if (upstream.readyState === WebSocket.CONNECTING) upstream.terminate();
   };
   const fail = (message: string, code = 1011) => {
+    if (closed) return;
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({type: 'error', message}));
       client.close(code);
@@ -60,6 +63,7 @@ export function proxySottoStream(client: WebSocket, service: SottoSttService) {
   client.on('error', close);
   upstream.on('error', () => fail('Sotto streaming service is unavailable'));
   upstream.on('close', code => {
+    if (closed) return;
     if (!finished || code !== 1000) fail('Sotto streaming connection closed unexpectedly');
     else {
       clearTimeout(timer);
@@ -67,7 +71,7 @@ export function proxySottoStream(client: WebSocket, service: SottoSttService) {
     }
   });
   upstream.on('message', (data, binary) => {
-    if (binary || client.readyState !== WebSocket.OPEN) return;
+    if (closed || binary || client.readyState !== WebSocket.OPEN) return;
     if (client.bufferedAmount > 1_000_000) {
       fail('Transcription receiver is too slow', 1009);
       return;
@@ -75,7 +79,7 @@ export function proxySottoStream(client: WebSocket, service: SottoSttService) {
     client.send(data.toString());
   });
   client.on('message', (data, binary) => {
-    if (finished) return;
+    if (closed || finished || client.readyState !== WebSocket.OPEN) return;
     const length = (data as Buffer).byteLength;
     if (upstream.readyState !== WebSocket.OPEN) {
       fail('Sotto streaming service is not ready');
@@ -113,9 +117,11 @@ export function proxySottoStream(client: WebSocket, service: SottoSttService) {
       touch();
     } else fail('Invalid audio frame or Sotto cannot keep up with microphone audio', 1009);
   });
+  return fail;
 }
 
 export class SottoSttService {
+  private streams = new Set<(reason: string) => void>();
   private settings: SottoSttSettings = {enabled: false, endpoint: DEFAULT_SOTTO_ENDPOINT};
   constructor(
     private readonly metadata: MetadataStore,
@@ -139,6 +145,11 @@ export class SottoSttService {
     const port = Number(new URL(this.settings.endpoint).port) + 2;
     if (port > 65535) throw invalid('Invalid Sotto streaming port');
     return `ws://127.0.0.1:${port}/asr`;
+  }
+  stream(client: WebSocket) {
+    const stop = proxySottoStream(client, this.streamUrl());
+    this.streams.add(stop);
+    client.once('close', () => this.streams.delete(stop));
   }
   private async request(endpoint: string, path: string, init: RequestInit, timeoutMs: number) {
     const response = await this.fetcher(`${endpoint}${path}`, {
@@ -172,7 +183,12 @@ export class SottoSttService {
         throw invalid('Sotto does not support live PCM transcription', 'SOTTO_UNAVAILABLE');
     }
     this.metadata.setSetting('sottoStt', next);
+    const changed = !next.enabled || next.endpoint !== this.settings.endpoint;
     this.settings = next;
+    if (changed) {
+      for (const stop of this.streams) stop('Sotto 语音输入已关闭或服务地址已更改');
+      this.streams.clear();
+    }
     return this.getSettings();
   }
   async transcribe(audio: Buffer) {

@@ -345,6 +345,14 @@
   }
 
   function applyVoiceStatus(backend, statusInfo) {
+    const voice = state.voiceStream;
+    if (
+      voice &&
+      splitResourceKey(voice.agentId).backendId === backend.id &&
+      (!statusInfo.sottoStt?.enabled ||
+        statusInfo.sottoStt.endpoint !== backend.statusInfo?.sottoStt?.endpoint)
+    )
+      finishSottoStream(voice, true);
     backend.statusInfo = statusInfo;
     backend.voiceEnabled = Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled);
     backend.voiceSttEnabled = Boolean(statusInfo.voiceCapabilities?.stt ?? statusInfo.voiceEnabled);
@@ -355,7 +363,7 @@
     const agentBackend = state.agent && backendOf(state.agent.backendId);
     state.voiceSttEnabled = Boolean(agentBackend?.status === 'connected' && agentBackend.voiceSttEnabled);
     $('voicePlayback').hidden = !state.voiceEnabled;
-    $('voiceInput').hidden = !state.voiceSttEnabled;
+    $('voiceInput').hidden = !state.voiceSttEnabled && !state.voiceStream;
     $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
     if (!state.voiceEnabled) stopVoiceAudio();
     updateVoiceButton();
@@ -2545,10 +2553,10 @@
     }
   }
   async function toggleVoiceInput() {
+    if (state.voiceStream) return stopSottoStream(state.voiceStream);
     if ($('voiceInput').disabled) return;
     if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
     if (!state.agent) return toast('请先选择 Agent');
-    if (state.voiceStream) return stopSottoStream(state.voiceStream);
     if (backendOf(state.agent.backendId)?.statusInfo?.sottoStt?.enabled) return startSottoStream();
     if (state.mediaRecorder) {
       if (state.mediaRecorder.state === 'recording') {
@@ -3059,6 +3067,8 @@
         method: 'PUT',
         body: JSON.stringify({enabled: $('sottoEnabled').checked, endpoint: $('sottoEndpoint').value.trim()})
       });
+      const owner = backendOf(backendId);
+      if (owner) applyVoiceStatus(owner, {...owner.statusInfo, sottoStt: settings});
       const statusInfo = await requestBackend(backendId, '/api/v1/system/status');
       const backend = backendOf(backendId);
       if (backend) applyVoiceStatus(backend, statusInfo);
