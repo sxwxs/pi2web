@@ -72,8 +72,12 @@
 @media(max-width:700px){.keyboard-slots{grid-template-columns:repeat(2,minmax(0,1fr))}}
 
 /* Queued steering/follow-up messages waiting for the running turn. */
-#queueBar{display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:6px 10px;font-size:12px;color:#161c24;background:var(--blue);border-radius:6px}
-#queueBar span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#queueBar{display:flex;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:8px;padding:6px 10px;font-size:12px;color:#161c24;background:var(--blue);border-radius:6px}
+#queueBar>span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#queueItems{flex-basis:100%;max-height:140px;overflow:auto;order:3}
+.queue-item{display:flex;align-items:center;gap:8px;padding:3px 0}
+.queue-item span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 #queueBar button{padding:3px 8px;font-size:12px;color:#161c24;background:#ffffffcc;border-color:#ffffff66}
 /* Tool calls a tool made itself (codemode scripts, MCP batches) stay inside their caller's card. */
 .nested-tools{margin-top:10px;padding-left:10px;border-left:2px solid var(--line)}

@@ -103,6 +103,7 @@ export interface AgentBackend {
   followUp(message: string): Promise<QueuedInputDisposition>;
   getQueue(): Promise<AgentQueue>;
   clearQueue(): Promise<AgentQueue>;
+  moveQueue(from: keyof AgentQueue, index: number, expected: string): Promise<AgentQueue>;
   abort(): Promise<void>;
   getState(): Promise<AgentState>;
   /** The session's current branch, for the timeline. Must be cheap when the leaf has not moved. */
@@ -200,6 +201,17 @@ export class MockBackend implements AgentBackend {
     this.queue = {steering: [], followUp: []};
     this.emitQueue();
     return cleared;
+  }
+  async moveQueue(from: keyof AgentQueue, index: number, expected: string) {
+    if (this.state.status !== 'streaming' || this.queue[from][index] !== expected)
+      throw Object.assign(new Error('Queued message has changed or already been consumed'), {
+        code: 'QUEUE_CHANGED'
+      });
+    const to = from === 'steering' ? 'followUp' : 'steering';
+    this.queue[from].splice(index, 1);
+    this.queue[to].push(expected);
+    this.emitQueue();
+    return this.getQueue();
   }
   private emitQueue() {
     this.emit({type: 'queue_update', steering: [...this.queue.steering], followUp: [...this.queue.followUp]});
@@ -301,7 +313,7 @@ export type AgentProfile = 'default' | 'collab';
 export type AgentRecord = AgentState & {
   workspaceId: string;
   profile: AgentProfile;
-  /** System prompt template chosen at creation. Fixed for the Agent's lifetime, including forks. */
+  /** System prompt snapshot. Editable only before the first conversation message; inherited by forks. */
   template?: AgentTemplateSnapshot;
   createdAt: string;
   lastActiveAt: string;
@@ -312,12 +324,17 @@ type AgentEntry = {
   record: AgentRecord;
   backend?: AgentBackend;
   loading?: Promise<AgentBackend>;
+  unloading?: Promise<void>;
+  /** Admitted session writes prevent replacement, but do not serialize prompts, steering or abort. */
+  writes: number;
   /** Detail stream of the loaded backend: streamed text, timeline changes, tool output. */
   feed?: AgentFeed;
   activity: ActivityTracker;
   dialogRequests: Map<string, AgentEvent>;
   queue: AgentQueue;
   streaming?: boolean;
+  promptPending?: boolean;
+  templateChanging?: boolean;
 };
 const toStringList = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
@@ -445,6 +462,7 @@ export class AgentManager {
     const entry: AgentEntry = {
       record,
       backend,
+      writes: 0,
       activity: new ActivityTracker(),
       dialogRequests: new Map(),
       queue: emptyQueue()
@@ -476,6 +494,7 @@ export class AgentManager {
         };
         this.agents.set(saved.agentId, {
           record,
+          writes: 0,
           activity: new ActivityTracker(),
           dialogRequests: new Map(),
           queue: emptyQueue()
@@ -496,8 +515,35 @@ export class AgentManager {
   isLoaded(id: string) {
     return !!this.get(id).backend;
   }
+  private assertCurrent(entry: AgentEntry, backend?: AgentBackend) {
+    if (
+      entry.unloading ||
+      this.agents.get(entry.record.agentId) !== entry ||
+      (backend && entry.backend !== backend)
+    )
+      throw Object.assign(new Error('Agent session changed; retry the command'), {code: 'SESSION_BUSY'});
+  }
+  /** All session mutations share admission. Replacement is exclusive; ordinary writes remain concurrent. */
+  private async writeSession<T>(
+    id: string,
+    action: (backend: AgentBackend, entry: AgentEntry) => Promise<T>
+  ) {
+    const entry = this.get(id);
+    this.assertCurrent(entry);
+    if (entry.templateChanging)
+      throw Object.assign(new Error('System Prompt is being changed'), {code: 'SESSION_BUSY'});
+    entry.writes++;
+    try {
+      const backend = await this.ensureLoaded(id);
+      this.assertCurrent(entry, backend);
+      return await action(backend, entry);
+    } finally {
+      entry.writes--;
+    }
+  }
   private async ensureLoaded(id: string) {
     const entry = this.get(id);
+    this.assertCurrent(entry);
     if (entry.backend) return entry.backend;
     if (entry.record.status === 'stopped')
       throw Object.assign(new Error('Agent is not running'), {code: 'AGENT_NOT_RUNNING'});
@@ -512,7 +558,14 @@ export class AgentManager {
           entry.record.profile,
           entry.record.template ? {template: entry.record.template} : {}
         );
-        const state = await backend.getState();
+        let state: AgentState;
+        try {
+          state = await backend.getState();
+          this.assertCurrent(entry);
+        } catch (error) {
+          await backend.dispose();
+          throw error;
+        }
         entry.record = {
           ...entry.record,
           ...state,
@@ -524,7 +577,7 @@ export class AgentManager {
         this.publish(entry, {type: 'agent_loaded'});
         return backend;
       } catch (error) {
-        entry.record.status = 'error';
+        if (!entry.unloading) entry.record.status = 'error';
         throw error;
       } finally {
         entry.loading = undefined;
@@ -533,16 +586,25 @@ export class AgentManager {
     return entry.loading;
   }
   async command(id: string, kind: 'prompt' | 'steer' | 'follow-up' | 'abort', message = '') {
-    const entry = this.get(id);
-    if (kind === 'abort' && !entry.backend) return;
-    if (entry.record.status === 'stopped')
-      throw Object.assign(new Error('Agent is not running'), {code: 'AGENT_NOT_RUNNING'});
-    const backend = await this.ensureLoaded(id);
     if (kind === 'abort') {
+      const entry = this.get(id);
+      if (!entry.backend) return;
       if (entry.activity.stopping()) this.publishActivity(entry);
-      return backend.abort();
+      return entry.backend.abort();
     }
-    return backend[kind === 'follow-up' ? 'followUp' : kind](message);
+    return this.writeSession(id, async (backend, entry) => {
+      const state = await backend.getState();
+      this.assertCurrent(entry, backend);
+      // Read and reserve without yielding: simultaneous idle inputs start exactly one turn.
+      const busy = entry.promptPending || entry.streaming || state.status === 'streaming';
+      const effective = busy ? (kind === 'prompt' ? 'follow-up' : kind) : 'prompt';
+      if (effective === 'prompt') entry.promptPending = true;
+      try {
+        return await backend[effective === 'follow-up' ? 'followUp' : effective](message);
+      } finally {
+        if (effective === 'prompt' && entry.backend === backend) entry.promptPending = false;
+      }
+    });
   }
   /** Queued steering and follow-up messages waiting for the running turn. */
   // Both read through to the backend and leave the cache to `queue_update`, which stays correct when a
@@ -556,7 +618,10 @@ export class AgentManager {
   /** Drop queued messages and return them so the caller can restore them to its composer. */
   async clearQueue(id: string) {
     const entry = this.get(id);
-    return entry.backend ? entry.backend.clearQueue() : emptyQueue();
+    return entry.backend ? this.writeSession(id, backend => backend.clearQueue()) : emptyQueue();
+  }
+  async moveQueue(id: string, from: keyof AgentQueue, index: number, expected: string) {
+    return this.writeSession(id, backend => backend.moveQueue(from, index, expected));
   }
   snapshotState(id: string): AgentSnapshotState {
     const a = this.get(id);
@@ -594,19 +659,33 @@ export class AgentManager {
     this.globalListeners.add(listener);
     return () => this.globalListeners.delete(listener);
   }
-  async dispose(id: string) {
-    const a = this.get(id);
-    if (a.loading) await a.loading.catch(() => {});
-    await a.backend?.dispose();
-    a.backend = undefined;
-    a.feed?.close();
-    a.feed = undefined;
-    a.record.status = 'unloaded';
-    a.streaming = false;
-    a.dialogRequests.clear();
-    a.activity.reset(); // agent_unloaded below tells clients the activity is gone.
-    a.queue = emptyQueue();
-    this.publish(a, {type: 'agent_unloaded'});
+  dispose(id: string) {
+    const entry = this.get(id);
+    if (entry.unloading) return entry.unloading;
+    // Reserve Stop synchronously. In-flight loads/replacements must validate before attaching.
+    entry.unloading = Promise.resolve()
+      .then(async () => {
+        if (entry.loading) await entry.loading.catch(() => {});
+        const backend = entry.backend;
+        entry.backend = undefined;
+        entry.feed?.close();
+        entry.feed = undefined;
+        try {
+          await backend?.dispose();
+        } finally {
+          entry.record.status = 'unloaded';
+          entry.streaming = false;
+          entry.promptPending = false;
+          entry.dialogRequests.clear();
+          entry.activity.reset();
+          entry.queue = emptyQueue();
+          this.publish(entry, {type: 'agent_unloaded'});
+        }
+      })
+      .finally(() => {
+        entry.unloading = undefined;
+      });
+    return entry.unloading;
   }
   async remove(id: string) {
     await this.dispose(id);
@@ -646,6 +725,65 @@ export class AgentManager {
     const info = await (await this.ensureLoaded(id)).getSystemPrompt();
     return {...info, template: this.get(id).record.template ?? null};
   }
+  /** Prepare → persist → activate under the template lock. A failed save leaves the old session intact. */
+  async setTemplate(
+    id: string,
+    template: AgentTemplateSnapshot | undefined,
+    persist: (record: AgentRecord) => void
+  ) {
+    const entry = this.get(id);
+    this.assertCurrent(entry);
+    if (
+      entry.record.profile !== 'default' ||
+      entry.record.status === 'stopped' ||
+      entry.streaming ||
+      entry.writes
+    )
+      throw Object.assign(new Error('System Prompt can only change before the first turn'), {
+        code: 'SESSION_STARTED'
+      });
+    if (entry.templateChanging)
+      throw Object.assign(new Error('System Prompt is being changed'), {code: 'SESSION_BUSY'});
+    entry.templateChanging = true;
+    try {
+      const old = await this.ensureLoaded(id);
+      this.assertCurrent(entry, old);
+      const session = await old.getSession();
+      if ((session.entries as any[]).some(x => x.type === 'message'))
+        throw Object.assign(new Error('This session already has messages'), {code: 'SESSION_STARTED'});
+      const capabilities = await old.getCapabilities();
+      this.assertCurrent(entry, old);
+      const replacement = await this.factory(
+        id,
+        entry.record.cwd,
+        entry.record.sessionFile,
+        entry.record.profile,
+        template ? {template} : {}
+      );
+      try {
+        const model = capabilities.model as {provider?: string; id?: string} | undefined;
+        if (model?.provider && model?.id) await replacement.setModel(model.provider, model.id);
+        if (typeof capabilities.thinkingLevel === 'string')
+          await replacement.setThinkingLevel(capabilities.thinkingLevel);
+        if (entry.record.sessionName) await replacement.setSessionName(entry.record.sessionName);
+        const state = await replacement.getState();
+        this.assertCurrent(entry, old);
+        const record = {...entry.record, ...state, template};
+        // Persistence is synchronous: no command can observe a choice that has not been committed.
+        persist(record);
+        entry.record = record;
+        this.connect(entry, replacement);
+        this.publish(entry, {type: 'agent_loaded'});
+        await old.dispose().catch(() => {});
+        return record;
+      } catch (error) {
+        await replacement.dispose();
+        throw error;
+      }
+    } finally {
+      entry.templateChanging = false;
+    }
+  }
   async capabilities(id: string) {
     return (await this.ensureLoaded(id)).getCapabilities();
   }
@@ -666,47 +804,55 @@ export class AgentManager {
     return {...info, sessionName: name};
   }
   async compact(id: string, instructions?: string) {
-    return (await this.ensureLoaded(id)).compact(instructions);
+    return this.writeSession(id, backend => backend.compact(instructions));
   }
   async setModel(id: string, provider: string, modelId: string) {
-    return (await this.ensureLoaded(id)).setModel(provider, modelId);
+    return this.writeSession(id, backend => backend.setModel(provider, modelId));
   }
   async setThinkingLevel(id: string, level: string) {
-    return (await this.ensureLoaded(id)).setThinkingLevel(level);
+    return this.writeSession(id, backend => backend.setThinkingLevel(level));
   }
   async setSessionName(id: string, name: string) {
-    await (await this.ensureLoaded(id)).setSessionName(name);
-    this.get(id).record.sessionName = name.trim();
+    return this.writeSession(id, async (backend, entry) => {
+      await backend.setSessionName(name);
+      this.assertCurrent(entry, backend);
+      entry.record.sessionName = name.trim();
+    });
   }
   async navigate(id: string, entryId: string) {
-    const result = await (await this.ensureLoaded(id)).navigate(entryId);
-    this.get(id).feed?.sync(); // Moving the leaf back is no event; tell viewers to reload.
-    return result;
+    return this.writeSession(id, async (backend, entry) => {
+      const result = await backend.navigate(entryId);
+      this.assertCurrent(entry, backend);
+      entry.feed?.sync(); // Moving the leaf back is no event; tell viewers to reload.
+      return result;
+    });
   }
   async fork(id: string, entryId: string) {
-    const source = this.get(id),
-      result = await (await this.ensureLoaded(id)).fork(entryId);
-    if (!result.sessionFile)
-      throw Object.assign(new Error('Session persistence is disabled'), {code: 'SESSION_NOT_PERSISTED'});
-    const ws = this.workspaces.get(source.record.workspaceId)!;
-    const agent = await this.create(
-      source.record.workspaceId,
-      pathRelative(ws.rootPath, source.record.cwd),
-      result.sessionFile,
-      source.record.profile,
-      source.record.template
-    );
-    return {agent, selectedText: result.selectedText};
+    return this.writeSession(id, async (backend, source) => {
+      const result = await backend.fork(entryId);
+      this.assertCurrent(source, backend);
+      if (!result.sessionFile)
+        throw Object.assign(new Error('Session persistence is disabled'), {code: 'SESSION_NOT_PERSISTED'});
+      const ws = this.workspaces.get(source.record.workspaceId)!;
+      const agent = await this.create(
+        source.record.workspaceId,
+        pathRelative(ws.rootPath, source.record.cwd),
+        result.sessionFile,
+        source.record.profile,
+        source.record.template
+      );
+      return {agent, selectedText: result.selectedText};
+    });
   }
   async extensionResponse(id: string, requestId: string, value: unknown) {
-    return (await this.ensureLoaded(id)).extensionResponse(requestId, value);
+    return this.writeSession(id, backend => backend.extensionResponse(requestId, value));
   }
   async listCommands(id: string) {
     return (await this.ensureLoaded(id)).listCommands();
   }
   /** Session-scoped bash. Output is streamed as `bash_execution_update` events and recorded in the Session. */
   async runBash(id: string, command: string, excludeFromContext = false) {
-    return (await this.ensureLoaded(id)).runBash(command, excludeFromContext);
+    return this.writeSession(id, backend => backend.runBash(command, excludeFromContext));
   }
   async abortBash(id: string) {
     const entry = this.get(id);

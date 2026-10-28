@@ -13,6 +13,7 @@ const webFiles: Record<string, {file: string; type: string}> = {
   '/': {file: 'index.html', type: 'text/html; charset=utf-8'},
   '/index.html': {file: 'index.html', type: 'text/html; charset=utf-8'},
   '/app.js': {file: 'app.js', type: 'text/javascript; charset=utf-8'},
+  '/voice-pcm.js': {file: 'voice-pcm.js', type: 'text/javascript; charset=utf-8'},
   '/backend-state.js': {file: 'backend-state.js', type: 'text/javascript; charset=utf-8'},
   '/hid-keyboard.js': {file: 'hid-keyboard.js', type: 'text/javascript; charset=utf-8'},
   '/activity-view.js': {file: 'activity-view.js', type: 'text/javascript; charset=utf-8'},

@@ -110,10 +110,18 @@ pi2web \
 - 摘要 LLM 使用流式 Chat Completions；Remote Pi 在完整句子出现后立即调用流式 TTS，因此无需等待整段摘要完成。
 - Web UI 中点击“启用语音”后，会播放服务端推送的 PCM16 或 MP3 音频；新的 Agent 运行会取消该 Agent 尚未完成的播报。
 - 多个 Session 接近同时完成时，语音摘要会进入全局队列依次播放，不会重叠；有 Session 名称时以“会话{name}已完成：”开头。
-- 只有配置 `--voice-stt-model` 时，Web UI 才显示麦克风按钮；识别文字只插入输入框，不会自动发送。
+- 只有配置 `--voice-stt-model`，或在 Web UI「配置 → Sotto 语音输入」开启 Sotto 时，才显示麦克风按钮；识别文字只插入输入框，不会自动发送。
 - API key 通过 `--voice-api-key-env` 和 `--voice-summary-api-key-env` 指定环境变量名，避免把密钥放入命令行参数。
 
 语音流目前通过已认证的 Agent WebSocket 发送，只会实时投递，不写入 Session 或事件 replay。浏览器麦克风通常要求 HTTPS 安全上下文（`localhost` 例外）。
+
+### 使用本机 Sotto 进行语音输入（无需另一份 STT 模型）
+
+先在**与 pi2web Backend 同一台机器**启动支持 `/api/capabilities` 和 `/api/transcribe` 的 Sotto Web 版本，再在 pi2web 网页「配置 → Sotto 语音输入」勾选启用并保存。默认 endpoint 为 `http://127.0.0.1:8766`，指的是 **Backend 所在机器**，不是访问网页的手机或电脑；服务端只允许配置 IPv4 回环 HTTP 地址，不允许指向公网。启用时会探测 endpoint，不可用则不会保存开启状态。设置保存在 pi2web 的数据目录，所有使用该 Backend 的网页共享；默认关闭，不配语音识别时麦克风按钮保持隐藏。
+
+浏览器点击麦克风后持续采集单声道 float32 PCM，经 pi2web 已认证的 Agent WebSocket 转发至本机 Sotto；Sotto 持续返回 **partial/final**，网页边说边更新输入框；再次点击停止并定稿，**不会自动发送给 Agent**。切到 Terminal 等其他视图时录音继续；连续 1 分钟没有新的识别文字会自动停止并保留已识别内容。Sotto 复用已加载的 ASR（首次请求才加载一次），使用独立本机 WS 端口（默认 `8768`，即 Web 端口 +2），不对外开放。浏览器需支持安全上下文、Web Audio、麦克风权限；`Alt+Shift+V` 可启停。Sotto 的 ASR 实时测试运行时不能并用实时输入，普通监听可并存但共享同一个识别器。原有 `--voice-*` 语音摘要和 STT 功能保持独立；不要同时配置另一套 STT 模型，除非确实需要第二个识别服务。
+
+实时听写采用**点击开始、再次点击停止**：停顿只用于分句定稿，不会结束录音，也没有固定一分钟的录音上限。停止时先发送 Worklet 中尚未发送的尾部音频，再等待最终结果。切换 Agent 或归档录音所属 Agent 会取消录音，切到 Terminal 则继续；关闭 Sotto 或修改其服务地址会结束该 Backend 所有网页已经建立的实时语音连接，当前网页尚在启动的采集也会取消。停止已有录音不受“能否开始新录音”的条件限制；连接、麦克风或音频积压异常会停止并提示原因。代理仍限制单帧大小及发送积压，连续 30 秒没有收到音频帧会报错关闭连接（静音也会产生音频帧，因此不是“静音超时”）。启动中再次点击可取消；后台运行时请留意浏览器的麦克风指示并主动停止录音。
 
 ### Edge TTS（仅语音合成）
 
@@ -188,7 +196,7 @@ python scripts/migrate_data_dir.py             # 复制 ~/.pi/remote-pi -> ~/.pi
 - `workspaces`：Workspace ID、名称、根目录和创建时间。
 - `agents`：Agent 与 Workspace/Session 的映射、cwd、状态、创建/最后活动时间以及 Archive 状态。
 - `sessions`：用于 Session 列表、排序和分页的轻量索引，包括名称、文件路径、消息数量、文件 mtime/size 和最后活动时间。
-- `agents.template`：Agent 创建时选定的 System Prompt 模板快照（JSON），之后不可修改。
+- `agents.template`：Agent 的 System Prompt 模板快照（JSON）。仅在第一条会话消息前可修改，保存成功后才生效；对话开始后固定，卸载或重启不会改变。
 - `agent-templates/*.md`：可分享的 Agent 模板文件，见下文「System Prompt 与 Agent 模板」。
 - `auth.json`：配对码的 SHA-256 hash、创建和轮换时间；认证数据仍单独保存，不保存配对码明文，文件权限为 `0600`。
 
@@ -376,7 +384,7 @@ mode: append        # append：追加在 Pi Prompt 之后；replace：替换 Pi 
 You are a meticulous code reviewer. ...
 ```
 
-新建 Agent 时可选择模板（默认是 Pi 自己的 Prompt）。模板内容在创建时复制到 Agent 记录中，**之后不能更改**：修改或删除模板文件不影响已有 Agent，Fork 出的 Agent 沿用同一模板。两种模式下 Pi 仍会加上 AGENTS.md 等项目上下文、skills 和 cwd；`replace` 会去掉 Pi 内置的工具说明、规则和文档段落，`APPEND_SYSTEM.md` 仍然生效。Agent 工具栏的「Prompt」按钮显示该 Agent 当前生效的完整 System Prompt。
+新建 Agent 时可选择模板（默认是 Pi 自己的 Prompt）。模板内容复制为 Agent 自己的快照；**第一条会话消息前可以修改，开始对话后不能更改**。模板替换与会话写入共用准入检查，写入期间不能替换，替换期间不能写入。修改操作先保存到数据库再启用，保存失败则保留原模板；Stop 或归档会使未完成的替换失效，迟到的候选会话会被释放，不会重新启用 Agent。后端重启或 Agent 重新加载仍使用最后保存的快照，不会退回创建时的选择。修改或删除模板文件不影响已有 Agent，Fork 出的 Agent 沿用同一模板。两种模式下 Pi 仍会加上 AGENTS.md 等项目上下文、skills 和 cwd；`replace` 会去掉 Pi 内置的工具说明、规则和文档段落，`APPEND_SYSTEM.md` 仍然生效。Agent 工具栏的「Prompt」按钮显示该 Agent 当前生效的完整 System Prompt。
 
 运行时使用真实 `@earendil-works/pi-coding-agent` SDK，并复用 Pi CLI 的 `~/.pi/agent` 模型、认证和设置。`MockBackend` 只用于自动化测试。
 

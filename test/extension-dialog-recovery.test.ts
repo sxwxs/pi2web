@@ -49,8 +49,9 @@ function setup() {
   messages.id = 'messages';
   // The composer's queue banner lives outside the transcript in the page; the harness only needs the nodes.
   const queueBar = Object.assign(new Element(), {id: 'queueBar', hidden: true}),
-    queueText = Object.assign(new Element(), {id: 'queueText'});
-  messages.append(queueBar, queueText);
+    queueText = Object.assign(new Element(), {id: 'queueText'}),
+    queueItems = Object.assign(new Element(), {id: 'queueItems'});
+  messages.append(queueBar, queueText, queueItems);
   const $ = (id: string) => [messages, ...messages.descendants()].find(element => element.id === id);
   const agent = {agentId: 'agent-a', status: 'idle'};
   const state = {agent, agents: [agent], selectedKind: 'agent', queues: new Map()};

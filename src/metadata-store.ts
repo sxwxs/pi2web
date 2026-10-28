@@ -205,7 +205,8 @@ export class MetadataStore {
   private writeAgent(record: AgentRecord, archivedAt: number | null) {
     this.database
       .prepare(
-        // `template` is written on insert only: an Agent's system prompt template never changes.
+        // Ordinary state/index writes must not overwrite the conversation's template snapshot.
+        // Only commitAgentTemplate may change it after creation.
         `INSERT INTO agents(id,workspace_id,session_id,session_file,session_name,cwd,status,profile,template,created_at,last_active_at,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id,session_id=excluded.session_id,session_file=excluded.session_file,session_name=excluded.session_name,cwd=excluded.cwd,status=excluded.status,profile=excluded.profile,last_active_at=excluded.last_active_at,archived_at=excluded.archived_at`
       )
       .run(
@@ -227,6 +228,17 @@ export class MetadataStore {
     if (this.archivedAgents.has(record.agentId)) return;
     this.pendingAgents.delete(record.agentId);
     this.writeAgent(record, null);
+  }
+  /** Commit the validated pre-conversation choice and its session identity together. */
+  commitAgentTemplate(record: AgentRecord) {
+    this.database.transaction(() => {
+      const updated = this.database
+        .prepare('UPDATE agents SET template=? WHERE id=? AND archived_at IS NULL')
+        .run(record.template ? JSON.stringify(record.template) : null, record.agentId);
+      if (!updated.changes) throw Object.assign(new Error('Agent not found'), {code: 'AGENT_NOT_FOUND'});
+      this.writeAgent(record, null);
+    })();
+    this.pendingAgents.delete(record.agentId);
   }
   scheduleAgent(record: AgentRecord) {
     if (this.archivedAgents.has(record.agentId)) return;

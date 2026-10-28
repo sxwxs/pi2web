@@ -79,12 +79,17 @@
       generation: 0
     },
     mediaRecorder: null,
+    voiceStream: null,
     mediaChunks: [],
     mediaStream: null,
     mediaTimer: null,
     mediaAgentId: null,
+    /** Messages that failed after the user switched away; restored when that Agent is selected again. */
+    failedSends: new Map(),
     mailBackendId: null,
     mailRequest: 0,
+    sottoBackendId: null,
+    sottoSettingsRequest: 0,
     mailNotificationsAvailable: false,
     mailSettings: {
       enabled: false,
@@ -245,6 +250,11 @@
   }
 
   function cancelVoiceRecording(backendId) {
+    if (
+      state.voiceStream &&
+      (!backendId || splitResourceKey(state.voiceStream.agentId).backendId === backendId)
+    )
+      finishSottoStream(state.voiceStream, true);
     if (!state.mediaAgentId) return;
     if (backendId && splitResourceKey(state.mediaAgentId).backendId !== backendId) return;
     clearTimeout(state.mediaTimer);
@@ -258,6 +268,7 @@
     state.mediaChunks = [];
     state.mediaAgentId = null;
     $('voiceInput').textContent = '🎙';
+    $('voiceInput').disabled = false;
     $('voiceInput').classList.remove('recording');
   }
 
@@ -265,6 +276,7 @@
     cancelVoiceRecording(backendId);
     if (backendId && state.agent?.backendId !== backendId) return;
     state.agent = null;
+    updateVoiceAvailability();
     state.timeline = null;
     sendFocus();
     localStorage.removeItem('rpAgentId');
@@ -334,12 +346,27 @@
     }
   }
 
+  function applyVoiceStatus(backend, statusInfo) {
+    const voice = state.voiceStream;
+    if (
+      voice &&
+      splitResourceKey(voice.agentId).backendId === backend.id &&
+      (!statusInfo.sottoStt?.enabled ||
+        statusInfo.sottoStt.endpoint !== backend.statusInfo?.sottoStt?.endpoint)
+    )
+      finishSottoStream(voice, true);
+    backend.statusInfo = statusInfo;
+    backend.voiceEnabled = Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled);
+    backend.voiceSttEnabled = Boolean(statusInfo.voiceCapabilities?.stt ?? statusInfo.voiceEnabled);
+  }
   function updateVoiceAvailability() {
     const backends = connectedBackends();
     state.voiceEnabled = backends.some(backend => backend.voiceEnabled);
-    state.voiceSttEnabled = backends.some(backend => backend.voiceSttEnabled);
+    const agentBackend = state.agent && backendOf(state.agent.backendId);
+    state.voiceSttEnabled = Boolean(agentBackend?.status === 'connected' && agentBackend.voiceSttEnabled);
     $('voicePlayback').hidden = !state.voiceEnabled;
-    $('voiceInput').hidden = !state.voiceSttEnabled;
+    $('voiceInput').hidden = !state.voiceSttEnabled && !state.voiceStream;
+    $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
     if (!state.voiceEnabled) stopVoiceAudio();
     updateVoiceButton();
   }
@@ -382,10 +409,9 @@
       statusInfo,
       authRequired,
       serverInfo: `v${statusInfo.version} · Pi ${statusInfo.piVersion}`,
-      reconnectAttempt: 0,
-      voiceEnabled: Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled),
-      voiceSttEnabled: Boolean(statusInfo.voiceCapabilities?.stt ?? statusInfo.voiceEnabled)
+      reconnectAttempt: 0
     });
+    applyVoiceStatus(backend, statusInfo);
 
     try {
       await refreshBackendData(backend);
@@ -1253,6 +1279,12 @@
     sessionKeyboard.updateAgent(agent);
     renderAgentList();
     updateAgentHeader();
+    if (state.agent?.agentId === agentId) {
+      const picker = $('sendMode');
+      if (status === 'streaming' || status === 'waiting_for_user') {
+        if (picker.value === 'prompt') picker.value = 'follow-up';
+      } else picker.value = 'prompt';
+    }
     return agent;
   }
   function updateAgentHeader(agent = state.agent) {
@@ -1490,23 +1522,9 @@
   }
   const autoBindNewSession = agent => sessionKeyboard.autoBind(agent.agentId);
   async function startAgent(relativePath) {
-    if (!state.workspace) return toast('请先选择 Workspace');
     $('contextMenu').hidden = true;
-    try {
-      const backendId = state.workspace.backendId;
-      const created = await postBackend(backendId, '/api/v1/agents', {
-        workspaceId: state.workspace.id,
-        relativeCwd: relativePath
-      });
-      const agent = stampNewItem(backendId, created);
-      const binding = autoBindNewSession(agent);
-      $('agentCwd').value = relativePath;
-      await refreshAgents();
-      await selectAgent(agent);
-      if (binding) toast(`新 Session 已自动绑定到按键 ${binding.slot + 1}`);
-    } catch (error) {
-      toast(error.message);
-    }
+    $('agentCwd').value = relativePath;
+    await createAgent();
   }
   async function openTerminal(relativePath) {
     if (!state.workspace) return toast('请先选择 Workspace');
@@ -1542,14 +1560,24 @@
     }
   }
   async function selectAgent(agent, openView = true) {
+    if (state.agent?.agentId !== agent.agentId) cancelVoiceRecording();
     state.selectedKind = 'agent';
     state.terminalWs?.close();
     state.terminalWs = null;
     state.agent = agent;
+    updateVoiceAvailability();
+    const failed = state.failedSends.get(agent.agentId);
+    if (failed !== undefined) {
+      state.failedSends.delete(agent.agentId);
+      prependInput(failed);
+      toast('之前发送失败的消息已放回输入框');
+    }
     localStorage.rpAgentId = agent.agentId;
     localStorage.rpSelectedKind = 'agent';
     showAgentView();
     updateAgentHeader();
+    $('sendMode').value =
+      agent.status === 'streaming' || agent.status === 'waiting_for_user' ? 'follow-up' : 'prompt';
     if (openView) navigateMobile('agent');
     void syncWorkspaceForSelection(agent);
     if (ownsPath(state.workspace, agent))
@@ -2188,6 +2216,7 @@
       bar = $('queueBar');
     if (!queue) {
       bar.hidden = true;
+      $('queueItems').replaceChildren();
       return;
     }
     const parts = [];
@@ -2196,6 +2225,39 @@
     const preview = [...queue.steering, ...queue.followUp][0] || '';
     $('queueText').textContent =
       `排队中：${parts.join(' · ')}${preview ? ` — ${preview.replace(/\s+/g, ' ').slice(0, 60)}` : ''}`;
+    const items = $('queueItems');
+    items.replaceChildren();
+    for (const [from, label, target] of [
+      ['steering', 'Steer', 'Follow-up'],
+      ['followUp', 'Follow-up', 'Steer']
+    ]) {
+      queue[from].forEach((text, index) => {
+        const row = document.createElement('div');
+        row.className = 'queue-item';
+        const preview = document.createElement('span');
+        preview.textContent = `${label}: ${text}`;
+        preview.title = text;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = `改为 ${target}`;
+        button.onclick = async () => {
+          const agentId = state.agent.agentId;
+          button.disabled = true;
+          try {
+            await postAgent(agentId, '/queue/move', {from, index, expected: text});
+          } catch (error) {
+            toast(`切换失败：${error.message}`);
+            try {
+              setAgentQueue(agentId, await requestAgent(agentId, '/queue'));
+            } catch {}
+          } finally {
+            button.disabled = false;
+          }
+        };
+        row.append(preview, button);
+        items.append(row);
+      });
+    }
     bar.hidden = false;
   }
   function restoreExtensionRequests(agentId, activity) {
@@ -2313,11 +2375,220 @@
       }
     } else stopVoiceAudio();
   }
+  function updateSottoDraft(voice) {
+    if (state.voiceStream !== voice || state.agent?.agentId !== voice.agentId) return;
+    const input = voice.input,
+      text = [...voice.finals.values(), voice.partial].filter(Boolean).join(' ');
+    if (text === voice.inserted) return;
+    if (input.value.slice(voice.at, voice.at + voice.inserted.length) !== voice.inserted) {
+      finishSottoStream(voice, true);
+      toast('输入框内容已被修改，语音输入已停止；现有文字不会覆盖');
+      return;
+    }
+    input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
+    voice.inserted = text;
+  }
+  function finishSottoStream(voice, abort = false, reason = '') {
+    if (state.voiceStream !== voice) return;
+    state.voiceStream = null;
+    clearTimeout(voice.timer);
+    clearTimeout(voice.idleTimer);
+    voice.stream?.getTracks().forEach(track => {
+      track.onended = null;
+      track.stop();
+    });
+    voice.node?.disconnect();
+    voice.source?.disconnect();
+    voice.sink?.disconnect();
+    if (voice.node?.port) voice.node.port.onmessage = null;
+    if (voice.node) voice.node.onaudioprocess = null;
+    if (voice.context) void voice.context.close().catch(() => {});
+    if (voice.socket?.readyState === WebSocket.OPEN || voice.socket?.readyState === WebSocket.CONNECTING)
+      voice.socket.close();
+    $('voiceInput').disabled = false;
+    $('voiceInput').classList.remove('recording');
+    $('voiceInput').textContent = '🎙';
+    $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+    if (
+      abort &&
+      voice.partial &&
+      voice.input.value.slice(voice.at, voice.at + voice.inserted.length) === voice.inserted
+    ) {
+      const text = [...voice.finals.values()].filter(Boolean).join(' ');
+      voice.input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
+    }
+    if (reason) toast(reason);
+  }
+  function finishSottoAudio(voice) {
+    if (state.voiceStream !== voice || voice.phase !== 'draining') return;
+    if (voice.socket.readyState !== WebSocket.OPEN)
+      return finishSottoStream(voice, true, '语音连接已断开，无法完成识别');
+    voice.phase = 'finishing';
+    voice.node?.disconnect();
+    voice.socket.send(JSON.stringify({type: 'stop'}));
+    clearTimeout(voice.timer);
+    voice.timer = setTimeout(() => finishSottoStream(voice, true, '等待语音识别结果超时'), 12000);
+  }
+  function stopSottoStream(voice) {
+    if (state.voiceStream !== voice) return;
+    if (voice.phase === 'starting') return finishSottoStream(voice, true);
+    if (voice.phase !== 'recording') return;
+    voice.phase = 'draining';
+    clearTimeout(voice.idleTimer);
+    voice.source?.disconnect();
+    voice.stream.getTracks().forEach(track => {
+      track.onended = null;
+      track.stop();
+    });
+    $('voiceInput').classList.remove('recording');
+    $('voiceInput').textContent = '…';
+    $('voiceInput').disabled = true;
+    // Keep accepting queued PCM until the worklet confirms that its final buffer was sent.
+    if (voice.node?.port) {
+      voice.timer = setTimeout(() => finishSottoStream(voice, true, '麦克风尾部音频处理超时'), 3000);
+      voice.node.port.postMessage({type: 'flush'});
+    } else finishSottoAudio(voice);
+  }
+  function sendSottoPcm(voice, pcm) {
+    if (state.voiceStream !== voice || !['recording', 'draining'].includes(voice.phase)) return;
+    if (voice.socket.readyState !== WebSocket.OPEN || voice.socket.bufferedAmount >= 500000)
+      return finishSottoStream(voice, true, '实时语音连接中断或处理不过来，录音已停止');
+    voice.socket.send(pcm);
+  }
+  // Dictation survives switching views; it ends when the user stops it or nothing new is recognised.
+  const SOTTO_IDLE_MS = 60000;
+  function touchSottoIdle(voice) {
+    clearTimeout(voice.idleTimer);
+    voice.idleTimer = setTimeout(() => {
+      if (state.voiceStream !== voice || voice.phase !== 'recording') return;
+      toast('1 分钟没有新的识别文字，语音输入已自动停止');
+      stopSottoStream(voice);
+    }, SOTTO_IDLE_MS);
+  }
+  async function startSottoStream() {
+    if (state.voiceStream) return;
+    if (!navigator.mediaDevices?.getUserMedia) return toast('当前浏览器不支持麦克风录音');
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    if (!Audio) return toast('当前浏览器不支持实时音频采集');
+    const agentId = state.agent.agentId,
+      input = $('input');
+    // One owner from permission acquisition through final result. Cancelling invalidates pending awaits.
+    const voice = {
+      agentId,
+      input,
+      at: input.selectionStart,
+      inserted: '',
+      finals: new Map(),
+      partial: '',
+      phase: 'starting',
+      stream: null,
+      context: null,
+      socket: null,
+      timer: null,
+      idleTimer: null,
+      node: null,
+      source: null,
+      sink: null
+    };
+    state.voiceStream = voice;
+    $('voiceInput').textContent = '…';
+    $('voiceInput').title = '正在启动语音输入，点击取消';
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      if (state.voiceStream !== voice) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+      voice.stream = stream;
+      stream.getTracks().forEach(track => {
+        track.onended = () => finishSottoStream(voice, true, '麦克风已断开或录音权限被撤销');
+      });
+      const context = (voice.context = new Audio());
+      voice.timer = setTimeout(() => finishSottoStream(voice, true, '启动实时语音服务超时'), 30000);
+      if (context.audioWorklet && window.AudioWorkletNode)
+        await context.audioWorklet.addModule('/voice-pcm.js');
+      if (state.voiceStream !== voice) return;
+      if (state.agent?.agentId !== agentId) throw Error('会话已切换');
+      const backend = backendOf(state.agent.backendId);
+      const {remoteId} = splitResourceKey(agentId);
+      const url =
+        backend.base.replace(/^http/, 'ws') + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe/ws`;
+      const socket = (voice.socket = new WebSocket(url, ['access-token.' + backend.token]));
+      socket.onmessage = event => {
+        if (state.voiceStream !== voice) return;
+        let msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (msg.type === 'ready') {
+          if (voice.phase !== 'starting') return;
+          try {
+            socket.send(JSON.stringify({type: 'start', sample_rate: context.sampleRate, format: 'float32'}));
+            voice.source = context.createMediaStreamSource(stream);
+            voice.sink = context.createGain();
+            voice.sink.gain.value = 0;
+            if (context.audioWorklet && window.AudioWorkletNode) {
+              voice.node = new AudioWorkletNode(context, 'voice-pcm');
+              voice.node.port.onmessage = e =>
+                e.data?.type === 'flushed' ? finishSottoAudio(voice) : sendSottoPcm(voice, e.data);
+            } else {
+              voice.node = context.createScriptProcessor(4096, 1, 1);
+              voice.node.onaudioprocess = e =>
+                sendSottoPcm(voice, new Float32Array(e.inputBuffer.getChannelData(0)).buffer);
+            }
+            voice.phase = 'recording';
+            voice.source.connect(voice.node);
+            voice.node.connect(voice.sink);
+            voice.sink.connect(context.destination);
+            void context
+              .resume()
+              .catch(error => finishSottoStream(voice, true, `无法启动麦克风：${error.message}`));
+            clearTimeout(voice.timer);
+            touchSottoIdle(voice);
+            $('voiceInput').textContent = '■';
+            $('voiceInput').title = '正在录音，点击停止（停顿不会结束录音）';
+            $('voiceInput').classList.add('recording');
+          } catch (error) {
+            finishSottoStream(voice, true, `无法采集音频：${error.message}`);
+          }
+        } else if (msg.type === 'partial' && voice.phase === 'recording') {
+          const text = String(msg.text || '');
+          if (text && text !== voice.partial) touchSottoIdle(voice);
+          voice.partial = text;
+          updateSottoDraft(voice);
+        } else if (msg.type === 'final') {
+          // A final ends one sentence, not the recording. Only the user's stop ends capture.
+          const text = String(msg.text || '');
+          if (text && voice.phase === 'recording') touchSottoIdle(voice);
+          voice.finals.set(msg.segment, text);
+          voice.partial = '';
+          updateSottoDraft(voice);
+        } else if (msg.type === 'error') {
+          finishSottoStream(voice, true, `Sotto 语音识别：${msg.message || '未知错误'}`);
+        }
+      };
+      socket.onerror = () => finishSottoStream(voice, true, '无法连接 Sotto 实时语音服务');
+      socket.onclose = event => {
+        const expected = voice.phase === 'finishing' && event.code === 1000;
+        finishSottoStream(voice, !expected, expected ? '' : `实时语音连接意外断开（${event.code}）`);
+      };
+    } catch (error) {
+      finishSottoStream(voice, true, `无法开始语音输入：${error.message}`);
+    }
+  }
   async function toggleVoiceInput() {
+    if (state.voiceStream) return stopSottoStream(state.voiceStream);
+    if ($('voiceInput').disabled) return;
     if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
     if (!state.agent) return toast('请先选择 Agent');
-    if (state.mediaRecorder && state.mediaRecorder.state === 'recording') {
-      state.mediaRecorder.stop();
+    if (backendOf(state.agent.backendId)?.statusInfo?.sottoStt?.enabled) return startSottoStream();
+    if (state.mediaRecorder) {
+      if (state.mediaRecorder.state === 'recording') {
+        $('voiceInput').disabled = true;
+        state.mediaRecorder.stop();
+      }
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder)
@@ -2339,11 +2610,19 @@
       $('voiceInput').textContent = '■';
       $('voiceInput').title = '停止并识别';
       $('voiceInput').classList.add('recording');
-      state.mediaTimer = setTimeout(
-        () => state.mediaRecorder?.state === 'recording' && state.mediaRecorder.stop(),
-        60000
-      );
+      state.mediaTimer = setTimeout(() => {
+        if (state.mediaRecorder?.state === 'recording') {
+          $('voiceInput').disabled = true;
+          state.mediaRecorder.stop();
+        }
+      }, 60000);
     } catch (error) {
+      state.mediaStream?.getTracks().forEach(track => track.stop());
+      state.mediaStream = null;
+      state.mediaRecorder = null;
+      state.mediaChunks = [];
+      state.mediaAgentId = null;
+      $('voiceInput').disabled = false;
       toast(`无法录音：${error.message}`);
     }
   }
@@ -2359,15 +2638,18 @@
     state.mediaChunks = [];
     state.mediaAgentId = null;
     $('voiceInput').textContent = '…';
+    $('voiceInput').disabled = true;
     $('voiceInput').classList.remove('recording');
     if (!agentId) {
       $('voiceInput').textContent = '🎙';
+      $('voiceInput').disabled = false;
       return;
     }
     const {backendId, remoteId} = splitResourceKey(agentId),
       transcribeBackend = backendOf(backendId);
     if (!transcribeBackend) {
       $('voiceInput').textContent = '🎙';
+      $('voiceInput').disabled = false;
       return toast('该 Session 的 backend 已断开');
     }
     try {
@@ -2376,7 +2658,7 @@
         {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${transcribeBackend.token}`,
+            ...(transcribeBackend.token ? {Authorization: `Bearer ${transcribeBackend.token}`} : {}),
             'Content-Type': mime,
             'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'
           },
@@ -2397,7 +2679,8 @@
       toast(`语音识别失败：${error.message}`);
     } finally {
       $('voiceInput').textContent = '🎙';
-      $('voiceInput').title = '开始语音输入';
+      $('voiceInput').disabled = false;
+      $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
     }
   }
   const handledDrafts = new Set();
@@ -2773,6 +3056,59 @@
           : `Backend「${backend.name}」未配置 MailDispatch endpoint、API key 和通知邮箱。`;
   }
 
+  function sottoConfigBackend() {
+    const workspaceBackend = backendOf(state.workspace?.backendId);
+    return workspaceBackend?.status === 'connected' ? workspaceBackend : primaryBackend();
+  }
+  async function loadSottoSettings() {
+    const backend = sottoConfigBackend();
+    const requestId = ++state.sottoSettingsRequest;
+    state.sottoBackendId = null;
+    $('saveSotto').disabled = true;
+    if (!backend) {
+      $('sottoSettingsStatus').textContent = '请先连接 Backend';
+      return;
+    }
+    $('sottoSettingsStatus').textContent = `正在读取「${backend.name}」的语音输入设置…`;
+    try {
+      const settings = await requestBackend(backend.id, '/api/v1/sotto-stt');
+      if (requestId !== state.sottoSettingsRequest || !$('configDialog').open) return;
+      state.sottoBackendId = backend.id;
+      $('sottoEnabled').checked = settings.enabled;
+      $('sottoEndpoint').value = settings.endpoint;
+      $('saveSotto').disabled = false;
+      $('sottoSettingsStatus').textContent =
+        `设置属于 Backend「${backend.name}」。本机指它所在机器的 127.0.0.1，不是浏览器的 localhost。`;
+    } catch (error) {
+      if (requestId === state.sottoSettingsRequest)
+        $('sottoSettingsStatus').textContent = `读取失败：${error.message}`;
+    }
+  }
+  async function saveSottoSettings() {
+    const backendId = state.sottoBackendId;
+    if (!backendId) return toast('请先连接 Backend 并读取设置');
+    $('saveSotto').disabled = true;
+    try {
+      const settings = await requestBackend(backendId, '/api/v1/sotto-stt', {
+        method: 'PUT',
+        body: JSON.stringify({enabled: $('sottoEnabled').checked, endpoint: $('sottoEndpoint').value.trim()})
+      });
+      const owner = backendOf(backendId);
+      if (owner) applyVoiceStatus(owner, {...owner.statusInfo, sottoStt: settings});
+      const statusInfo = await requestBackend(backendId, '/api/v1/system/status');
+      const backend = backendOf(backendId);
+      if (backend) applyVoiceStatus(backend, statusInfo);
+      updateVoiceAvailability();
+      $('sottoSettingsStatus').textContent = settings.enabled
+        ? 'Sotto 已连通；输入框旁的麦克风可用，转写使用 Sotto 的同一个 ASR 实例。'
+        : 'Sotto 语音输入已关闭。';
+      toast('语音输入设置已保存');
+    } catch (error) {
+      toast(`Sotto 设置失败：${error.message}`);
+    } finally {
+      $('saveSotto').disabled = !backendOf(backendId);
+    }
+  }
   function updateConfigUi() {
     const connected = connectedBackends().length;
     $('configConnectionStatus').textContent = connected ? `已连接 ${connected} 个 backend` : '当前未配对';
@@ -2787,6 +3123,7 @@
     updateConfigUi();
     renderKeyboardBindings();
     if (!$('configDialog').open) $('configDialog').showModal();
+    void loadSottoSettings();
   }
 
   async function saveMailSettings() {
@@ -2931,6 +3268,7 @@
     const workspace = state.workspace;
     if (!workspace) return toast('请先选择 Workspace');
     const cwd = $('agentCwd').value.trim() || '.';
+    const preferenceKey = `rpLastTemplate:${workspace.backendId}`;
     let sessions,
       templates = [];
     try {
@@ -2965,6 +3303,12 @@
         l.append(s);
         body.append(l);
         const t = templateSelect(body, templates);
+        const preferred = globalThis.localStorage?.getItem(preferenceKey);
+        if (preferred && [...t.options].some(option => option.value === preferred)) t.value = preferred;
+        else if (preferred) {
+          globalThis.localStorage?.removeItem(preferenceKey);
+          toast('上次使用的 System Prompt 模板已删除，改用 Pi 默认');
+        }
         const preview = promptPreviewBox(body, () => ({
           backendId: workspace.backendId,
           workspaceId: workspace.id,
@@ -2989,6 +3333,7 @@
         sessionFile: result.sessionFile,
         templateId: result.templateId
       });
+      localStorage.setItem(preferenceKey, result.templateId || '');
       const agent = stampNewItem(workspace.backendId, created);
       const binding = result.sessionFile ? null : autoBindNewSession(agent);
       await refreshAgents();
@@ -3113,6 +3458,31 @@
       },
       '关闭'
     );
+  }
+  async function switchAgentPrompt() {
+    const agent = state.agent;
+    if (!agent) return toast('请先选择 Agent');
+    const [session, catalog] = await Promise.all([
+      requestAgent(agent.agentId, '/session'),
+      requestBackend(agent.backendId, '/api/v1/agent-templates')
+    ]);
+    if (agent.profile !== 'default' || session.entries?.some(entry => entry.type === 'message'))
+      return toast('会话开始后不能切换 System Prompt，请新建会话');
+    const choice = await modal(
+      '切换 System Prompt（仅首次对话前）',
+      body => {
+        const picker = templateSelect(body, catalog.templates || []);
+        picker.value = agent.template?.id || '';
+        return () => picker.value;
+      },
+      '切换'
+    );
+    if (choice === null) return;
+    await postAgent(agent.agentId, '/system-prompt', {templateId: choice});
+    localStorage.setItem(`rpLastTemplate:${agent.backendId}`, choice);
+    agent.template = (catalog.templates || []).find(item => item.id === choice) || undefined;
+    await refreshAgents(true);
+    toast('System Prompt 已切换');
   }
   /** Manage Pi's global prompt files and the shareable Agent templates of one backend. */
   async function systemPromptManager() {
@@ -3562,6 +3932,7 @@
   $('openConfig').onclick = openConfig;
   $('configClose').onclick = () => $('configDialog').close();
   $('configSave').onclick = saveMailSettings;
+  $('saveSotto').onclick = saveSottoSettings;
   $('connect').onclick = () => openPair();
   $('keyboardConnect').onclick = async () => {
     try {
@@ -3665,16 +4036,7 @@
     try {
       await postAgent(agent.agentId, '/archive');
       sessionKeyboard.unbind(agent.agentId);
-      if (state.agent?.agentId === agent.agentId) {
-        state.agent = null;
-        localStorage.removeItem('rpAgentId');
-        $('agentTitle').textContent = '请选择 Agent';
-        $('agentStatus').textContent = '';
-        $('agentStateBadge').textContent = '未选择';
-        $('agentStateBadge').className = 'state-badge state-none';
-        $('contextUsage').hidden = true;
-        $('messages').innerHTML = '<div class="empty">选择或创建 Agent 开始对话</div>';
-      }
+      if (state.agent?.agentId === agent.agentId) clearAgentSelection();
       await refreshAgents();
       toast('Agent 已 Archive');
     } catch (e) {
@@ -3713,6 +4075,7 @@
   };
   $('mcp').onclick = () => mcpControls().catch(e => toast(e.message));
   $('systemPrompt').onclick = () => showAgentSystemPrompt().catch(e => toast(e.message));
+  $('switchPrompt').onclick = () => switchAgentPrompt().catch(e => toast(e.message));
   $('openSystemPrompts').onclick = () => systemPromptManager().catch(e => toast(e.message));
   $('sessionTree').onclick = () => showSessionTree().catch(e => toast(e.message));
   $('undo').onclick = () => revert().catch(e => toast(e.message));
@@ -3732,13 +4095,22 @@
       toast('Compact 完成');
     }
   };
+  function prependInput(text) {
+    $('input').value = text + ($('input').value ? `\n${$('input').value}` : '');
+  }
   $('prompt').onsubmit = async event => {
     event.preventDefault();
     if (!state.agent) return toast('请先创建或选择 Agent');
     const text = $('input').value.trim();
     if (!text) return;
     closeCommandPicker();
-    const mode = $('sendMode').value,
+    const selectedMode = $('sendMode').value,
+      mode =
+        state.agent.status === 'streaming' || state.agent.status === 'waiting_for_user'
+          ? selectedMode === 'steer'
+            ? 'steer'
+            : 'follow-up'
+          : 'prompt',
       agentId = state.agent.agentId;
     $('messages').querySelector('.empty')?.remove();
     // `!cmd` runs inside the Agent session (output is recorded in the Session); `!!cmd` keeps the output out of the model context.
@@ -3763,10 +4135,24 @@
       if (mode !== 'prompt' && sent?.disposition)
         toast(sent.disposition === 'queued' ? '已排队，等待当前回合' : '已送达当前回合');
     } catch (e) {
-      addCard('发送失败', e.message, 'error', true);
+      // The composer is shared: only restore into it while the failed Agent is still selected.
+      if (state.agent?.agentId === agentId) {
+        prependInput(text);
+        addCard('发送失败', e.message, 'error', true);
+      } else {
+        const pending = state.failedSends.get(agentId);
+        state.failedSends.set(agentId, pending === undefined ? text : `${text}\n${pending}`);
+        const agent = state.agents.find(item => item.agentId === agentId);
+        toast(`发送到「${agent ? agentLabel(agent) : agentId}」失败：${e.message}；切回该会话时会放回输入框`);
+      }
     }
   };
   $('input').onkeydown = event => {
+    if (event.altKey && event.shiftKey && event.key.toLowerCase() === 'v' && !event.isComposing) {
+      event.preventDefault();
+      if (!event.repeat) void toggleVoiceInput();
+      return;
+    }
     if (!$('commandPicker').hidden) {
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault();

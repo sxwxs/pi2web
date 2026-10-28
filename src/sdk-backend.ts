@@ -117,6 +117,31 @@ export class SdkBackend implements AgentBackend {
     const cleared = this.session.clearQueue();
     return {steering: [...cleared.steering], followUp: [...cleared.followUp]};
   }
+  async moveQueue(from: keyof AgentQueue, index: number, expected: string): Promise<AgentQueue> {
+    const before = {
+      steering: [...this.session.getSteeringMessages()],
+      followUp: [...this.session.getFollowUpMessages()]
+    };
+    if (!this.session.isStreaming || before[from][index] !== expected)
+      throw Object.assign(new Error('Queued message has changed or already been consumed'), {
+        code: 'QUEUE_CHANGED'
+      });
+    const to = from === 'steering' ? 'followUp' : 'steering';
+    before[from].splice(index, 1);
+    before[to].push(expected);
+    if ([...before.steering, ...before.followUp].some(text => text.startsWith('/')))
+      throw Object.assign(new Error('Slash commands cannot be moved safely'), {code: 'QUEUE_CHANGED'});
+    // Pi exposes clearQueue(), but no per-message move. Clear and requeue in the same JS turn:
+    // steer()/followUp() enqueue synchronously before their promises settle. No model callback can
+    // drain the half-updated queue between these calls. Never replace a stale queue by index alone.
+    this.session.clearQueue();
+    const pending = [
+      ...before.steering.map(text => this.session.steer(text)),
+      ...before.followUp.map(text => this.session.followUp(text))
+    ];
+    await Promise.all(pending);
+    return this.getQueue();
+  }
   abort() {
     return this.session.abort();
   }

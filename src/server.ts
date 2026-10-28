@@ -9,6 +9,7 @@ import {createSdkBackend} from './sdk-backend.js';
 import {TerminalManager} from './terminals.js';
 import {MetadataStore} from './metadata-store.js';
 import {VoiceManager} from './voice.js';
+import {SottoSttService} from './sotto-stt.js';
 import {SessionNamer} from './session-namer.js';
 import {MailNotifier, type MailNotificationSettings} from './mail-notifier.js';
 import {CollabHub} from './collab/hub.js';
@@ -78,6 +79,7 @@ export class RemotePiServer {
   private sessionIndexJobs = new Map<string, Promise<void>>();
   private agentIndexJobs = new Map<string, Promise<void>>();
   private voice?: VoiceManager;
+  readonly sottoStt: SottoSttService;
   private sessionNamer?: SessionNamer;
   private mailNotifier?: MailNotifier;
   private loginLimiter = new LoginLimiter();
@@ -88,6 +90,7 @@ export class RemotePiServer {
     this.dataDir = options.dataDir ?? defaultDataDir();
     this.auth = new AuthStore(this.dataDir);
     this.metadata = new MetadataStore(this.dataDir);
+    this.sottoStt = new SottoSttService(this.metadata);
     this.templates = new AgentTemplateStore(path.join(this.dataDir, AGENT_TEMPLATES_DIR));
     this.workspaces = options.workspaces ?? new WorkspaceStore();
     this.voice = options.voice;
@@ -167,6 +170,7 @@ export class RemotePiServer {
       );
     const first: {token?: string} = this.noAuth ? {} : await this.auth.init();
     this.metadata.init();
+    this.sottoStt.load();
     this.collab.init();
     this.unsubscribeCollab = this.collab.subscribe(event => this.collabNotification(event));
     this.collabStallTimer = setInterval(() => {
@@ -401,7 +405,9 @@ export class RemotePiServer {
           .find(x => x.startsWith('access-token.'))
           ?.slice(13);
     const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname,
-      isSocket = pathname === '/api/v1/ws' || /^\/api\/v1\/terminals\/[^/]+\/ws$/.test(pathname);
+      voiceMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/transcribe\/ws$/),
+      isSocket =
+        pathname === '/api/v1/ws' || /^\/api\/v1\/terminals\/[^/]+\/ws$/.test(pathname) || !!voiceMatch;
     if (!isSocket) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -434,6 +440,22 @@ export class RemotePiServer {
       return;
     }
     this.loginLimiter.clear(key);
+    if (voiceMatch) {
+      try {
+        this.agents.get(decodeURIComponent(voiceMatch[1]));
+        this.sottoStt.streamUrl();
+      } catch {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      this.wss.handleUpgrade(req, socket, head, ws => {
+        this.clients.add(ws);
+        ws.on('close', () => this.clients.delete(ws));
+        this.sottoStt.stream(ws);
+      });
+      return;
+    }
     this.wss.handleUpgrade(req, socket, head, ws => this.wss.emit('connection', ws, req));
   }
   private clientKey(req: http.IncomingMessage) {
@@ -626,12 +648,21 @@ export class RemotePiServer {
             terminalCount: this.terminals.list().length,
             webSocketConnections: this.clients.size,
             voiceEnabled: !!this.voice,
-            voiceCapabilities: this.voice?.capabilities() ?? {tts: false, stt: false},
+            voiceCapabilities: {
+              tts: this.voice?.capabilities().tts ?? false,
+              stt: (this.voice?.capabilities().stt ?? false) || this.sottoStt.getSettings().enabled
+            },
+            sottoStt: this.sottoStt.getSettings(),
             sessionNamingEnabled: !!this.sessionNamer,
             mailNotificationsConfigured: !!this.mailNotifier,
             mailNotificationsEnabled: this.mailNotifier?.getSettings().enabled ?? false
           }
         });
+      if (u.pathname === '/api/v1/sotto-stt') {
+        if (req.method === 'GET') return json(res, 200, {data: this.sottoStt.getSettings()});
+        if (req.method === 'PUT')
+          return json(res, 200, {data: await this.sottoStt.update(await readJsonBody(req))});
+      }
       if (
         await handleMailSettingsRoutes(
           {mailNotifier: this.mailNotifier, metadata: this.metadata},
@@ -665,6 +696,7 @@ export class RemotePiServer {
         metadata: this.metadata,
         workspaces: this.workspaces,
         voice: this.voice,
+        sottoStt: this.sottoStt,
         sessionNamer: this.sessionNamer,
         ensureSessionIndex: (workspace: Workspace, cwd: string, force?: boolean) =>
           this.ensureSessionIndex(workspace, cwd, force),

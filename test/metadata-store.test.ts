@@ -65,6 +65,55 @@ describe('SQLite metadata store', () => {
     store.flush();
     expect(store.listAgents()).toEqual([]);
   });
+  it('keeps the committed template safe from ordinary saves and delayed state writes', async () => {
+    const {dir, store} = await open();
+    const workspace = {id: 'w', label: 'w', rootPath: dir, createdAt: '2026-01-01T00:00:00.000Z'};
+    store.saveWorkspace(workspace);
+    const first = {id: 'a', name: 'A', mode: 'append' as const, systemPrompt: 'Original'};
+    const second = {id: 'b', name: 'B', mode: 'append' as const, systemPrompt: 'Chosen'};
+    const original = {...agent('agent', workspace.id, '2026-01-02T00:00:00.000Z'), template: first};
+    store.saveAgent(original);
+    store.scheduleAgent(original);
+    const chosen = {...original, sessionId: 'replacement', template: second};
+    store.commitAgentTemplate(chosen);
+    store.flush();
+    expect(store.listAgents()[0]).toMatchObject({sessionId: 'replacement', template: second});
+    store.saveAgent(original);
+    store.scheduleAgent(original);
+    store.flush();
+    expect(store.listAgents()[0].template).toEqual(second);
+    store.commitAgentTemplate({...chosen, template: undefined});
+    store.saveAgent(original);
+    store.scheduleAgent(original);
+    store.close();
+    const reopened = new MetadataStore(dir);
+    reopened.init();
+    stores.push(reopened);
+    expect(reopened.listAgents()[0].template).toBeUndefined();
+  });
+
+  it('commits template and session metadata atomically', async () => {
+    const {dir, store} = await open();
+    const workspace = {id: 'w', label: 'w', rootPath: dir, createdAt: '2026-01-01T00:00:00.000Z'};
+    store.saveWorkspace(workspace);
+    const original = agent('agent', workspace.id, '2026-01-02T00:00:00.000Z');
+    store.saveAgent(original);
+    const before = store.listAgents();
+    expect(() =>
+      store.commitAgentTemplate({
+        ...original,
+        workspaceId: 'missing',
+        template: {id: 'b', name: 'B', mode: 'append', systemPrompt: 'New'}
+      })
+    ).toThrow();
+    expect(store.listAgents()).toEqual(before);
+    store.archiveAgent(original);
+    expect(() => store.commitAgentTemplate(original)).toThrow(
+      expect.objectContaining({code: 'AGENT_NOT_FOUND'})
+    );
+    expect(store.listAgents()).toEqual([]);
+  });
+
   it('indexes session files and returns the newest page through SQL', async () => {
     const {dir, store} = await open(),
       workspace = {

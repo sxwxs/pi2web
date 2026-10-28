@@ -1,5 +1,6 @@
 import {describe, it, expect, afterEach, beforeEach} from 'vitest';
 import {mkdtemp, mkdir, readFile, writeFile, stat} from 'node:fs/promises';
+import {appendFileSync, existsSync, readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {RemotePiServer} from '../src/server.js';
@@ -70,10 +71,26 @@ describe('system prompt and template API', () => {
   });
   const boot = async (dataDir: string) => {
     const workspaces = new WorkspaceStore(),
-      agents = new AgentManager(
-        workspaces,
-        (id, cwd, session, _profile, options) => new MockBackend(id, cwd, session, options)
-      );
+      agents = new AgentManager(workspaces, (id, cwd, session, _profile, options) => {
+        // Persist mock conversation messages too: restarting must not turn a used Agent into an empty one.
+        const sessionFile = session ?? path.join(dataDir, `${id}.jsonl`);
+        return new (class extends MockBackend {
+          constructor() {
+            super(id, cwd, path.basename(sessionFile), options);
+            if (existsSync(sessionFile))
+              for (const line of readFileSync(sessionFile, 'utf8').trim().split('\n').filter(Boolean))
+                super.append(JSON.parse(line));
+          }
+          override async getState() {
+            return {...(await super.getState()), sessionFile};
+          }
+          protected override append(message: Record<string, unknown>) {
+            const entry = super.append(message);
+            appendFileSync(sessionFile, JSON.stringify(message) + '\n');
+            return entry;
+          }
+        })();
+      });
     server = new RemotePiServer({port: 0, noAuth: true, dataDir, workspaces, agents});
     const address = await server.start(),
       base = `http://127.0.0.1:${address!.port}`;
@@ -157,6 +174,106 @@ describe('system prompt and template API', () => {
     expect((await call('GET', `/api/v1/agents/${agent.agentId}/system-prompt`)).data.template.id).toBe(
       'reviewer'
     );
+  });
+
+  it('switches an empty Agent prompt and refuses after the first message', async () => {
+    const dataDir = await temp('pi2web-data-');
+    const call = await boot(dataDir);
+    const root = await temp('pi2web-ws-');
+    const workspace = (await call('POST', '/api/v1/workspaces', {label: 'w', rootPath: root})).data;
+    await call('PUT', '/api/v1/agent-templates/reviewer', {
+      name: 'Reviewer',
+      mode: 'append',
+      systemPrompt: 'Review only.'
+    });
+    const agent = (await call('POST', '/api/v1/agents', {workspaceId: workspace.id})).data;
+    const url = `/api/v1/agents/${agent.agentId}`;
+    expect((await call('POST', `${url}/system-prompt`, {templateId: 'reviewer'})).data.template.id).toBe(
+      'reviewer'
+    );
+    expect((await call('GET', `${url}/system-prompt`)).data.systemPrompt).toContain('Review only.');
+    expect((await call('POST', `${url}/system-prompt`, {templateId: ''})).data.template).toBeNull();
+    expect((await call('GET', `${url}/system-prompt`)).data.systemPrompt).not.toContain('Review only.');
+    await call('POST', `${url}/prompt`, {message: 'begin'});
+    const rejected = await call('POST', `${url}/system-prompt`, {templateId: 'reviewer'});
+    expect(rejected.status).toBe(400);
+    expect(rejected.error.code).toBe('SESSION_STARTED');
+  });
+
+  it.each([
+    {from: '', to: 'b'},
+    {from: 'a', to: 'b'},
+    {from: 'a', to: ''}
+  ])(
+    'keeps the pre-conversation choice $from → $to locked across unloads and restarts',
+    async ({from, to}) => {
+      const dataDir = await temp('pi2web-data-'),
+        rootPath = await temp('pi2web-ws-');
+      let call = await boot(dataDir);
+      const workspace = (await call('POST', '/api/v1/workspaces', {label: 'w', rootPath})).data;
+      for (const id of ['a', 'b'])
+        await call('PUT', `/api/v1/agent-templates/${id}`, {
+          name: id,
+          mode: 'append',
+          systemPrompt: `Original template ${id}`
+        });
+      const agent = (await call('POST', '/api/v1/agents', {workspaceId: workspace.id, templateId: from}))
+        .data;
+      const url = `/api/v1/agents/${agent.agentId}`,
+        promptUrl = `${url}/system-prompt`;
+      expect((await call('POST', promptUrl, {templateId: to})).status).toBe(200);
+      const chosen = (await call('GET', promptUrl)).data;
+      expect(chosen.template?.id ?? '').toBe(to);
+      expect(server!.metadata.listAgents().find(x => x.agentId === agent.agentId)?.template ?? null).toEqual(
+        chosen.template
+      );
+      expect((await call('POST', `${url}/prompt`, {message: 'begin with the chosen prompt'})).status).toBe(
+        200
+      );
+      const assertLocked = async () => {
+        expect((await call('GET', promptUrl)).data).toEqual(chosen);
+        expect((await call('GET', `${url}/session`)).data.entries).toHaveLength(2);
+        const rejected = await call('POST', promptUrl, {templateId: from});
+        expect(rejected.status).toBe(400);
+        expect(rejected.error.code).toBe('SESSION_STARTED');
+        expect(
+          server!.metadata.listAgents().find(x => x.agentId === agent.agentId)?.template ?? null
+        ).toEqual(chosen.template);
+      };
+      await assertLocked();
+      // The chosen snapshot, not a later edit to its source file, belongs to this conversation.
+      await call('PUT', '/api/v1/agent-templates/b', {
+        name: 'b',
+        mode: 'append',
+        systemPrompt: 'Changed later'
+      });
+      await call('DELETE', url);
+      await assertLocked();
+      await server!.stop();
+      call = await boot(dataDir);
+      await assertLocked();
+    }
+  );
+
+  it('does not activate a new template when saving it fails', async () => {
+    const call = await boot(await temp('pi2web-data-'));
+    const rootPath = await temp('pi2web-ws-');
+    const workspace = (await call('POST', '/api/v1/workspaces', {label: 'w', rootPath})).data;
+    await call('PUT', '/api/v1/agent-templates/b', {name: 'b', mode: 'append', systemPrompt: 'New prompt'});
+    const agent = (await call('POST', '/api/v1/agents', {workspaceId: workspace.id})).data;
+    const promptUrl = `/api/v1/agents/${agent.agentId}/system-prompt`;
+    const before = (await call('GET', promptUrl)).data;
+    const backend = server!.agents.get(agent.agentId).backend;
+    server!.metadata.connection
+      .exec(`CREATE TRIGGER reject_template_change BEFORE UPDATE OF template ON agents
+      BEGIN SELECT RAISE(FAIL, 'test persistence failure'); END`);
+    const rejected = await call('POST', promptUrl, {templateId: 'b'});
+    expect(rejected.status).toBe(400);
+    expect(rejected.error.message).toContain('test persistence failure');
+    expect((await call('GET', promptUrl)).data).toEqual(before);
+    expect(server!.agents.get(agent.agentId).backend).toBe(backend);
+    expect((await backend!.getState()).status).toBe('idle');
+    expect(server!.metadata.listAgents().find(x => x.agentId === agent.agentId)?.template).toBeUndefined();
   });
 
   it('forks keep the template of their source Agent', async () => {
