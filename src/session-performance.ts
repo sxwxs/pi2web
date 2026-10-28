@@ -41,6 +41,10 @@ export class SessionPerformanceTracker {
     if (!this.run) return;
     switch (event.type) {
       case 'turn_start':
+        if (this.other?.kind === 'retry') {
+          this.finish(this.other, at);
+          this.other = null;
+        }
         this.finish(this.model, at);
         this.model = this.span('model', at);
         break;

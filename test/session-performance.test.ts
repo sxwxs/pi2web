@@ -89,6 +89,33 @@ describe('session performance', () => {
     });
   });
 
+  it('counts retry backoff only until the next model turn, not through its response', () => {
+    let now = 0;
+    const save = vi.fn();
+    const tracker = new SessionPerformanceTracker(save, () => now);
+    const send = (time: number, event: any) => {
+      now = time;
+      tracker.apply(event);
+    };
+    send(0, {type: 'agent_start'});
+    send(10, {type: 'agent_end', willRetry: true});
+    send(12, {type: 'auto_retry_start'});
+    send(100, {type: 'agent_start'});
+    send(120, {type: 'turn_start'});
+    send(180, {type: 'message_end', message: {role: 'assistant'}});
+    send(185, {type: 'auto_retry_end', success: true});
+    send(200, {type: 'agent_end'});
+    send(210, {type: 'agent_settled'});
+    expect(save).toHaveBeenCalledWith({
+      start: 0,
+      end: 210,
+      spans: [
+        {kind: 'retry', start: 12, end: 120},
+        {kind: 'model', start: 120, end: 180}
+      ]
+    });
+  });
+
   it('closes a cancelled retry so the next prompt gets a separate run', () => {
     let now = 0;
     const save = vi.fn();
