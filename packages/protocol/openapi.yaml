@@ -21,6 +21,8 @@ paths:
     post: {operationId: createAgent, requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'201': {$ref: '#/components/responses/Success'}}}
   /agents/{id}/timeline:
     get: {operationId: agentTimeline, description: 'Older history as display items (see timelineItem in websocket.schema.json): about `limit` items before item `before`, never splitting a tool call from its result. Data {sessionId, items, total, start, hasMore}. Viewers get the newest page from the WebSocket focus snapshot. 404 when `before` is not on the current branch.', parameters: [{$ref: '#/components/parameters/Id'}, {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 50}}, {name: before, in: query, schema: {type: string}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /agents/{id}/performance:
+    get: {operationId: agentPerformance, description: 'Current branch wall-clock model and tool spans recorded by recent runs; older sessions return only available tool durations. Data {sessionId, runs, legacyTools}. Parallel tools overlap.', parameters: [{$ref: '#/components/parameters/Id'}], responses: {'200': {$ref: '#/components/responses/Success'}}}
   /agents/{id}/sessions/{sessionId}/items/{itemId}:
     get: {operationId: agentTimelineItem, description: 'Full body of one timeline item, data {id, body}. Items never change, so it is served with Cache-Control private, max-age=31536000, immutable. 404 when the Agent is no longer on that session or branch.', parameters: [{$ref: '#/components/parameters/Id'}, {name: sessionId, in: path, required: true, schema: {type: string}}, {name: itemId, in: path, required: true, schema: {type: string}}], responses: {'200': {$ref: '#/components/responses/Success'}}}
   /agents/{id}/system-prompt:
@@ -29,6 +31,10 @@ paths:
   /sotto-stt:
     get: {operationId: getSottoSttSettings, description: 'Backend-wide Sotto transcription setting; disabled by default, endpoint defaults to http://127.0.0.1:8766.', responses: {'200': {$ref: '#/components/responses/Success'}}}
     put: {operationId: setSottoSttSettings, description: 'Body {enabled: boolean, endpoint: http://127.0.0.1:<port>}; probes local Sotto capabilities before enabling. Requires full access token.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /transcribe:
+    post: {operationId: transcribeDraft, description: 'Backend-wide authenticated transcription, not tied to an Agent. Audio format follows the configured Sotto or STT service; returns {data:{text}}.', responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /transcribe/ws:
+    get: {operationId: streamSottoTranscription, description: 'Authenticated backend-wide Sotto transcription WebSocket; start/PCM/stop protocol matches the Agent route.', responses: {'101': {description: 'WebSocket upgrade'}}}
   /agents/{id}/transcribe:
     post: {operationId: transcribeAgentDraft, description: 'When Sotto is enabled, body is 16 kHz mono float32 little-endian PCM (application/octet-stream; max 60 s); otherwise uses configured OpenAI-compatible STT audio. Returns {data:{text}} without submitting to the Agent.', parameters: [{$ref: '#/components/parameters/Id'}], responses: {'200': {$ref: '#/components/responses/Success'}}}
   /agents/{id}/transcribe/ws:

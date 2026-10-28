@@ -84,6 +84,7 @@
     mediaStream: null,
     mediaTimer: null,
     mediaAgentId: null,
+    mediaBackendId: null,
     /** Messages that failed after the user switched away; restored when that Agent is selected again. */
     failedSends: new Map(),
     mailBackendId: null,
@@ -174,15 +175,24 @@
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (response.status === 401) onUnauthorized?.();
-      throw Error(body.error?.message || `HTTP ${response.status}`);
+      const error = Error(body.error?.message || `HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
     }
     return body.data;
   }
   async function backendRequiresAuth(base) {
     try {
       return (await request(base, '', '/health')).authRequired !== false;
-    } catch {
-      return true;
+    } catch (error) {
+      if (error.status === 401) return true;
+      if (error.status === 403)
+        throw Error(
+          '服务拒绝访问（403）：无认证服务默认仅允许本机访问；请检查服务地址、代理和 --no-auth 设置'
+        );
+      if (error.status === 404) throw Error('服务未提供 /health（404）：请检查地址和远端版本');
+      if (error instanceof TypeError) throw Error('无法访问服务：请检查地址、网络及浏览器跨域限制（CORS）');
+      throw error;
     }
   }
   async function requestBackend(backendId, url, options = {}) {
@@ -252,11 +262,18 @@
   function cancelVoiceRecording(backendId) {
     if (
       state.voiceStream &&
-      (!backendId || splitResourceKey(state.voiceStream.agentId).backendId === backendId)
+      (!backendId ||
+        splitResourceKey(state.voiceStream.agentId).backendId === backendId ||
+        state.voiceStream.transcribeBackendId === backendId)
     )
       finishSottoStream(state.voiceStream, true);
     if (!state.mediaAgentId) return;
-    if (backendId && splitResourceKey(state.mediaAgentId).backendId !== backendId) return;
+    if (
+      backendId &&
+      splitResourceKey(state.mediaAgentId).backendId !== backendId &&
+      state.mediaBackendId !== backendId
+    )
+      return;
     clearTimeout(state.mediaTimer);
     if (state.mediaRecorder) {
       state.mediaRecorder.onstop = null;
@@ -267,6 +284,7 @@
     state.mediaStream = null;
     state.mediaChunks = [];
     state.mediaAgentId = null;
+    state.mediaBackendId = null;
     $('voiceInput').textContent = '🎙';
     $('voiceInput').disabled = false;
     $('voiceInput').classList.remove('recording');
@@ -350,7 +368,7 @@
     const voice = state.voiceStream;
     if (
       voice &&
-      splitResourceKey(voice.agentId).backendId === backend.id &&
+      voice.transcribeBackendId === backend.id &&
       (!statusInfo.sottoStt?.enabled ||
         statusInfo.sottoStt.endpoint !== backend.statusInfo?.sottoStt?.endpoint)
     )
@@ -359,11 +377,36 @@
     backend.voiceEnabled = Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled);
     backend.voiceSttEnabled = Boolean(statusInfo.voiceCapabilities?.stt ?? statusInfo.voiceEnabled);
   }
+  // The page is opened on the user's own pi2web server. Never route microphone audio to a remote Backend.
+  function localBackend() {
+    return (
+      connectedBackends().find(backend => {
+        if (backend.status !== 'connected') return false;
+        try {
+          const url = new URL(backend.base);
+          return (
+            url.origin === location.origin &&
+            url.pathname === '/' &&
+            !url.username &&
+            !url.password &&
+            !url.search &&
+            !url.hash
+          );
+        } catch {
+          return false;
+        }
+      }) || null
+    );
+  }
+  function transcriptionBackend() {
+    if (!state.agent || backendOf(state.agent.backendId)?.status !== 'connected') return null;
+    const backend = localBackend();
+    return backend?.voiceSttEnabled ? backend : null;
+  }
   function updateVoiceAvailability() {
     const backends = connectedBackends();
     state.voiceEnabled = backends.some(backend => backend.voiceEnabled);
-    const agentBackend = state.agent && backendOf(state.agent.backendId);
-    state.voiceSttEnabled = Boolean(agentBackend?.status === 'connected' && agentBackend.voiceSttEnabled);
+    state.voiceSttEnabled = Boolean(transcriptionBackend());
     $('voicePlayback').hidden = !state.voiceEnabled;
     $('voiceInput').hidden = !state.voiceSttEnabled && !state.voiceStream;
     $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
@@ -2471,10 +2514,12 @@
     const Audio = window.AudioContext || window.webkitAudioContext;
     if (!Audio) return toast('当前浏览器不支持实时音频采集');
     const agentId = state.agent.agentId,
+      speechBackend = transcriptionBackend(),
       input = $('input');
     // One owner from permission acquisition through final result. Cancelling invalidates pending awaits.
     const voice = {
       agentId,
+      transcribeBackendId: speechBackend.id,
       input,
       at: input.selectionStart,
       inserted: '',
@@ -2509,11 +2554,14 @@
         await context.audioWorklet.addModule('/voice-pcm.js');
       if (state.voiceStream !== voice) return;
       if (state.agent?.agentId !== agentId) throw Error('会话已切换');
-      const backend = backendOf(state.agent.backendId);
-      const {remoteId} = splitResourceKey(agentId);
-      const url =
-        backend.base.replace(/^http/, 'ws') + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe/ws`;
-      const socket = (voice.socket = new WebSocket(url, ['access-token.' + backend.token]));
+      const backend = backendOf(voice.transcribeBackendId);
+      if (backend?.status !== 'connected' || !backend.statusInfo?.sottoStt?.enabled)
+        throw Error('语音识别 Backend 已断开');
+      const url = backend.base.replace(/^http/, 'ws') + '/api/v1/transcribe/ws';
+      const socket = (voice.socket = new WebSocket(
+        url,
+        backend.token ? ['access-token.' + backend.token] : []
+      ));
       socket.onmessage = event => {
         if (state.voiceStream !== voice) return;
         let msg;
@@ -2583,7 +2631,7 @@
     if ($('voiceInput').disabled) return;
     if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
     if (!state.agent) return toast('请先选择 Agent');
-    if (backendOf(state.agent.backendId)?.statusInfo?.sottoStt?.enabled) return startSottoStream();
+    if (transcriptionBackend()?.statusInfo?.sottoStt?.enabled) return startSottoStream();
     if (state.mediaRecorder) {
       if (state.mediaRecorder.state === 'recording') {
         $('voiceInput').disabled = true;
@@ -2605,6 +2653,7 @@
         if (event.data.size) state.mediaChunks.push(event.data);
       };
       state.mediaAgentId = state.agent.agentId;
+      state.mediaBackendId = transcriptionBackend()?.id;
       state.mediaRecorder.onstop = () => void transcribeVoice();
       state.mediaRecorder.start(250);
       $('voiceInput').textContent = '■';
@@ -2622,6 +2671,7 @@
       state.mediaRecorder = null;
       state.mediaChunks = [];
       state.mediaAgentId = null;
+      state.mediaBackendId = null;
       $('voiceInput').disabled = false;
       toast(`无法录音：${error.message}`);
     }
@@ -2631,12 +2681,14 @@
     const recorder = state.mediaRecorder,
       mime = recorder?.mimeType || 'audio/webm',
       blob = new Blob(state.mediaChunks, {type: mime}),
-      agentId = state.mediaAgentId;
+      agentId = state.mediaAgentId,
+      speechBackendId = state.mediaBackendId;
     state.mediaStream?.getTracks().forEach(track => track.stop());
     state.mediaRecorder = null;
     state.mediaStream = null;
     state.mediaChunks = [];
     state.mediaAgentId = null;
+    state.mediaBackendId = null;
     $('voiceInput').textContent = '…';
     $('voiceInput').disabled = true;
     $('voiceInput').classList.remove('recording');
@@ -2645,26 +2697,22 @@
       $('voiceInput').disabled = false;
       return;
     }
-    const {backendId, remoteId} = splitResourceKey(agentId),
-      transcribeBackend = backendOf(backendId);
-    if (!transcribeBackend) {
+    const transcribeBackend = backendOf(speechBackendId);
+    if (transcribeBackend?.status !== 'connected') {
       $('voiceInput').textContent = '🎙';
       $('voiceInput').disabled = false;
-      return toast('该 Session 的 backend 已断开');
+      return toast('语音识别 Backend 已断开');
     }
     try {
-      const response = await fetch(
-        transcribeBackend.base + `/api/v1/agents/${encodeURIComponent(remoteId)}/transcribe`,
-        {
-          method: 'POST',
-          headers: {
-            ...(transcribeBackend.token ? {Authorization: `Bearer ${transcribeBackend.token}`} : {}),
-            'Content-Type': mime,
-            'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'
-          },
-          body: blob
-        }
-      );
+      const response = await fetch(transcribeBackend.base + '/api/v1/transcribe', {
+        method: 'POST',
+        headers: {
+          ...(transcribeBackend.token ? {Authorization: `Bearer ${transcribeBackend.token}`} : {}),
+          'Content-Type': mime,
+          'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'
+        },
+        body: blob
+      });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw Error(body.error?.message || `HTTP ${response.status}`);
       const text = body.data?.text?.trim();
@@ -3057,8 +3105,7 @@
   }
 
   function sottoConfigBackend() {
-    const workspaceBackend = backendOf(state.workspace?.backendId);
-    return workspaceBackend?.status === 'connected' ? workspaceBackend : primaryBackend();
+    return localBackend();
   }
   async function loadSottoSettings() {
     const backend = sottoConfigBackend();
@@ -3066,7 +3113,7 @@
     state.sottoBackendId = null;
     $('saveSotto').disabled = true;
     if (!backend) {
-      $('sottoSettingsStatus').textContent = '请先连接 Backend';
+      $('sottoSettingsStatus').textContent = '请先连接提供当前页面的本机 Backend';
       return;
     }
     $('sottoSettingsStatus').textContent = `正在读取「${backend.name}」的语音输入设置…`;
@@ -3078,7 +3125,7 @@
       $('sottoEndpoint').value = settings.endpoint;
       $('saveSotto').disabled = false;
       $('sottoSettingsStatus').textContent =
-        `设置属于 Backend「${backend.name}」。本机指它所在机器的 127.0.0.1，不是浏览器的 localhost。`;
+        `语音识别固定使用本机 Backend「${backend.name}」的设置；远端会话共用此配置。`;
     } catch (error) {
       if (requestId === state.sottoSettingsRequest)
         $('sottoSettingsStatus').textContent = `读取失败：${error.message}`;
@@ -3155,6 +3202,11 @@
     }
   }
 
+  const el = (tag, props = {}, ...children) => {
+    const node = Object.assign(document.createElement(tag), props);
+    node.append(...children);
+    return node;
+  };
   function modal(title, build, okText = '确定') {
     const dialog = $('modal'),
       body = $('modalBody');
@@ -3505,11 +3557,6 @@
       return toast(`读取失败：${error.message}（Backend 可能版本过旧）`);
     }
     if ($('configDialog').open) $('configDialog').close();
-    const el = (tag, props = {}, ...children) => {
-      const node = Object.assign(document.createElement(tag), props);
-      node.append(...children);
-      return node;
-    };
     const section = (title, note) =>
       el(
         'section',
@@ -3705,6 +3752,108 @@
     await selectAgent(agent);
     if (result.editorText !== undefined) $('input').value = result.editorText;
     toast(result.editorText !== undefined ? '已回退到该用户输入，可编辑后重新发送' : '已回退到所选输出');
+  }
+  const performanceTime = ms =>
+    ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
+  function coveredTime(spans) {
+    const intervals = spans.map(span => [span.start, span.end]).sort((a, b) => a[0] - b[0]);
+    let total = 0,
+      end = -Infinity;
+    for (const [from, to] of intervals) {
+      total += Math.max(0, to - Math.max(end, from));
+      end = Math.max(end, to);
+    }
+    return total;
+  }
+  async function showSessionPerformance() {
+    const agent = state.agent;
+    if (!agent) return toast('请选择 Agent');
+    const {runs, legacyTools} = await requestAgent(agent.agentId, '/performance');
+    await modal(
+      '会话耗时分析',
+      body => {
+        const info = document.createElement('p');
+        info.className = 'muted';
+        info.textContent =
+          '横轴为每轮运行的实际时间；同一时间段的工具调用可能并行。模型耗时包含首响应等待与输出；网络、排队和其他开销可能落在空白时间。';
+        body.append(info);
+        if (!runs.length && !legacyTools.length) {
+          body.append(el('p', {textContent: '当前分支没有可分析的耗时记录；新运行结束后会记录精确时间。'}));
+          return null;
+        }
+        const list = el('div', {className: 'performance-list'});
+        const allSpans = runs.flatMap(run => run.spans || []);
+        const total = runs.reduce((sum, run) => sum + Math.max(0, run.end - run.start), 0);
+        const tools = allSpans.filter(span => span.kind === 'tool');
+        const models = allSpans.filter(span => span.kind === 'model');
+        const head = el('p', {
+          textContent: `${runs.length} 轮 · 总运行 ${performanceTime(total)} · 模型 ${performanceTime(coveredTime(models))} · 工具占用 ${performanceTime(coveredTime(tools))}（调用时长累计 ${performanceTime(tools.reduce((n, s) => n + s.end - s.start, 0))}，可能并行）`
+        });
+        list.append(head);
+        const legend = el('p', {
+          className: 'muted',
+          textContent: '蓝色：模型 · 黄色：工具 · 紫色：压缩/重试；空白：其他等待'
+        });
+        list.append(legend);
+        for (const run of [...runs].reverse()) {
+          const duration = Math.max(1, run.end - run.start);
+          const spans = [...(run.spans || [])].sort((a, b) => a.start - b.start || a.end - b.end);
+          const modelTime = coveredTime(spans.filter(span => span.kind === 'model'));
+          const toolTime = coveredTime(spans.filter(span => span.kind === 'tool'));
+          const summary = el('summary', {
+            textContent: `${new Date(run.start).toLocaleString()} · ${performanceTime(duration)} · 模型 ${performanceTime(modelTime)} · 工具 ${performanceTime(toolTime)}${run.incomplete ? ' · 已中断' : ''}`
+          });
+          const details = el('details', {className: 'performance-run'}, summary);
+          for (const span of spans) {
+            const length = Math.max(0, span.end - span.start);
+            const first =
+              span.kind === 'model' && span.firstResponse !== undefined
+                ? ` · 首响应 ${performanceTime(span.firstResponse - span.start)} · 响应 ${performanceTime(span.end - span.firstResponse)}`
+                : '';
+            const label =
+              span.kind === 'model'
+                ? '模型调用'
+                : span.kind === 'tool'
+                  ? `工具 ${span.name || ''}`
+                  : span.kind === 'retry'
+                    ? '重试等待'
+                    : '上下文压缩';
+            const row = el('div', {className: 'performance-row'});
+            const text = el('span', {
+              className: 'performance-label',
+              textContent: `${label} · +${performanceTime(span.start - run.start)} · ${performanceTime(length)}${first}${span.incomplete ? ' · 未完成' : ''}`
+            });
+            const track = el('div', {className: 'performance-track'});
+            const bar = el('i', {className: `performance-${span.kind}`});
+            bar.style.left = `${Math.max(0, Math.min(100, ((span.start - run.start) / duration) * 100))}%`;
+            bar.style.width = `${Math.max(0.35, Math.min(100 - parseFloat(bar.style.left), (length / duration) * 100))}%`;
+            track.append(bar);
+            row.append(text, track);
+            details.append(row);
+          }
+          list.append(details);
+        }
+        if (legacyTools.length) {
+          const old = el('details', {className: 'performance-run'});
+          old.append(
+            el('summary', {
+              textContent: `旧会话：${legacyTools.length} 次工具调用（仅有工具耗时；缺少模型请求数据）`
+            })
+          );
+          for (const span of legacyTools.sort((a, b) => b.end - a.end))
+            old.append(
+              el('div', {
+                className: 'performance-row',
+                textContent: `${new Date(span.end).toLocaleString()} · ${span.name} · ${performanceTime(span.end - span.start)}`
+              })
+            );
+          list.append(old);
+        }
+        body.append(list);
+        return null;
+      },
+      '关闭'
+    );
   }
   async function showSessionTree() {
     const sourceAgent = state.agent;
@@ -4078,6 +4227,7 @@
   $('switchPrompt').onclick = () => switchAgentPrompt().catch(e => toast(e.message));
   $('openSystemPrompts').onclick = () => systemPromptManager().catch(e => toast(e.message));
   $('sessionTree').onclick = () => showSessionTree().catch(e => toast(e.message));
+  $('sessionPerformance').onclick = () => showSessionPerformance().catch(e => toast(e.message));
   $('undo').onclick = () => revert().catch(e => toast(e.message));
   $('controls').onclick = () => modelControls().catch(e => toast(e.message));
   $('compact').onclick = async () => {

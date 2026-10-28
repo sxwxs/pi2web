@@ -58,7 +58,11 @@
       const fields = (body.error?.fieldErrors || [])
         .map(entry => `${entry.path}: ${entry.message}`)
         .join('；');
-      throw Error(`${body.error?.message || `HTTP ${response.status}`}${fields ? ` (${fields})` : ''}`);
+      const error = Error(
+        `${body.error?.message || `HTTP ${response.status}`}${fields ? ` (${fields})` : ''}`
+      );
+      error.status = response.status;
+      throw error;
     }
     return body.data;
   }
@@ -66,8 +70,15 @@
   const requiresAuth = async base => {
     try {
       return (await request(base, '', '/health')).authRequired !== false;
-    } catch {
-      return true;
+    } catch (error) {
+      if (error.status === 401) return true;
+      if (error.status === 403)
+        throw Error(
+          '服务拒绝访问（403）：无认证服务默认仅允许本机访问；请检查服务地址、代理和 --no-auth 设置'
+        );
+      if (error.status === 404) throw Error('服务未提供 /health（404）：请检查地址和远端版本');
+      if (error instanceof TypeError) throw Error('无法访问服务：请检查地址、网络及浏览器跨域限制（CORS）');
+      throw error;
     }
   };
   const post = (url, body = {}) => api(url, {method: 'POST', body: JSON.stringify(body)});
@@ -1076,5 +1087,8 @@
   };
   window.addEventListener('beforeunload', () => state.ws?.close());
 
-  connect(state.base, state.token).catch(() => openPair());
+  connect(state.base, state.token).catch(error => {
+    toast(`自动连接失败：${error.message}`);
+    openPair();
+  });
 })();

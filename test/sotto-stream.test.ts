@@ -83,7 +83,8 @@ describe('live browser dictation relay', () => {
         rootPath: await temp('pi2web-stream-ws-')
       });
       const agent = await post('/api/v1/agents', {workspaceId: workspace.id});
-      browser = new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/agents/${agent.agentId}/transcribe/ws`);
+      // Transcription is a backend capability, not tied to an Agent on this backend.
+      browser = new WebSocket(`ws://127.0.0.1:${address!.port}/api/v1/transcribe/ws`);
       const ready = message(browser);
       await once(browser, 'open');
       expect((await ready).type).toBe('ready');
@@ -107,6 +108,12 @@ describe('live browser dictation relay', () => {
       browser.send(Buffer.alloc(2 * 1024 * 1024 + 1));
       expect((await rejected)[0]).toBe(1009);
       expect((await fetch(base + '/api/v1/system/status')).status).toBe(200);
+      const badAudio = await fetch(base + '/api/v1/transcribe', {
+        method: 'POST',
+        headers: {'content-type': 'audio/webm'},
+        body: Buffer.alloc(8)
+      });
+      expect(badAudio.status).toBe(400);
 
       // The backend-wide switch ends all existing streams, not just the tab saving settings.
       for (let i = 0; i < 2; i++) {

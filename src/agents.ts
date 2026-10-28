@@ -7,6 +7,7 @@ import type {AgentTemplateSnapshot} from './agent-templates.js';
 import {ActivityTracker, type Activity} from './activity.js';
 import {AgentFeed, type DetailMessage, type TimelineSource} from './agent-feed.js';
 import {buildTimeline, itemBody, pageTimeline, type TimelineEntry} from './timeline.js';
+import {sessionPerformance} from './session-performance.js';
 export type AgentState = {
   status:
     | 'unloaded'
@@ -712,6 +713,11 @@ export class AgentManager {
       page = pageTimeline(buildTimeline(source.entries()), limit, before);
     if (!page) throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
     return {sessionId: source.sessionId, ...page};
+  }
+  /** All timing records of the current branch; older sessions only have partial tool timings. */
+  async performance(id: string) {
+    const source = (await this.ensureLoaded(id)).timeline();
+    return {sessionId: source.sessionId, ...sessionPerformance(source.entries())};
   }
   /** The full body of one timeline item of the given session. It never changes. */
   async item(id: string, sessionId: string, itemId: string) {
