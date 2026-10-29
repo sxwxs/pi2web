@@ -101,7 +101,9 @@ export class ActivityTracker {
       case 'turn_start':
         s.metrics = {turnStartedAt: this.now(), chars: 0, estimatedTokens: 0};
         this.lastMetricsPublish = 0;
-        return this.setPhase({kind: 'waiting_llm'});
+        this.setPhase({kind: 'waiting_llm'});
+        // Even when the last tool already moved us to waiting_llm, clients need the cleared metrics.
+        return true;
       case 'message_update': {
         const update = e.assistantMessageEvent,
           type = str(update?.type);

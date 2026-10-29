@@ -101,6 +101,22 @@ describe('ActivityTracker', () => {
     expect(t.snapshot().metrics).toBeUndefined();
   });
 
+  it('publishes the new turn even when the last tool already left the phase waiting', () => {
+    const {t, at, apply} = tracker();
+    apply('agent_start');
+    at(1500);
+    apply('message_update', update('text_delta', {delta: 'hello'}));
+    apply('tool_execution_start', {toolCallId: 'tool-1', toolName: 'read'});
+    at(2000);
+    apply('tool_execution_end', {toolCallId: 'tool-1'});
+    expect(t.snapshot().phase.kind).toBe('waiting_llm');
+    expect(t.snapshot().metrics?.firstResponseAt).toBe(1500);
+    at(2100);
+    expect(apply('turn_start')).toBe(true);
+    expect(t.snapshot().phase).toEqual({kind: 'waiting_llm', since: 2000});
+    expect(t.snapshot().metrics).toEqual({turnStartedAt: 2100, chars: 0, estimatedTokens: 0});
+  });
+
   it('keeps the run across retries and restarts the retry timer on each attempt', () => {
     const {t, at, apply, phase} = tracker();
     apply('agent_start');
