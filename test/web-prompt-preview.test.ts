@@ -58,6 +58,7 @@ async function setup(
   cwd.value = '.';
   const dialog = new Element();
   const submit = new Element();
+  const requests: string[] = [];
   let modelCalls = 0;
   const pending: Array<{url: string; response: ReturnType<typeof deferred<{systemPrompt: string}>>}> = [];
   let input!: Element, template!: Element;
@@ -76,7 +77,7 @@ async function setup(
     toast: vi.fn(),
     URLSearchParams,
     requestBackend: (_backend: string, url: string) => {
-      if (url.startsWith('/api/v1/sessions?')) return Promise.resolve([]);
+      requests.push(url);
       if (url === '/api/v1/agent-templates') return Promise.resolve({templates: []});
       if (url.startsWith('/api/v1/agents/models?'))
         return ++modelCalls === 1
@@ -107,7 +108,7 @@ async function setup(
   await createAgent();
   const box = dialog.children.find(child => child.className === 'prompt-preview')!;
   const modelSelect = dialog.children.find(child => child.textContent === '模型')?.children[0];
-  return {input, template, box, pending, modelSelect, created, toast: context.toast};
+  return {input, template, box, pending, modelSelect, created, requests, toast: context.toast};
 }
 
 describe('create-Agent model selection', () => {
@@ -118,6 +119,8 @@ describe('create-Agent model selection', () => {
     });
     expect(ui.modelSelect?.options.map(option => option.textContent)).toEqual(['Pi 默认模型', 'p / Model M']);
     expect(ui.created).toMatchObject({model: {provider: 'p', modelId: 'm'}});
+    expect(ui.created).not.toHaveProperty('sessionFile');
+    expect(ui.requests.some(url => url.startsWith('/api/v1/sessions?'))).toBe(false);
   });
 
   it('waits for the new directory catalog and preserves a still-available model', async () => {
@@ -166,6 +169,7 @@ describe('create-Agent model selection', () => {
     const ui = await setup({submit: true});
     expect(ui.modelSelect?.options).toHaveLength(1);
     expect(ui.created).not.toHaveProperty('model');
+    expect(ui.created).not.toHaveProperty('sessionFile');
   });
 });
 

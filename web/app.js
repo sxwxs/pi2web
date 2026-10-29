@@ -3321,15 +3321,10 @@
     if (!workspace) return toast('请先选择 Workspace');
     const cwd = $('agentCwd').value.trim() || '.';
     const preferenceKey = `rpLastTemplate:${workspace.backendId}`;
-    let sessions,
-      templates = [],
+    let templates = [],
       modelCatalog;
     try {
-      [sessions, templates, modelCatalog] = await Promise.all([
-        requestBackend(
-          workspace.backendId,
-          `/api/v1/sessions?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(cwd)}`
-        ),
+      [templates, modelCatalog] = await Promise.all([
         // Older backends have no templates endpoint; they simply offer Pi's default prompt.
         requestBackend(workspace.backendId, '/api/v1/agent-templates')
           .then(data => data.templates || [])
@@ -3346,19 +3341,6 @@
       '新建 Agent',
       body => {
         const c = field(body, '工作路径', cwd);
-        const l = document.createElement('label');
-        l.textContent = 'Session';
-        const s = document.createElement('select');
-        s.innerHTML =
-          '<option value="">新 Session</option>' +
-          sessions
-            .map(
-              x =>
-                `<option value="${esc(x.path)}">${esc(x.name || x.sessionName || x.id || x.path)} · ${esc(x.modified || '')}</option>`
-            )
-            .join('');
-        l.append(s);
-        body.append(l);
         const modelLabel = document.createElement('label');
         modelLabel.textContent = '模型';
         const modelSelect = document.createElement('select');
@@ -3366,7 +3348,7 @@
           modelSelect.replaceChildren();
           const fallback = document.createElement('option');
           fallback.value = '';
-          fallback.textContent = s.value ? '沿用 Session 模型' : 'Pi 默认模型';
+          fallback.textContent = 'Pi 默认模型';
           modelSelect.append(fallback);
           for (const model of catalog?.models || []) {
             const option = document.createElement('option');
@@ -3376,7 +3358,7 @@
           }
           if (selected && [...modelSelect.options].some(option => option.value === selected))
             modelSelect.value = selected;
-          else if (catalog?.model && !s.value) {
+          else if (catalog?.model) {
             const current = JSON.stringify([catalog.model.provider, catalog.model.id]);
             if ([...modelSelect.options].some(option => option.value === current))
               modelSelect.value = current;
@@ -3385,7 +3367,6 @@
             toast('所选模型在新工作路径不可用，已改用当前默认模型；请确认选择。');
         };
         renderModels(modelCatalog);
-        s.addEventListener('change', () => renderModels(modelCatalog));
         modelLabel.append(modelSelect);
         body.append(modelLabel);
         let modelRequest = 0;
@@ -3442,7 +3423,6 @@
         t.onchange = () => preview.reset();
         return () => ({
           cwd: c.value.trim() || '.',
-          sessionFile: s.value || undefined,
           templateId: t.value || undefined,
           model: modelSelect.value ? JSON.parse(modelSelect.value) : null
         });
@@ -3454,13 +3434,12 @@
       const created = await postBackend(workspace.backendId, '/api/v1/agents', {
         workspaceId: workspace.id,
         relativeCwd: result.cwd,
-        sessionFile: result.sessionFile,
         templateId: result.templateId,
         ...(result.model ? {model: {provider: result.model[0], modelId: result.model[1]}} : {})
       });
       localStorage.setItem(preferenceKey, result.templateId || '');
       const agent = stampNewItem(workspace.backendId, created);
-      const binding = result.sessionFile ? null : autoBindNewSession(agent);
+      const binding = autoBindNewSession(agent);
       await refreshAgents();
       await selectAgent(agent);
       if (binding) toast(`新 Session 已自动绑定到按键 ${binding.slot + 1}`);
