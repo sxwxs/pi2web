@@ -48,7 +48,7 @@ describe('session performance dialog', () => {
           start: 1000,
           end: 2000,
           spans: [
-            {kind: 'model', start: 1000, firstResponse: 1200, end: 1500},
+            {kind: 'model', start: 1000, firstResponse: 1200, end: 1500, outputTokens: 30},
             {kind: 'tool', name: 'read', start: 1500, end: 1900},
             {kind: 'tool', name: 'bash', start: 1600, end: 1800}
           ]
@@ -61,6 +61,7 @@ describe('session performance dialog', () => {
     const run = list.children.find(child => child.tag === 'details');
     expect(run.children.filter(child => child.className === 'performance-row')).toHaveLength(3);
     expect(run.children[1].children[0].textContent).toContain('首响应');
+    expect(run.children[1].children[0].textContent).toContain('输出 30 token · 均速 100.0 token/s');
     expect(run.children[2].children[1].children[0].style.left).toBe('50%');
     expect(run.children[3].children[1].children[0].style.left).toBe('60%');
   });

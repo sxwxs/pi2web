@@ -25,6 +25,14 @@ export type Activity = {
   /** The current LLM run, from agent_start until it ends. */
   run: {startedAt: number} | null;
   phase: ActivityPhase;
+  /** Current model turn only. Token count is an estimate from streamed text, not provider usage. */
+  metrics?: {
+    turnStartedAt: number;
+    firstResponseAt?: number;
+    textStartedAt?: number;
+    chars: number;
+    estimatedTokens: number;
+  };
   /** User `!` shell commands; independent of runs. */
   bash: Array<{id: string; command?: string; since: number}>;
   /** Extension dialogs waiting for a human answer; independent of runs. */
@@ -56,6 +64,7 @@ const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(va
  */
 export class ActivityTracker {
   private state: Activity;
+  private lastMetricsPublish = 0;
   constructor(private readonly now: () => number = Date.now) {
     this.state = {run: null, phase: {kind: 'idle', since: now()}, bash: [], dialogs: []};
   }
@@ -86,15 +95,41 @@ export class ActivityTracker {
       case 'agent_start': {
         const startedRun = !s.run;
         if (startedRun) s.run = {startedAt: this.now()};
+        if (startedRun) s.metrics = {turnStartedAt: this.now(), chars: 0, estimatedTokens: 0};
         return this.setPhase({kind: 'waiting_llm'}) || startedRun;
       }
       case 'turn_start':
+        s.metrics = {turnStartedAt: this.now(), chars: 0, estimatedTokens: 0};
+        this.lastMetricsPublish = 0;
         return this.setPhase({kind: 'waiting_llm'});
       case 'message_update': {
         const update = e.assistantMessageEvent,
           type = str(update?.type);
-        if (type === 'thinking_start' || type === 'thinking_delta') return this.setPhase({kind: 'thinking'});
-        if (type === 'text_start' || type === 'text_delta') return this.setPhase({kind: 'generating'});
+        const at = this.now();
+        const firstResponse =
+          !!s.metrics &&
+          s.metrics.firstResponseAt === undefined &&
+          (type === 'thinking_delta' || type === 'text_delta' || type === 'toolcall_delta');
+        if (firstResponse) s.metrics!.firstResponseAt = at;
+        if (type === 'thinking_start' || type === 'thinking_delta')
+          return this.setPhase({kind: 'thinking'}) || firstResponse;
+        if (type === 'text_start' || type === 'text_delta') {
+          const changed = this.setPhase({kind: 'generating'});
+          if (s.metrics && type === 'text_delta' && typeof update.delta === 'string') {
+            s.metrics.textStartedAt ??= at;
+            const delta = update.delta as string;
+            // Approximate Latin/code text at 4 chars/token, CJK at 1.5 chars/token.
+            const cjk = delta.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/gu)?.length ?? 0;
+            const chars = [...delta].length;
+            s.metrics.chars += chars;
+            s.metrics.estimatedTokens += (chars - cjk) / 4 + cjk / 1.5;
+            if (changed || at - this.lastMetricsPublish >= 1000) {
+              this.lastMetricsPublish = at;
+              return true;
+            }
+          }
+          return changed || firstResponse;
+        }
         if (type === 'toolcall_start' || type === 'toolcall_delta') {
           const toolName = str(update.partial?.content?.[update.contentIndex]?.name);
           // The name may only arrive with a later delta: fill it in without restarting the timer.
@@ -102,7 +137,7 @@ export class ActivityTracker {
             s.phase.toolName = toolName;
             return true;
           }
-          return this.setPhase({kind: 'preparing_tool', ...(toolName ? {toolName} : {})});
+          return this.setPhase({kind: 'preparing_tool', ...(toolName ? {toolName} : {})}) || firstResponse;
         }
         return false;
       }
@@ -186,6 +221,7 @@ export class ActivityTracker {
   private endRun(settled = false) {
     const hadRun = !!this.state.run;
     this.state.run = null;
+    delete this.state.metrics;
     // Compaction may continue after the run has ended; agent_settled closes it.
     if (this.state.phase.kind === 'compacting' && !settled) return hadRun;
     return this.setPhase({kind: 'idle'}) || hadRun;

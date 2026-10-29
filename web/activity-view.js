@@ -21,6 +21,10 @@
       !!activity.bash?.length ||
       !!activity.dialogs?.length);
 
+  function formatDuration(ms) {
+    return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+  }
+
   function formatElapsed(ms) {
     const total = Math.max(0, Math.floor(ms / 1000)),
       h = Math.floor(total / 3600),
@@ -59,7 +63,22 @@
           text: `${label}${phase.attempt ? ` ${phase.attempt}/${phase.maxAttempts || '?'}` : ''}${phase.error ? ` · ${phase.error}` : ''}`,
           since: phase.since
         });
-      else parts.push({icon, text: label, since: phase.since});
+      else {
+        const metrics = activity.metrics;
+        const ttft =
+          metrics?.firstResponseAt === undefined
+            ? ''
+            : ` · TTFT ${formatDuration(metrics.firstResponseAt - metrics.turnStartedAt)}`;
+        const output = phase.kind === 'generating' && metrics?.chars ? ` · 已输出 ${metrics.chars} 字` : '';
+        parts.push({
+          icon,
+          text: `${label}${ttft}${output}`,
+          since: phase.since,
+          ...(phase.kind === 'generating' && metrics?.textStartedAt !== undefined
+            ? {speed: {tokens: metrics.estimatedTokens, since: metrics.textStartedAt}}
+            : {})
+        });
+      }
     }
     for (const bash of activity.bash || [])
       parts.push({icon: '$', text: bash.command || 'bash', since: bash.since});
@@ -86,7 +105,17 @@
       text.className = 'activity-text';
       text.textContent = `${part.icon} ${part.text}`;
       text.title = part.text;
-      node.append(text, elapsed(backendId, part.since));
+      node.append(text);
+      if (part.speed) {
+        const speed = document.createElement('span');
+        speed.className = 'activity-speed';
+        speed.dataset.tokens = String(part.speed.tokens);
+        speed.dataset.since = String(part.speed.since);
+        speed.dataset.backend = backendId || '';
+        speed.textContent = speedText(part.speed.tokens, serverNow(backendId) - part.speed.since);
+        node.append(speed);
+      }
+      node.append(elapsed(backendId, part.since));
       return node;
     }
     /** The full activity of the selected Agent: every part plus the run's total time. */
@@ -110,9 +139,17 @@
       if (parts.length > 1) node.append(` +${parts.length - 1}`);
       return node;
     }
+    function speedText(tokens, ms) {
+      return ms < 1000 ? ' · 估算中' : ` · 约 ${((tokens * 1000) / ms).toFixed(1)} token/s`;
+    }
     function tick() {
       for (const el of document.querySelectorAll('.elapsed[data-since]'))
         el.textContent = formatElapsed(serverNow(el.dataset.backend) - Number(el.dataset.since));
+      for (const el of document.querySelectorAll('.activity-speed[data-since]'))
+        el.textContent = speedText(
+          Number(el.dataset.tokens),
+          serverNow(el.dataset.backend) - Number(el.dataset.since)
+        );
     }
     return {bar, line, tick};
   }

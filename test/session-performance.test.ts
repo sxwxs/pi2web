@@ -17,7 +17,7 @@ describe('session performance', () => {
     send(1000, {type: 'agent_start'});
     send(1010, {type: 'turn_start'});
     send(1100, {type: 'message_update'});
-    send(1300, {type: 'message_end', message: {role: 'assistant'}});
+    send(1300, {type: 'message_end', message: {role: 'assistant', usage: {output: 20}}});
     send(1310, {type: 'tool_execution_start', toolCallId: 'a', toolName: 'read'});
     send(1320, {type: 'tool_execution_start', toolCallId: 'b', toolName: 'bash'});
     send(1330, {type: 'tool_execution_start', toolCallId: 'nested', parentToolCallId: 'a'});
@@ -32,7 +32,7 @@ describe('session performance', () => {
       start: 1000,
       end: 1710,
       spans: [
-        {kind: 'model', start: 1010, end: 1300, firstResponse: 1100},
+        {kind: 'model', start: 1010, end: 1300, firstResponse: 1100, outputTokens: 20},
         {kind: 'tool', start: 1310, end: 1400, name: 'read', toolCallId: 'a'},
         {kind: 'tool', start: 1320, end: 1500, name: 'bash', toolCallId: 'b'},
         {kind: 'model', start: 1510, end: 1650}

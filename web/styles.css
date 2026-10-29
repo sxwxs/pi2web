@@ -100,6 +100,7 @@
 #activityBar[hidden],.agent-activity[hidden]{display:none}
 .activity-chip{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%}
 .activity-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.activity-speed{flex:0 0 auto;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--blue)}
 .elapsed{flex:0 0 auto;font-variant-numeric:tabular-nums;color:var(--yellow)}
 .activity-run{margin-left:auto;color:var(--muted);white-space:nowrap}
 .agent-activity{display:flex;align-items:center;gap:6px;margin-top:5px;font-size:11px;color:#c9d1de}

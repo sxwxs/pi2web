@@ -19,6 +19,13 @@ class Element {
   textContent = '';
   innerHTML = '';
   children: Element[] = [];
+  get options() {
+    return this.children;
+  }
+  replaceChildren(...children: Element[]) {
+    this.children = children;
+    this.value = children[0]?.value || '';
+  }
   listeners = new Map<string, () => void>();
   onchange?: () => void;
   append(...children: Element[]) {
@@ -38,12 +45,13 @@ function deferred<T>() {
   return {promise, resolve};
 }
 
-async function setup() {
+async function setup(options: {submit?: boolean; catalog?: unknown} = {}) {
   const cwd = new Element();
   cwd.value = '.';
   const dialog = new Element();
   const pending: Array<{url: string; response: ReturnType<typeof deferred<{systemPrompt: string}>>}> = [];
   let input!: Element, template!: Element;
+  let created: unknown;
   const context = {
     state: {workspace: {id: 'ws', backendId: 'backend'}},
     $: () => cwd,
@@ -60,22 +68,50 @@ async function setup() {
     requestBackend: (_backend: string, url: string) => {
       if (url.startsWith('/api/v1/sessions?')) return Promise.resolve([]);
       if (url === '/api/v1/agent-templates') return Promise.resolve({templates: []});
+      if (url.startsWith('/api/v1/agents/models?')) return Promise.resolve(options.catalog || {models: []});
       const response = deferred<{systemPrompt: string}>();
       pending.push({url, response});
       return response.promise;
     },
-    modal: async (_title: string, build: (body: Element) => void) => {
-      build(dialog);
-      return null;
-    }
+    modal: async (_title: string, build: (body: Element) => () => unknown) => {
+      const selection = build(dialog);
+      return options.submit ? selection() : null;
+    },
+    postBackend: async (_backend: string, _path: string, body: unknown) => {
+      created = body;
+      return {agentId: 'new-agent'};
+    },
+    localStorage: {getItem: () => null, setItem: () => {}},
+    stampNewItem: (_backend: string, agent: unknown) => agent,
+    autoBindNewSession: () => null,
+    refreshAgents: async () => {},
+    selectAgent: async () => {}
   };
   const {createAgent} = runInNewContext(`${createSource}\n${previewSource}\n({createAgent})`, context, {
     filename: 'web/app.js'
   });
   await createAgent();
   const box = dialog.children.find(child => child.className === 'prompt-preview')!;
-  return {input, template, box, pending};
+  const modelSelect = dialog.children.find(child => child.textContent === '模型')?.children[0];
+  return {input, template, box, pending, modelSelect, created};
 }
+
+describe('create-Agent model selection', () => {
+  it('lists project models and sends the selected model when creating', async () => {
+    const ui = await setup({
+      submit: true,
+      catalog: {model: {provider: 'p', id: 'm'}, models: [{provider: 'p', id: 'm', name: 'Model M'}]}
+    });
+    expect(ui.modelSelect?.options.map(option => option.textContent)).toEqual(['Pi 默认模型', 'p / Model M']);
+    expect(ui.created).toMatchObject({model: {provider: 'p', modelId: 'm'}});
+  });
+
+  it('allows the Pi default when no model catalog is available', async () => {
+    const ui = await setup({submit: true});
+    expect(ui.modelSelect?.options).toHaveLength(1);
+    expect(ui.created).not.toHaveProperty('model');
+  });
+});
 
 describe('create-Agent system prompt preview', () => {
   it('reloads for the new cwd even after the earlier preview was loaded', async () => {

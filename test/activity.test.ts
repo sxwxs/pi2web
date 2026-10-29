@@ -73,6 +73,34 @@ describe('ActivityTracker', () => {
     expect(apply('agent_settled')).toBe(false);
   });
 
+  it('tracks TTFT and throttles estimated text throughput without retaining output text', () => {
+    const {t, at, apply} = tracker();
+    apply('agent_start');
+    at(1100);
+    apply('turn_start');
+    at(1600);
+    apply('message_update', update('thinking_delta', {delta: 'thought'}));
+    expect(t.snapshot().metrics?.firstResponseAt).toBe(1600);
+    at(1800);
+    apply('message_update', update('text_delta', {delta: 'hello世界'}));
+    expect(t.snapshot().metrics).toMatchObject({
+      turnStartedAt: 1100,
+      firstResponseAt: 1600,
+      textStartedAt: 1800,
+      chars: 7,
+      estimatedTokens: 5 / 4 + 2 / 1.5
+    });
+    at(1900);
+    expect(apply('message_update', update('text_delta', {delta: 'more'}))).toBe(false);
+    at(2900);
+    expect(apply('message_update', update('text_delta', {delta: 'x'}))).toBe(true);
+    expect(t.snapshot().metrics?.chars).toBe(12);
+    apply('turn_start');
+    expect(t.snapshot().metrics).toMatchObject({chars: 0, estimatedTokens: 0});
+    apply('agent_end');
+    expect(t.snapshot().metrics).toBeUndefined();
+  });
+
   it('keeps the run across retries and restarts the retry timer on each attempt', () => {
     const {t, at, apply, phase} = tracker();
     apply('agent_start');
