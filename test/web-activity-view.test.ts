@@ -59,6 +59,8 @@ describe('activity view', () => {
     const generating = activityParts({phase: {kind: 'generating', since: 2000}, metrics})[0];
     expect(generating.text).toBe('LLM 输出中 · TTFT 750 ms · 已输出 10 字');
     expect(generating.speed).toEqual({tokens: 3, since: 2000});
+    const tool = activityParts({phase: {kind: 'preparing_tool', since: 2000, toolName: 'write'}, metrics})[0];
+    expect(tool.text).toBe('生成工具参数：write · TTFT 750 ms');
   });
 
   it('treats an idle activity as not busy', () => {

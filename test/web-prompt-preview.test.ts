@@ -16,6 +16,7 @@ class Element {
   className = '';
   value = '';
   open = false;
+  disabled = false;
   textContent = '';
   innerHTML = '';
   children: Element[] = [];
@@ -45,16 +46,25 @@ function deferred<T>() {
   return {promise, resolve};
 }
 
-async function setup(options: {submit?: boolean; catalog?: unknown} = {}) {
+async function setup(
+  options: {
+    submit?: boolean;
+    catalog?: unknown;
+    modelRefresh?: Promise<unknown>;
+    onModal?: (dialog: Element, input: Element, submit: Element) => Promise<void>;
+  } = {}
+) {
   const cwd = new Element();
   cwd.value = '.';
   const dialog = new Element();
+  const submit = new Element();
+  let modelCalls = 0;
   const pending: Array<{url: string; response: ReturnType<typeof deferred<{systemPrompt: string}>>}> = [];
   let input!: Element, template!: Element;
   let created: unknown;
   const context = {
     state: {workspace: {id: 'ws', backendId: 'backend'}},
-    $: () => cwd,
+    $: (id: string) => (id === 'modalOk' ? submit : id === 'modal' ? dialog : cwd),
     document: {createElement: () => new Element()},
     field: (_body: Element, _label: string, value: string) => {
       input = new Element();
@@ -63,18 +73,22 @@ async function setup(options: {submit?: boolean; catalog?: unknown} = {}) {
     },
     templateSelect: () => (template = new Element()),
     promptSourcesText: () => 'preview',
-    toast: () => {},
+    toast: vi.fn(),
     URLSearchParams,
     requestBackend: (_backend: string, url: string) => {
       if (url.startsWith('/api/v1/sessions?')) return Promise.resolve([]);
       if (url === '/api/v1/agent-templates') return Promise.resolve({templates: []});
-      if (url.startsWith('/api/v1/agents/models?')) return Promise.resolve(options.catalog || {models: []});
+      if (url.startsWith('/api/v1/agents/models?'))
+        return ++modelCalls === 1
+          ? Promise.resolve(options.catalog || {models: []})
+          : options.modelRefresh || Promise.resolve(options.catalog || {models: []});
       const response = deferred<{systemPrompt: string}>();
       pending.push({url, response});
       return response.promise;
     },
     modal: async (_title: string, build: (body: Element) => () => unknown) => {
       const selection = build(dialog);
+      await options.onModal?.(dialog, input, submit);
       return options.submit ? selection() : null;
     },
     postBackend: async (_backend: string, _path: string, body: unknown) => {
@@ -93,7 +107,7 @@ async function setup(options: {submit?: boolean; catalog?: unknown} = {}) {
   await createAgent();
   const box = dialog.children.find(child => child.className === 'prompt-preview')!;
   const modelSelect = dialog.children.find(child => child.textContent === '模型')?.children[0];
-  return {input, template, box, pending, modelSelect, created};
+  return {input, template, box, pending, modelSelect, created, toast: context.toast};
 }
 
 describe('create-Agent model selection', () => {
@@ -104,6 +118,48 @@ describe('create-Agent model selection', () => {
     });
     expect(ui.modelSelect?.options.map(option => option.textContent)).toEqual(['Pi 默认模型', 'p / Model M']);
     expect(ui.created).toMatchObject({model: {provider: 'p', modelId: 'm'}});
+  });
+
+  it('waits for the new directory catalog and preserves a still-available model', async () => {
+    const refresh = deferred<unknown>();
+    const ui = await setup({
+      submit: true,
+      catalog: {model: {provider: 'p', id: 'm'}, models: [{provider: 'p', id: 'm'}]},
+      modelRefresh: refresh.promise,
+      onModal: async (dialog, input, submit) => {
+        const select = dialog.children.find(child => child.textContent === '模型')!.children[0];
+        input.value = 'subdir';
+        input.fire('change');
+        expect(submit.disabled).toBe(true);
+        expect(select.disabled).toBe(true);
+        refresh.resolve({
+          models: [
+            {provider: 'p', id: 'm'},
+            {provider: 'p', id: 'other'}
+          ]
+        });
+        await vi.waitFor(() => expect(submit.disabled).toBe(false));
+        expect(select.value).toBe(JSON.stringify(['p', 'm']));
+      }
+    });
+    expect(ui.created).toMatchObject({model: {provider: 'p', modelId: 'm'}, relativeCwd: 'subdir'});
+  });
+
+  it('warns when the previous model is not available in the new directory', async () => {
+    const refresh = deferred<unknown>();
+    const ui = await setup({
+      submit: true,
+      catalog: {model: {provider: 'p', id: 'm'}, models: [{provider: 'p', id: 'm'}]},
+      modelRefresh: refresh.promise,
+      onModal: async (dialog, input, submit) => {
+        input.value = 'subdir';
+        input.fire('change');
+        refresh.resolve({models: []});
+        await vi.waitFor(() => expect(submit.disabled).toBe(false));
+      }
+    });
+    expect(ui.toast).toHaveBeenCalledWith(expect.stringContaining('所选模型在新工作路径不可用'));
+    expect(ui.created).not.toHaveProperty('model');
   });
 
   it('allows the Pi default when no model catalog is available', async () => {

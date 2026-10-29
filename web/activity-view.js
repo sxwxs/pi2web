@@ -44,6 +44,11 @@
     const phase = activity.phase;
     if (phase && phase.kind !== 'idle') {
       const [icon, label] = PHASE_TEXT[phase.kind] || ['•', phase.kind];
+      const metrics = activity.metrics;
+      const ttft =
+        metrics?.firstResponseAt === undefined
+          ? ''
+          : ` · TTFT ${formatDuration(metrics.firstResponseAt - metrics.turnStartedAt)}`;
       if (phase.kind === 'running_tools')
         for (const tool of phase.tools || [])
           parts.push({
@@ -54,7 +59,7 @@
       else if (phase.kind === 'preparing_tool')
         parts.push({
           icon,
-          text: `${label}${phase.toolName ? `：${phase.toolName}` : ''}`,
+          text: `${label}${phase.toolName ? `：${phase.toolName}` : ''}${ttft}`,
           since: phase.since
         });
       else if (phase.kind === 'retrying')
@@ -64,11 +69,6 @@
           since: phase.since
         });
       else {
-        const metrics = activity.metrics;
-        const ttft =
-          metrics?.firstResponseAt === undefined
-            ? ''
-            : ` · TTFT ${formatDuration(metrics.firstResponseAt - metrics.turnStartedAt)}`;
         const output = phase.kind === 'generating' && metrics?.chars ? ` · 已输出 ${metrics.chars} 字` : '';
         parts.push({
           icon,

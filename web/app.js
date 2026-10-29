@@ -3362,7 +3362,7 @@
         const modelLabel = document.createElement('label');
         modelLabel.textContent = '模型';
         const modelSelect = document.createElement('select');
-        const renderModels = catalog => {
+        const renderModels = (catalog, selected = modelSelect.value) => {
           modelSelect.replaceChildren();
           const fallback = document.createElement('option');
           fallback.value = '';
@@ -3374,21 +3374,35 @@
             option.textContent = `${model.provider} / ${model.name || model.id}`;
             modelSelect.append(option);
           }
-          if (catalog?.model && !s.value) {
+          if (selected && [...modelSelect.options].some(option => option.value === selected))
+            modelSelect.value = selected;
+          else if (catalog?.model && !s.value) {
             const current = JSON.stringify([catalog.model.provider, catalog.model.id]);
             if ([...modelSelect.options].some(option => option.value === current))
               modelSelect.value = current;
           }
+          if (selected && modelSelect.value !== selected)
+            toast('所选模型在新工作路径不可用，已改用当前默认模型；请确认选择。');
         };
         renderModels(modelCatalog);
         s.addEventListener('change', () => renderModels(modelCatalog));
         modelLabel.append(modelSelect);
         body.append(modelLabel);
         let modelRequest = 0;
+        const submit = $('modalOk');
+        $('modal').addEventListener(
+          'close',
+          () => {
+            ++modelRequest;
+            submit.disabled = false;
+          },
+          {once: true}
+        );
         c.addEventListener('change', async () => {
           const request = ++modelRequest;
-          modelCatalog = null;
-          renderModels(null);
+          const selected = modelSelect.value;
+          submit.disabled = true;
+          modelSelect.disabled = true;
           try {
             const catalog = await requestBackend(
               workspace.backendId,
@@ -3396,10 +3410,19 @@
             );
             if (request === modelRequest) {
               modelCatalog = catalog;
-              renderModels(catalog);
+              renderModels(catalog, selected);
             }
           } catch (error) {
-            if (request === modelRequest) toast(`读取模型失败：${error.message}`);
+            if (request === modelRequest) {
+              modelCatalog = null;
+              renderModels(null, '');
+              toast(`读取模型失败：${error.message}；模型选择已重置，请确认后创建。`);
+            }
+          } finally {
+            if (request === modelRequest) {
+              modelSelect.disabled = false;
+              submit.disabled = false;
+            }
           }
         });
         const t = templateSelect(body, templates);
