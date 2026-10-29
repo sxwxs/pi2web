@@ -9,6 +9,8 @@ export type PerformanceSpan = {
   name?: string;
   toolCallId?: string;
   firstResponse?: number;
+  /** Provider-reported output tokens (may include reasoning tokens). */
+  outputTokens?: number;
   incomplete?: boolean;
 };
 export type PerformanceRun = {start: number; end: number; spans: PerformanceSpan[]; incomplete?: boolean};
@@ -53,6 +55,8 @@ export class SessionPerformanceTracker {
         break;
       case 'message_end':
         if (e.message?.role === 'assistant') {
+          if (this.model && Number.isFinite(e.message.usage?.output) && e.message.usage.output >= 0)
+            this.model.outputTokens = e.message.usage.output;
           this.finish(this.model, at);
           this.model = null;
         }

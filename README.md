@@ -223,7 +223,7 @@ Web 端能力：
 
 - Workspace 添加、目录浏览、文本文件分页及二进制提示。
 - Workspace 目录右键在交互式 Terminal 中打开；Terminal 与 Agent 显示在同一列表，支持刷新重连、清屏和关闭。
-- 创建/恢复 Session、Agent 列表、停止与 abort；Agent 右键 Archive。
+- 新建 Agent 时始终创建新 Session；已有 Agent 可在刷新或重启后继续使用。通过 Session 文件恢复对话暂仅支持 API，不在新建弹窗中提供；Agent 列表支持停止与 abort，右键 Archive。
 - Prompt、steer、follow-up 和流式对话。
 - 对话区只保留用户输入、Agent 输出、Thinking、Extension 对话框和错误；Tool call、Session bash 输出、Retry、Summarization retry 等过程事件自动折叠成一张"活动"卡片，卡片标题实时显示最新一项的名称和时间，展开后逐条查看，再点击单条查看内容。
 - 同一次 Tool call 的 start / update / end 合并为一张卡片（参数 + 输出 + 结果），结束后显示 Pi 记录的执行耗时。

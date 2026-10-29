@@ -46,6 +46,23 @@ describe('activity view', () => {
     expect(text({kind: 'idle'})).toBeUndefined();
   });
 
+  it('shows TTFT and makes the approximate throughput available to the status chip', () => {
+    const metrics = {
+      turnStartedAt: 1000,
+      firstResponseAt: 1750,
+      textStartedAt: 2000,
+      chars: 10,
+      estimatedTokens: 3
+    };
+    const thinking = activityParts({phase: {kind: 'thinking', since: 1750}, metrics})[0];
+    expect(thinking.text).toBe('LLM 思考中 · TTFT 750 ms');
+    const generating = activityParts({phase: {kind: 'generating', since: 2000}, metrics})[0];
+    expect(generating.text).toBe('LLM 输出中 · TTFT 750 ms · 已输出 10 字');
+    expect(generating.speed).toEqual({tokens: 3, since: 2000});
+    const tool = activityParts({phase: {kind: 'preparing_tool', since: 2000, toolName: 'write'}, metrics})[0];
+    expect(tool.text).toBe('生成工具参数：write · TTFT 750 ms');
+  });
+
   it('treats an idle activity as not busy', () => {
     expect(isBusy(null)).toBe(false);
     expect(isBusy({run: null, phase: {kind: 'idle', since: 1}, bash: [], dialogs: []})).toBe(false);

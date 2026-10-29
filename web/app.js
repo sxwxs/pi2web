@@ -3321,18 +3321,18 @@
     if (!workspace) return toast('请先选择 Workspace');
     const cwd = $('agentCwd').value.trim() || '.';
     const preferenceKey = `rpLastTemplate:${workspace.backendId}`;
-    let sessions,
-      templates = [];
+    let templates = [],
+      modelCatalog;
     try {
-      [sessions, templates] = await Promise.all([
-        requestBackend(
-          workspace.backendId,
-          `/api/v1/sessions?workspaceId=${encodeURIComponent(workspace.id)}&path=${encodeURIComponent(cwd)}`
-        ),
+      [templates, modelCatalog] = await Promise.all([
         // Older backends have no templates endpoint; they simply offer Pi's default prompt.
         requestBackend(workspace.backendId, '/api/v1/agent-templates')
           .then(data => data.templates || [])
-          .catch(() => [])
+          .catch(() => []),
+        requestBackend(
+          workspace.backendId,
+          `/api/v1/agents/models?workspaceId=${encodeURIComponent(workspace.id)}&relativeCwd=${encodeURIComponent(cwd)}`
+        ).catch(() => null)
       ]);
     } catch (error) {
       return toast(error.message);
@@ -3341,19 +3341,71 @@
       '新建 Agent',
       body => {
         const c = field(body, '工作路径', cwd);
-        const l = document.createElement('label');
-        l.textContent = 'Session';
-        const s = document.createElement('select');
-        s.innerHTML =
-          '<option value="">新 Session</option>' +
-          sessions
-            .map(
-              x =>
-                `<option value="${esc(x.path)}">${esc(x.name || x.sessionName || x.id || x.path)} · ${esc(x.modified || '')}</option>`
-            )
-            .join('');
-        l.append(s);
-        body.append(l);
+        const modelLabel = document.createElement('label');
+        modelLabel.textContent = '模型';
+        const modelSelect = document.createElement('select');
+        const renderModels = (catalog, selected = modelSelect.value) => {
+          modelSelect.replaceChildren();
+          const fallback = document.createElement('option');
+          fallback.value = '';
+          fallback.textContent = 'Pi 默认模型';
+          modelSelect.append(fallback);
+          for (const model of catalog?.models || []) {
+            const option = document.createElement('option');
+            option.value = JSON.stringify([model.provider, model.id]);
+            option.textContent = `${model.provider} / ${model.name || model.id}`;
+            modelSelect.append(option);
+          }
+          if (selected && [...modelSelect.options].some(option => option.value === selected))
+            modelSelect.value = selected;
+          else if (catalog?.model) {
+            const current = JSON.stringify([catalog.model.provider, catalog.model.id]);
+            if ([...modelSelect.options].some(option => option.value === current))
+              modelSelect.value = current;
+          }
+          if (selected && modelSelect.value !== selected)
+            toast('所选模型在新工作路径不可用，已改用当前默认模型；请确认选择。');
+        };
+        renderModels(modelCatalog);
+        modelLabel.append(modelSelect);
+        body.append(modelLabel);
+        let modelRequest = 0;
+        const submit = $('modalOk');
+        $('modal').addEventListener(
+          'close',
+          () => {
+            ++modelRequest;
+            submit.disabled = false;
+          },
+          {once: true}
+        );
+        c.addEventListener('change', async () => {
+          const request = ++modelRequest;
+          const selected = modelSelect.value;
+          submit.disabled = true;
+          modelSelect.disabled = true;
+          try {
+            const catalog = await requestBackend(
+              workspace.backendId,
+              `/api/v1/agents/models?workspaceId=${encodeURIComponent(workspace.id)}&relativeCwd=${encodeURIComponent(c.value.trim() || '.')}`
+            );
+            if (request === modelRequest) {
+              modelCatalog = catalog;
+              renderModels(catalog, selected);
+            }
+          } catch (error) {
+            if (request === modelRequest) {
+              modelCatalog = null;
+              renderModels(null, '');
+              toast(`读取模型失败：${error.message}；模型选择已重置，请确认后创建。`);
+            }
+          } finally {
+            if (request === modelRequest) {
+              modelSelect.disabled = false;
+              submit.disabled = false;
+            }
+          }
+        });
         const t = templateSelect(body, templates);
         const preferred = globalThis.localStorage?.getItem(preferenceKey);
         if (preferred && [...t.options].some(option => option.value === preferred)) t.value = preferred;
@@ -3371,8 +3423,8 @@
         t.onchange = () => preview.reset();
         return () => ({
           cwd: c.value.trim() || '.',
-          sessionFile: s.value || undefined,
-          templateId: t.value || undefined
+          templateId: t.value || undefined,
+          model: modelSelect.value ? JSON.parse(modelSelect.value) : null
         });
       },
       '创建'
@@ -3382,12 +3434,12 @@
       const created = await postBackend(workspace.backendId, '/api/v1/agents', {
         workspaceId: workspace.id,
         relativeCwd: result.cwd,
-        sessionFile: result.sessionFile,
-        templateId: result.templateId
+        templateId: result.templateId,
+        ...(result.model ? {model: {provider: result.model[0], modelId: result.model[1]}} : {})
       });
       localStorage.setItem(preferenceKey, result.templateId || '');
       const agent = stampNewItem(workspace.backendId, created);
-      const binding = result.sessionFile ? null : autoBindNewSession(agent);
+      const binding = autoBindNewSession(agent);
       await refreshAgents();
       await selectAgent(agent);
       if (binding) toast(`新 Session 已自动绑定到按键 ${binding.slot + 1}`);
@@ -3775,7 +3827,7 @@
         const info = document.createElement('p');
         info.className = 'muted';
         info.textContent =
-          '横轴为每轮运行的实际时间；同一时间段的工具调用可能并行。模型耗时包含首响应等待与输出；网络、排队和其他开销可能落在空白时间。';
+          '横轴为每轮运行的实际时间；同一时间段的工具调用可能并行。模型耗时包含首响应等待与输出；网络、排队和其他开销可能落在空白时间。实际输出 token 可能包含思考 token。';
         body.append(info);
         if (!runs.length && !legacyTools.length) {
           body.append(el('p', {textContent: '当前分支没有可分析的耗时记录；新运行结束后会记录精确时间。'}));
@@ -3810,6 +3862,10 @@
               span.kind === 'model' && span.firstResponse !== undefined
                 ? ` · 首响应 ${performanceTime(span.firstResponse - span.start)} · 响应 ${performanceTime(span.end - span.firstResponse)}`
                 : '';
+            const tokens =
+              span.kind === 'model' && span.outputTokens !== undefined
+                ? ` · 输出 ${span.outputTokens} token${span.firstResponse !== undefined && span.end > span.firstResponse ? ` · 均速 ${((span.outputTokens * 1000) / (span.end - span.firstResponse)).toFixed(1)} token/s` : ''}`
+                : '';
             const label =
               span.kind === 'model'
                 ? '模型调用'
@@ -3821,7 +3877,7 @@
             const row = el('div', {className: 'performance-row'});
             const text = el('span', {
               className: 'performance-label',
-              textContent: `${label} · +${performanceTime(span.start - run.start)} · ${performanceTime(length)}${first}${span.incomplete ? ' · 未完成' : ''}`
+              textContent: `${label} · +${performanceTime(span.start - run.start)} · ${performanceTime(length)}${first}${tokens}${span.incomplete ? ' · 未完成' : ''}`
             });
             const track = el('div', {className: 'performance-track'});
             const bar = el('i', {className: `performance-${span.kind}`});
