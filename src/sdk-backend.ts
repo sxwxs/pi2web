@@ -6,6 +6,7 @@ import {
   type AgentSession,
   type ExtensionUIContext
 } from '@earendil-works/pi-coding-agent';
+import type {AgentTurnDecision} from '@earendil-works/pi-agent-core';
 import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
 import type {
@@ -33,9 +34,24 @@ import {createCollabExtension, type CollabToolBridge} from './collab/pi-extensio
 const normalizeDisposition = (value: unknown): QueuedInputDisposition =>
   value === 'handled' ? 'handled' : 'queued';
 
+/**
+ * Safe pause progress, published as a `safe_pause` event:
+ * `requested` the run stops at its next safe point; `paused` it stopped there;
+ * `cancelled` the user withdrew the request; `finished` the run ended on its own first.
+ */
+export type SafePauseState = 'requested' | 'paused' | 'cancelled' | 'finished';
+
 /** Real in-process Pi SDK backend with session/model/extension controls exposed to remote clients. */
 export class SdkBackend implements AgentBackend {
   private disposed = false;
+  /** The user asked the current run to stop at its next safe point. */
+  private pauseRequested = false;
+  /** The current run was ended at a safe point; reported once the session settles. */
+  private pauseReached = false;
+  /** Whether the last settled run ended at a safe point (tags its `agent_settled`). */
+  private settledPaused = false;
+  /** Messages queued when the run paused. Pi would run them at once, so they wait here for the next prompt. */
+  private pausedQueue: AgentQueue = {steering: [], followUp: []};
   private events = new EventEmitter();
   private pendingUi = new Map<
     string,
@@ -50,6 +66,76 @@ export class SdkBackend implements AgentBackend {
       this.session.sessionManager.appendCustomEntry(PERFORMANCE_ENTRY, run)
     );
     this.session.subscribe(event => performance.apply(event as AgentEvent));
+    this.installSafePause();
+  }
+  /**
+   * Safe pause ends the run after a turn's tool results are recorded and before the next model
+   * request. The transcript then ends with tool results, which is a state Pi can carry on from.
+   */
+  private installSafePause() {
+    const agent = this.session.agent;
+    // AgentSession installs its own finishTurn (extension turn_end boundaries); keep it running first.
+    const previous = agent.finishTurn;
+    agent.finishTurn = async (turn, signal): Promise<AgentTurnDecision | undefined> => {
+      const decision = (await previous?.(turn, signal)) ?? undefined;
+      if (!this.pauseRequested || decision?.action === 'end') return decision;
+      // Error and aborted turns end the run anyway; a retry is caught on auto_retry_start.
+      if (turn.message.stopReason === 'error' || turn.message.stopReason === 'aborted') return decision;
+      const wouldContinue =
+        turn.toolResults.length > 0 || decision?.action === 'continue' || agent.hasQueuedMessages();
+      // A final answer with nothing queued ends the run by itself: there is nothing to pause.
+      if (!wouldContinue) return decision;
+      this.pauseRequested = false;
+      this.pauseReached = true;
+      // Queued input would make Pi continue right after the run ends. Hold it for the next prompt.
+      const cleared = this.session.clearQueue();
+      this.pausedQueue = {
+        steering: [...this.pausedQueue.steering, ...cleared.steering],
+        followUp: [...this.pausedQueue.followUp, ...cleared.followUp]
+      };
+      return {action: 'end'};
+    };
+    this.session.subscribe(event => {
+      // Only the agent_settled that ends a paused run carries the tag.
+      if (event.type !== 'agent_settled') this.settledPaused = false;
+      // A retry would send another model request. Stop it; the run ends with the failed response.
+      if (event.type === 'auto_retry_start' && this.pauseRequested) {
+        this.pauseRequested = false;
+        this.pauseReached = true;
+        this.session.abortRetry();
+      }
+      if (event.type !== 'agent_settled') return;
+      if (this.pauseReached) {
+        this.pauseReached = false;
+        this.settledPaused = true;
+        this.emitSafePause('paused');
+        if (this.pausedQueue.steering.length || this.pausedQueue.followUp.length)
+          this.events.emit('event', {type: 'queue_update', ...this.copyQueue(this.pausedQueue)});
+      } else if (this.pauseRequested) {
+        this.pauseRequested = false;
+        this.emitSafePause('finished');
+      }
+    });
+  }
+  private emitSafePause(state: SafePauseState) {
+    this.events.emit('event', {type: 'safe_pause', state});
+  }
+  private copyQueue(queue: AgentQueue): AgentQueue {
+    return {steering: [...queue.steering], followUp: [...queue.followUp]};
+  }
+  /** Ask the running turn to stop before its next model request. */
+  async requestPause() {
+    if (!this.session.isStreaming)
+      throw Object.assign(new Error('Agent is not running'), {code: 'AGENT_NOT_RUNNING'});
+    if (!this.pauseRequested) {
+      this.pauseRequested = true;
+      this.emitSafePause('requested');
+    }
+  }
+  async cancelPause() {
+    if (!this.pauseRequested) return;
+    this.pauseRequested = false;
+    this.emitSafePause('cancelled');
   }
   static async create(
     agentId: string,
@@ -95,13 +181,23 @@ export class SdkBackend implements AgentBackend {
       session.dispose();
       throw Object.assign(new Error(modelFallbackMessage), {code: 'PI_MODEL_UNAVAILABLE'});
     }
+    return SdkBackend.fromSession(session, agentId, cwd);
+  }
+  /** Wrap an existing Pi session; tests use it to drive a real session with a scripted model. */
+  static async fromSession(session: AgentSession, agentId: string, cwd: string) {
     const backend = new SdkBackend(session, agentId, cwd);
     await session.bindExtensions({uiContext: backend.extensionUi()});
     return backend;
   }
   // Slash commands, skills and prompt templates are expanded by prompt() itself (expandPromptTemplates defaults to true),
   // so `/name args` typed in the web composer behaves exactly like the Pi TUI.
-  prompt(message: string) {
+  async prompt(message: string) {
+    // Input held back by a safe pause goes in after this prompt, as Pi would have delivered it.
+    // Queuing does not start a run, and the run's first poll picks the steering messages up.
+    const held = this.pausedQueue;
+    this.pausedQueue = {steering: [], followUp: []};
+    for (const text of held.steering) await this.session.steer(text);
+    for (const text of held.followUp) await this.session.followUp(text);
     return this.session.prompt(message);
   }
   // Since pi 0.99 steer()/followUp() report whether the message reached the running turn (`handled`)
@@ -114,14 +210,19 @@ export class SdkBackend implements AgentBackend {
   }
   async getQueue(): Promise<AgentQueue> {
     return {
-      steering: [...this.session.getSteeringMessages()],
-      followUp: [...this.session.getFollowUpMessages()]
+      steering: [...this.pausedQueue.steering, ...this.session.getSteeringMessages()],
+      followUp: [...this.pausedQueue.followUp, ...this.session.getFollowUpMessages()]
     };
   }
   /** Drop queued steering and follow-up messages and hand them back so a client can restore them to its composer. */
   async clearQueue(): Promise<AgentQueue> {
+    const held = this.pausedQueue;
+    this.pausedQueue = {steering: [], followUp: []};
     const cleared = this.session.clearQueue();
-    return {steering: [...cleared.steering], followUp: [...cleared.followUp]};
+    return {
+      steering: [...held.steering, ...cleared.steering],
+      followUp: [...held.followUp, ...cleared.followUp]
+    };
   }
   async moveQueue(from: keyof AgentQueue, index: number, expected: string): Promise<AgentQueue> {
     const before = {
@@ -304,7 +405,13 @@ export class SdkBackend implements AgentBackend {
       throw Object.assign(new Error('Extension UI request not found'), {code: 'EXTENSION_REQUEST_NOT_FOUND'});
   }
   subscribe(listener: (event: AgentEvent) => void) {
-    const fromSession = (event: unknown) => listener(event as AgentEvent);
+    // A paused run settles like a finished one; notifications must not report it as completed.
+    const fromSession = (event: unknown) =>
+      listener(
+        (event as AgentEvent).type === 'agent_settled' && this.settledPaused
+          ? {...(event as AgentEvent), paused: true}
+          : (event as AgentEvent)
+      );
     const unsubscribe = this.session.subscribe(fromSession);
     this.events.on('event', listener);
     return () => {

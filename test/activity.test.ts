@@ -193,6 +193,23 @@ describe('ActivityTracker', () => {
     expect(t.reset()).toBe(false);
   });
 
+  it('shows a pending safe pause until it is reached, withdrawn or overtaken', () => {
+    const {t, at, apply} = tracker();
+    apply('agent_start');
+    at(1500);
+    expect(apply('safe_pause', {state: 'requested'})).toBe(true);
+    expect(apply('safe_pause', {state: 'requested'})).toBe(false);
+    expect(t.snapshot().pauseRequested).toEqual({since: 1500});
+    for (const state of ['paused', 'cancelled', 'finished']) {
+      apply('safe_pause', {state: 'requested'});
+      expect(apply('safe_pause', {state})).toBe(true);
+      expect(t.snapshot()).not.toHaveProperty('pauseRequested');
+    }
+    apply('safe_pause', {state: 'requested'});
+    expect(t.reset()).toBe(true);
+    expect(t.snapshot()).not.toHaveProperty('pauseRequested');
+  });
+
   it('ignores events that do not affect activity', () => {
     const {apply} = tracker();
     for (const type of ['message_start', 'message_end', 'turn_end', 'queue_update', 'session_info_changed'])

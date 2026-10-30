@@ -37,6 +37,8 @@ export type Activity = {
   bash: Array<{id: string; command?: string; since: number}>;
   /** Extension dialogs waiting for a human answer; independent of runs. */
   dialogs: Array<{requestId: string; title?: string; since: number}>;
+  /** A safe pause is pending: the run stops after its current tools, before the next model request. */
+  pauseRequested?: {since: number};
 };
 
 const SUMMARY_LIMIT = 80;
@@ -76,7 +78,8 @@ export class ActivityTracker {
   /** Forget everything, e.g. when the backend is unloaded. Returns whether anything changed. */
   reset() {
     const s = this.state;
-    if (!s.run && s.phase.kind === 'idle' && !s.bash.length && !s.dialogs.length) return false;
+    if (!s.run && s.phase.kind === 'idle' && !s.bash.length && !s.dialogs.length && !s.pauseRequested)
+      return false;
     this.state = {run: null, phase: {kind: 'idle', since: this.now()}, bash: [], dialogs: []};
     return true;
   }
@@ -210,6 +213,15 @@ export class ActivityTracker {
         s.dialogs.push({requestId, title: str(e.title) ?? str(e.message), since: this.now()});
         return true;
       }
+      case 'safe_pause':
+        if (e.state === 'requested') {
+          if (s.pauseRequested) return false;
+          s.pauseRequested = {since: this.now()};
+          return true;
+        }
+        if (!s.pauseRequested) return false;
+        delete s.pauseRequested;
+        return true;
       case 'extension_ui_response': {
         const before = s.dialogs.length;
         s.dialogs = s.dialogs.filter(d => d.requestId !== e.requestId);

@@ -362,6 +362,7 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET /api/v1/agents/:id/mcp` 返回该 Agent cwd 下的 MCP 服务器配置（全局 `mcp.json` 与受信任项目的 `.pi/mcp.json`），`POST` 用 `{name, enabled}` 启用或停用。只有项目被 Pi 显式信任时才会写入项目级覆盖，否则写全局文件。修改在 Agent 下次加载时生效。
 - `GET /api/v1/agents/:id/commands` 返回该 Agent cwd 下可用的 prompt template 和 skill（`{name, description, argumentHint, source}`）。`prompt` 接口本身会展开 `/命令`、skill 和 prompt template。
 - `POST /api/v1/agents/:id/bash` 在 Agent Session 内执行命令（`{command, excludeFromContext}`），输出通过 `bash_execution_update` 事件流式推送并记录到 Session；`POST /api/v1/agents/:id/bash-abort` 取消。
+- `POST /api/v1/agents/:id/pause` 安全暂停：当前这批工具执行完、结果写入 Session 后，在下一次调用模型前结束本次运行；Session 以工具结果结尾，重启后也不丢失，之后发送新消息即从这里继续。暂停时排队的消息会保留到下一次 prompt。进度通过 `safe_pause` 事件推送（`requested`、`paused`、`cancelled`、`finished`），被暂停运行的 `agent_settled` 带 `paused: true`，邮件通知按“已中断”处理、语音不播报。`DELETE` 同一路径撤回暂停请求。
 - WebSocket `/api/v1/ws`（协议 v2，不做事件回放）：`subscribe_all` 先下发每个 Agent 的当前状态，再推送所有 Agent 的概览事件（状态、活动、队列、对话框、通知）；`focus` 选定正在查看的 Agent，只为它推送流式文本、时间线条目变化和用户 Shell 输出；`watch` 订阅已展开的运行中工具的输出；`subscribe_collab` 推送协作事件。
 - 会话内容通过 HTTP 时间线读取：`GET /api/v1/agents/:id/timeline?limit&before` 返回条目摘要（正文较小或需要阅读的条目内联），`GET /api/v1/agents/:id/sessions/:sessionId/items/:itemId` 按需返回完整正文；已完成条目永不改变，响应带 `immutable` 缓存头，浏览器可永久缓存。
 

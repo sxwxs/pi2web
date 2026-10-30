@@ -106,6 +106,12 @@ export interface AgentBackend {
   clearQueue(): Promise<AgentQueue>;
   moveQueue(from: keyof AgentQueue, index: number, expected: string): Promise<AgentQueue>;
   abort(): Promise<void>;
+  /**
+   * Safe pause: end the running turn after its tool results are recorded and before the next model
+   * request. Progress is published as `safe_pause` events (see SafePauseState).
+   */
+  requestPause(): Promise<void>;
+  cancelPause(): Promise<void>;
   getState(): Promise<AgentState>;
   /** The session's current branch, for the timeline. Must be cheap when the leaf has not moved. */
   timeline(): TimelineSource;
@@ -133,6 +139,7 @@ export class MockBackend implements AgentBackend {
   private entries: TimelineEntry[] = [];
   private timer?: ReturnType<typeof setTimeout>;
   private queue: AgentQueue = {steering: [], followUp: []};
+  private pauseRequested = false;
   constructor(
     agentId: string,
     cwd: string,
@@ -179,6 +186,23 @@ export class MockBackend implements AgentBackend {
     this.append(assistant);
     this.state.status = 'idle';
     this.emit({type: 'agent_end'});
+    // A mock run is a single final answer, so a pending pause never finds a safe point.
+    if (this.pauseRequested) {
+      this.pauseRequested = false;
+      this.emit({type: 'safe_pause', state: 'finished'});
+    }
+  }
+  async requestPause() {
+    if (this.state.status !== 'streaming')
+      throw Object.assign(new Error('Agent is not running'), {code: 'AGENT_NOT_RUNNING'});
+    if (this.pauseRequested) return;
+    this.pauseRequested = true;
+    this.emit({type: 'safe_pause', state: 'requested'});
+  }
+  async cancelPause() {
+    if (!this.pauseRequested) return;
+    this.pauseRequested = false;
+    this.emit({type: 'safe_pause', state: 'cancelled'});
   }
   async steer(message: string): Promise<QueuedInputDisposition> {
     const queued = this.state.status === 'streaming';
@@ -222,6 +246,10 @@ export class MockBackend implements AgentBackend {
       if (this.timer) clearTimeout(this.timer);
       this.state.status = 'idle';
       this.emit({type: 'agent_end', aborted: true});
+      if (this.pauseRequested) {
+        this.pauseRequested = false;
+        this.emit({type: 'safe_pause', state: 'finished'});
+      }
     }
   }
   async getState() {
@@ -859,6 +887,15 @@ export class AgentManager {
   /** Session-scoped bash. Output is streamed as `bash_execution_update` events and recorded in the Session. */
   async runBash(id: string, command: string, excludeFromContext = false) {
     return this.writeSession(id, backend => backend.runBash(command, excludeFromContext));
+  }
+  /** Stop the running turn at its next safe point: after its tools, before the next model request. */
+  async requestPause(id: string) {
+    const entry = this.get(id);
+    if (!entry.backend) throw Object.assign(new Error('Agent is not running'), {code: 'AGENT_NOT_RUNNING'});
+    return entry.backend.requestPause();
+  }
+  async cancelPause(id: string) {
+    return this.get(id).backend?.cancelPause();
   }
   async abortBash(id: string) {
     const entry = this.get(id);
