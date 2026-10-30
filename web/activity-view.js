@@ -81,7 +81,11 @@
       }
     }
     if (activity.pauseRequested)
-      parts.push({icon: '⏸️', text: '将在下次调用模型前暂停', since: activity.pauseRequested.since});
+      parts.push({
+        icon: '⏸️',
+        text: activity.pauseRequested.reached ? '已到暂停点，正在收尾' : '将在下次调用模型前暂停',
+        since: activity.pauseRequested.since
+      });
     for (const bash of activity.bash || [])
       parts.push({icon: '$', text: bash.command || 'bash', since: bash.since});
     return parts;

@@ -5,7 +5,7 @@
 
 ## 1. 背景与目标
 
-pi2web 已实现“安全暂停”：在 Agent 的 `finishTurn` 钩子里返回 `{action: 'end'}`，让运行在**当前这批工具执行完、工具结果已写入 session、下一次调用模型之前**结束。暂停后 session 的最后一条消息是 `toolResult`，jsonl 里完整保存，重启也不丢。
+pi2web 已实现“安全暂停”（`src/safe-pause.ts`）：在 Agent 的 `finishTurn` 钩子里返回 `{action: 'end'}` 拦下 Agent 循环的下一轮，并包装 `agent.continue()` 拦下运行控制器的续跑（自动重试、溢出压缩重试、排队消息、扩展 `agent_before_settle`），让运行在**当前这批工具执行完、工具结果已写入 session、下一次调用模型之前**结束。暂停后 session 的最后一条消息是 `toolResult`，jsonl 里完整保存，重启也不丢。
 
 缺的是“继续”：从这个状态**不加任何新消息**地让模型接着往下跑，并且要能在**进程重启、重新打开 session 之后**做到。要求：
 

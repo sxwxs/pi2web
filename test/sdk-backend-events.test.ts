@@ -26,8 +26,8 @@ async function createBackend() {
     sessionId: 'test-session',
     isStreaming: false,
     state: {messages: [], model: null},
-    // Safe pause wraps the agent's finishTurn hook.
-    agent: {hasQueuedMessages: () => false},
+    // Safe pause wraps the agent's finishTurn hook and continue().
+    agent: {hasQueuedMessages: () => false, continue: async () => {}},
     bindExtensions: async (options: {uiContext: ExtensionUIContext}) => {
       ui = options.uiContext;
     },

@@ -37,8 +37,11 @@ export type Activity = {
   bash: Array<{id: string; command?: string; since: number}>;
   /** Extension dialogs waiting for a human answer; independent of runs. */
   dialogs: Array<{requestId: string; title?: string; since: number}>;
-  /** A safe pause is pending: the run stops after its current tools, before the next model request. */
-  pauseRequested?: {since: number};
+  /**
+   * A safe pause is pending: the run stops before its next model request. `reached` once a request
+   * was withheld and the run is winding down; it can no longer be withdrawn then.
+   */
+  pauseRequested?: {since: number; reached?: true};
 };
 
 const SUMMARY_LIMIT = 80;
@@ -217,6 +220,11 @@ export class ActivityTracker {
         if (e.state === 'requested') {
           if (s.pauseRequested) return false;
           s.pauseRequested = {since: this.now()};
+          return true;
+        }
+        if (e.state === 'reached') {
+          if (s.pauseRequested?.reached) return false;
+          s.pauseRequested = {since: s.pauseRequested?.since ?? this.now(), reached: true};
           return true;
         }
         if (!s.pauseRequested) return false;

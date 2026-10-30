@@ -200,6 +200,11 @@ describe('ActivityTracker', () => {
     expect(apply('safe_pause', {state: 'requested'})).toBe(true);
     expect(apply('safe_pause', {state: 'requested'})).toBe(false);
     expect(t.snapshot().pauseRequested).toEqual({since: 1500});
+    at(1800);
+    expect(apply('safe_pause', {state: 'reached'})).toBe(true);
+    expect(apply('safe_pause', {state: 'reached'})).toBe(false);
+    // Reaching the pause keeps the time it was requested.
+    expect(t.snapshot().pauseRequested).toEqual({since: 1500, reached: true});
     for (const state of ['paused', 'cancelled', 'finished']) {
       apply('safe_pause', {state: 'requested'});
       expect(apply('safe_pause', {state})).toBe(true);

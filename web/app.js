@@ -1300,9 +1300,11 @@
       nodes = agent ? activityView.bar(state.activities.get(agent.agentId), agent.backendId) : [];
     bar.replaceChildren(...nodes);
     bar.hidden = !nodes.length;
-    // A pending safe pause can be withdrawn with the same button.
-    $('safePause').textContent =
-      agent && state.activities.get(agent.agentId)?.pauseRequested ? '取消暂停' : '安全暂停';
+    // A pending safe pause can be withdrawn with the same button until a model request was withheld.
+    const pause = agent ? state.activities.get(agent.agentId)?.pauseRequested : null,
+      button = $('safePause');
+    button.textContent = pause?.reached ? '暂停中…' : pause ? '取消暂停' : '安全暂停';
+    button.disabled = !!pause?.reached;
   }
   function setAgentActivity(agentId, activity) {
     if (window.ActivityView.isBusy(activity)) state.activities.set(agentId, activity);
@@ -4270,8 +4272,9 @@
   $('safePause').onclick = () => {
     if (!state.agent) return;
     const id = state.agent.agentId,
-      pending = !!state.activities.get(id)?.pauseRequested;
-    requestAgent(id, '/pause', {method: pending ? 'DELETE' : 'POST'}).catch(e => toast(e.message));
+      pause = state.activities.get(id)?.pauseRequested;
+    if (pause?.reached) return;
+    requestAgent(id, '/pause', {method: pause ? 'DELETE' : 'POST'}).catch(e => toast(e.message));
   };
   $('stop').onclick = async () => {
     if (state.agent && confirm('停止这个 Agent？之后再次使用时会按需启动。')) {
