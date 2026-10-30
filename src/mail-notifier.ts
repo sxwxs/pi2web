@@ -108,8 +108,13 @@ export class MailNotifier {
     const finalOutput = this.lastAssistant.get(agentId) ?? '';
     this.lastAssistant.delete(agentId);
     if (!this.settings.enabled) return;
-    // Pi 0.99+ reports whether the run was cancelled; a cancelled run is not a completed task.
-    this.queue.push({agentId, finalOutput, context, aborted: event.aborted === true});
+    // Pi 0.99+ reports whether the run was cancelled; a cancelled or safely paused run is not a completed task.
+    this.queue.push({
+      agentId,
+      finalOutput,
+      context,
+      aborted: event.aborted === true || event.paused === true
+    });
     if (!this.timer) this.scheduleFlush();
   }
   /**

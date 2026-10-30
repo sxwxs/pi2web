@@ -20,6 +20,7 @@ import type {AgentTemplateSnapshot} from './agent-templates.js';
 import type {TimelineSource} from './agent-feed.js';
 import type {TimelineEntry} from './timeline.js';
 import {PERFORMANCE_ENTRY, SessionPerformanceTracker} from './session-performance.js';
+import {SafePause} from './safe-pause.js';
 
 export type BackendOptions = {
   /** System prompt template copied onto the Agent at creation time. */
@@ -37,6 +38,7 @@ const normalizeDisposition = (value: unknown): QueuedInputDisposition =>
 export class SdkBackend implements AgentBackend {
   private disposed = false;
   private events = new EventEmitter();
+  private readonly safePause: SafePause;
   private pendingUi = new Map<
     string,
     {resolve: (value: unknown) => void; timer: ReturnType<typeof setTimeout>}
@@ -50,6 +52,14 @@ export class SdkBackend implements AgentBackend {
       this.session.sessionManager.appendCustomEntry(PERFORMANCE_ENTRY, run)
     );
     this.session.subscribe(event => performance.apply(event as AgentEvent));
+    this.safePause = new SafePause(session, state => this.events.emit('event', {type: 'safe_pause', state}));
+  }
+  /** Ask the running turn to stop before its next model request (see SafePause). */
+  requestPause() {
+    return this.safePause.request();
+  }
+  cancelPause() {
+    return this.safePause.cancel();
   }
   static async create(
     agentId: string,
@@ -95,6 +105,10 @@ export class SdkBackend implements AgentBackend {
       session.dispose();
       throw Object.assign(new Error(modelFallbackMessage), {code: 'PI_MODEL_UNAVAILABLE'});
     }
+    return SdkBackend.fromSession(session, agentId, cwd);
+  }
+  /** Wrap an existing Pi session; tests use it to drive a real session with a scripted model. */
+  static async fromSession(session: AgentSession, agentId: string, cwd: string) {
     const backend = new SdkBackend(session, agentId, cwd);
     await session.bindExtensions({uiContext: backend.extensionUi()});
     return backend;
@@ -304,7 +318,13 @@ export class SdkBackend implements AgentBackend {
       throw Object.assign(new Error('Extension UI request not found'), {code: 'EXTENSION_REQUEST_NOT_FOUND'});
   }
   subscribe(listener: (event: AgentEvent) => void) {
-    const fromSession = (event: unknown) => listener(event as AgentEvent);
+    // A paused run settles like a finished one; notifications must not report it as completed.
+    const fromSession = (event: unknown) =>
+      listener(
+        (event as AgentEvent).type === 'agent_settled' && this.safePause.pausedRunSettled
+          ? {...(event as AgentEvent), paused: true}
+          : (event as AgentEvent)
+      );
     const unsubscribe = this.session.subscribe(fromSession);
     this.events.on('event', listener);
     return () => {

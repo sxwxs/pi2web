@@ -1300,6 +1300,11 @@
       nodes = agent ? activityView.bar(state.activities.get(agent.agentId), agent.backendId) : [];
     bar.replaceChildren(...nodes);
     bar.hidden = !nodes.length;
+    // A pending safe pause can be withdrawn with the same button until a model request was withheld.
+    const pause = agent ? state.activities.get(agent.agentId)?.pauseRequested : null,
+      button = $('safePause');
+    button.textContent = pause?.reached ? '暂停中…' : pause ? '取消暂停' : '安全暂停';
+    button.disabled = !!pause?.reached;
   }
   function setAgentActivity(agentId, activity) {
     if (window.ActivityView.isBusy(activity)) state.activities.set(agentId, activity);
@@ -2814,6 +2819,11 @@
       setAgentActivity(message.agentId, ev.activity);
       return;
     }
+    if (ev.type === 'safe_pause') {
+      if (selected && ev.state === 'paused') toast('已安全暂停：工具结果已保存，发送消息即可继续');
+      else if (selected && ev.state === 'finished') toast('运行已结束，未到达暂停点');
+      return;
+    }
     if (ev.type === 'agent_unloaded') {
       setAgentStatus(message.agentId, 'unloaded');
       setAgentQueue(message.agentId, null);
@@ -4258,6 +4268,13 @@
     if (!state.agent) return;
     const id = state.agent.agentId;
     Promise.all([postAgent(id, '/abort'), postAgent(id, '/bash-abort')]).catch(e => toast(e.message));
+  };
+  $('safePause').onclick = () => {
+    if (!state.agent) return;
+    const id = state.agent.agentId,
+      pause = state.activities.get(id)?.pauseRequested;
+    if (pause?.reached) return;
+    requestAgent(id, '/pause', {method: pause ? 'DELETE' : 'POST'}).catch(e => toast(e.message));
   };
   $('stop').onclick = async () => {
     if (state.agent && confirm('停止这个 Agent？之后再次使用时会按需启动。')) {
