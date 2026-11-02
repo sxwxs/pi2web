@@ -224,7 +224,8 @@ Web 端能力：
 - Workspace 添加、目录浏览、文本文件分页及二进制提示。
 - Workspace 目录右键在交互式 Terminal 中打开；Terminal 与 Agent 显示在同一列表，支持刷新重连、清屏和关闭。
 - 新建 Agent 时始终创建新 Session；已有 Agent 可在刷新或重启后继续使用。通过 Session 文件恢复对话暂仅支持 API，不在新建弹窗中提供；Agent 列表支持停止与 abort，右键 Archive。
-- Prompt、steer、follow-up 和流式对话。
+- Prompt、steer、follow-up 和流式对话。HTTP / WebSocket 发送命令在 Pi 校验并接收消息后即确认，不等待整个回合结束；执行进度继续通过 WebSocket 同步。
+- 手机切后台或网络中断导致发送确认丢失时，显示「送达状态未知」并保留原文供核对，不自动重发或放回输入框。提示在同一页面内切换会话、重连后仍保留，可手动关闭；刷新页面不保留。明确被服务端拒绝的消息仍恢复为草稿。
 - 对话区只保留用户输入、Agent 输出、Thinking、Extension 对话框和错误；Tool call、Session bash 输出、Retry、Summarization retry 等过程事件自动折叠成一张"活动"卡片，卡片标题实时显示最新一项的名称和时间，展开后逐条查看，再点击单条查看内容。
 - 同一次 Tool call 的 start / update / end 合并为一张卡片（参数 + 输出 + 结果），结束后显示 Pi 记录的执行耗时。
 - Tool 自己发起的调用（codemode 脚本、MCP 批量调用）带 `parentToolCallId`，会嵌套显示在发起它的那张卡片里。

@@ -239,7 +239,7 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
             ctx.voice?.recordUserPrompt(m.agentId, String(m.message ?? ''));
             ctx.sessionNamer?.recordUserPrompt(m.agentId, String(m.message ?? ''));
           }
-          const disposition = await ctx.agents.command(m.agentId, m.type, m.message);
+          const disposition = await ctx.agents.submitCommand(m.agentId, m.type, m.message);
           send({type: 'command_result', requestId: m.requestId, success: true, disposition});
           return;
         }

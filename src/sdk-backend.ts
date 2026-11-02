@@ -101,8 +101,8 @@ export class SdkBackend implements AgentBackend {
   }
   // Slash commands, skills and prompt templates are expanded by prompt() itself (expandPromptTemplates defaults to true),
   // so `/name args` typed in the web composer behaves exactly like the Pi TUI.
-  prompt(message: string) {
-    return this.session.prompt(message);
+  prompt(message: string, onAccepted?: () => void) {
+    return this.session.prompt(message, {preflightResult: onAccepted});
   }
   // Since pi 0.99 steer()/followUp() report whether the message reached the running turn (`handled`)
   // or waits for it (`queued`); the web composer shows that difference instead of guessing.

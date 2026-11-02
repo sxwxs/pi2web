@@ -120,7 +120,8 @@ function setup(olderPages: any[] = []) {
     streams: new Map(),
     liveCards: [],
     bashCards: new Map(),
-    optimistic: []
+    optimistic: [],
+    uncertainSends: new Map()
   };
   const requestAgent = vi.fn(async (_agentId: string, url: string) => {
     if (url.startsWith('/timeline')) return olderPages.shift();
@@ -129,7 +130,8 @@ function setup(olderPages: any[] = []) {
   const sendFocused = vi.fn(),
     sendFocus = vi.fn(() => true),
     restoreExtensionRequests = vi.fn(),
-    renderTranscriptEvent = vi.fn();
+    renderTranscriptEvent = vi.fn(),
+    showUncertainSend = vi.fn();
   const api = runInNewContext(
     `${timelineSource}\n({loadTimeline, handleDetail, addCard, refreshToolCards})`,
     {
@@ -141,6 +143,7 @@ function setup(olderPages: any[] = []) {
       sendFocus,
       restoreExtensionRequests,
       renderTranscriptEvent,
+      showUncertainSend,
       toast: vi.fn(),
       requestAnimationFrame: (callback: () => void) => setTimeout(callback, 0),
       cancelAnimationFrame: (id: any) => clearTimeout(id),
@@ -178,6 +181,7 @@ function setup(olderPages: any[] = []) {
     sendFocused,
     sendFocus,
     restoreExtensionRequests,
+    showUncertainSend,
     card,
     summary,
     body,
@@ -303,6 +307,18 @@ describe('timeline rendering', () => {
     expect(ui.restoreExtensionRequests).toHaveBeenCalledWith('bk:agent-a', {
       dialogRequests: [{requestId: 'q'}]
     });
+  });
+
+  it('keeps lost-acknowledgement notices across reconnect snapshots without sending a message', () => {
+    const ui = setup();
+    ui.state.uncertainSends.set('bk:agent-a', ['check delivery']);
+    ui.open([user]);
+    expect(ui.showUncertainSend).toHaveBeenCalledExactlyOnceWith('bk:agent-a', 'check delivery');
+    ui.showUncertainSend.mockClear();
+    ui.open([user]);
+    expect(ui.showUncertainSend).toHaveBeenCalledExactlyOnceWith('bk:agent-a', 'check delivery');
+    expect(ui.sendFocused).not.toHaveBeenCalled();
+    expect(ui.state.uncertainSends.get('bk:agent-a')).toEqual(['check delivery']);
   });
 
   it('takes a new snapshot when the branch changes', () => {
