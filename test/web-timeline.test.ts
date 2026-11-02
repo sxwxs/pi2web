@@ -309,17 +309,46 @@ describe('timeline rendering', () => {
     });
   });
 
-  it('keeps lost-acknowledgement notices across reconnect snapshots without sending a message', () => {
-    const ui = setup();
-    ui.state.uncertainSends.set('bk:agent-a', ['check delivery']);
-    ui.open([user]);
-    expect(ui.showUncertainSend).toHaveBeenCalledExactlyOnceWith('bk:agent-a', 'check delivery');
-    ui.showUncertainSend.mockClear();
-    ui.open([user]);
-    expect(ui.showUncertainSend).toHaveBeenCalledExactlyOnceWith('bk:agent-a', 'check delivery');
-    expect(ui.sendFocused).not.toHaveBeenCalled();
-    expect(ui.state.uncertainSends.get('bk:agent-a')).toEqual(['check delivery']);
-  });
+  it.each([true, false])(
+    'keeps delivery notices through offline Agent switches and reconnect (cached: %s)',
+    cached => {
+      const ui = setup();
+      const agent = ui.state.agent;
+      ui.showUncertainSend.mockImplementation((_agentId, text) =>
+        ui.addCard('送达状态未知', text, 'error', true)
+      );
+      ui.state.uncertainSends.set(agent.agentId, ['check delivery']);
+      ui.open([user]);
+      expect(ui.messages.querySelectorAll('.error')).toHaveLength(1);
+
+      ui.sendFocus.mockReturnValue(false); // No snapshot can arrive while offline.
+      ui.state.agent = {agentId: 'bk:agent-b', backendId: 'bk'};
+      ui.loadTimeline(ui.state.agent);
+      expect(ui.messages.querySelectorAll('.error')).toHaveLength(0);
+      if (!cached) ui.state.timelineCache.delete(agent.agentId);
+      ui.state.agent = agent;
+      ui.showUncertainSend.mockClear();
+      ui.loadTimeline(agent);
+      expect(ui.state.timeline.ready).toBe(false);
+      expect(ui.showUncertainSend).toHaveBeenCalledExactlyOnceWith(agent.agentId, 'check delivery');
+      expect(ui.messages.querySelectorAll('.error')).toHaveLength(1);
+      expect(ui.messages.querySelector('.error')!.querySelector('.msg-content')!.textContent).toBe(
+        'check delivery'
+      );
+
+      ui.showUncertainSend.mockClear();
+      ui.detail({
+        type: 'focus_state',
+        page: {items: [user], total: 1, start: 0, hasMore: false},
+        live: null
+      });
+      expect(ui.showUncertainSend).toHaveBeenCalledExactlyOnceWith(agent.agentId, 'check delivery');
+      expect(ui.messages.querySelectorAll('.error')).toHaveLength(1); // Snapshot replaces, not duplicates.
+      expect(ui.requestAgent).not.toHaveBeenCalled();
+      expect(ui.sendFocused).not.toHaveBeenCalled();
+      expect(ui.state.uncertainSends.get(agent.agentId)).toEqual(['check delivery']);
+    }
+  );
 
   it('takes a new snapshot when the branch changes', () => {
     const ui = setup();

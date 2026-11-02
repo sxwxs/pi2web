@@ -2032,6 +2032,7 @@
       box.scrollTop = box.scrollHeight;
     } else box.innerHTML = '<div class="empty">正在加载…</div>';
     if (!sendFocus(true) && !cached) box.innerHTML = '<div class="empty">等待连接 backend…</div>';
+    for (const text of state.uncertainSends.get(agent.agentId) || []) showUncertainSend(agent.agentId, text);
   }
   /** Ask for a new snapshot, e.g. when the branch changed. */
   function refocus() {
