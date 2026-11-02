@@ -99,7 +99,8 @@ export type BashRunResult = {
   truncated: boolean;
 };
 export interface AgentBackend {
-  prompt(message: string): Promise<void>;
+  /** Resolves when the run finishes; onAccepted fires after validation, before running it. */
+  prompt(message: string, onAccepted?: () => void): Promise<void>;
   steer(message: string): Promise<QueuedInputDisposition>;
   followUp(message: string): Promise<QueuedInputDisposition>;
   getQueue(): Promise<AgentQueue>;
@@ -162,11 +163,12 @@ export class MockBackend implements AgentBackend {
       this.timer = setTimeout(r, 0);
     });
   }
-  async prompt(message: string) {
+  async prompt(message: string, onAccepted?: () => void) {
     if (this.state.status === 'streaming')
       throw Object.assign(new Error('Agent is busy'), {code: 'AGENT_BUSY'});
     this.state.status = 'streaming';
     this.emit({type: 'agent_start', message});
+    onAccepted?.();
     await this.runTurn();
     const user = {role: 'user', content: message};
     this.emit({type: 'message_end', message: user});
@@ -586,7 +588,33 @@ export class AgentManager {
     })();
     return entry.loading;
   }
-  async command(id: string, kind: 'prompt' | 'steer' | 'follow-up' | 'abort', message = '') {
+  /** Transport acknowledgement: an accepted prompt keeps running under the normal write admission. */
+  submitCommand(id: string, kind: 'prompt' | 'steer' | 'follow-up' | 'abort', message = '') {
+    return new Promise<void | QueuedInputDisposition>((resolve, reject) => {
+      let accepted = false;
+      void this.command(id, kind, message, () => {
+        accepted = true;
+        resolve();
+      }).then(resolve, error => {
+        if (!accepted) return reject(error);
+        // The sender already has its acknowledgement. Report execution errors through the existing
+        // event stream rather than turning a delivered prompt into a failed send.
+        const entry = this.agents.get(id);
+        if (entry)
+          this.publish(entry, {
+            type: 'extension_ui_notify',
+            notificationType: 'error',
+            message: error instanceof Error ? error.message : String(error)
+          });
+      });
+    });
+  }
+  async command(
+    id: string,
+    kind: 'prompt' | 'steer' | 'follow-up' | 'abort',
+    message = '',
+    onAccepted?: () => void
+  ) {
     if (kind === 'abort') {
       const entry = this.get(id);
       if (!entry.backend) return;
@@ -601,7 +629,9 @@ export class AgentManager {
       const effective = busy ? (kind === 'prompt' ? 'follow-up' : kind) : 'prompt';
       if (effective === 'prompt') entry.promptPending = true;
       try {
-        return await backend[effective === 'follow-up' ? 'followUp' : effective](message);
+        return effective === 'prompt'
+          ? await backend.prompt(message, onAccepted)
+          : await backend[effective === 'follow-up' ? 'followUp' : 'steer'](message);
       } finally {
         if (effective === 'prompt' && entry.backend === backend) entry.promptPending = false;
       }

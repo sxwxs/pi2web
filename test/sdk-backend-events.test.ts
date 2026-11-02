@@ -30,6 +30,7 @@ async function createBackend() {
       ui = options.uiContext;
     },
     executeBash: vi.fn(),
+    prompt: vi.fn(),
     abort: vi.fn(async () => {}),
     dispose: vi.fn(),
     subscribe(listener: (event: AgentEvent) => void) {
@@ -53,6 +54,37 @@ async function createBackend() {
 const bashResult = {output: '', exitCode: 0, cancelled: false, truncated: false};
 
 describe('SDK backend activity events', () => {
+  it('exposes SDK acceptance separately from completion of the prompt', async () => {
+    const {backend, session} = await createBackend();
+    let accept!: () => void, finish!: () => void;
+    session.prompt.mockImplementation((_text, options) => {
+      accept = options.preflightResult;
+      return new Promise<void>(resolve => {
+        finish = resolve;
+      });
+    });
+    const accepted = vi.fn(),
+      completed = vi.fn();
+    const running = backend.prompt('hello', accepted).then(completed);
+    expect(session.prompt).toHaveBeenCalledWith('hello', {preflightResult: accepted});
+    expect(accepted).not.toHaveBeenCalled();
+    accept();
+    expect(accepted).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    expect(completed).not.toHaveBeenCalled();
+    finish();
+    await running;
+    expect(completed).toHaveBeenCalledOnce();
+  });
+
+  it('does not acknowledge prompts rejected by SDK preflight', async () => {
+    const {backend, session} = await createBackend();
+    session.prompt.mockRejectedValue(new Error('No API key'));
+    const accepted = vi.fn();
+    await expect(backend.prompt('hello', accepted)).rejects.toThrow('No API key');
+    expect(accepted).not.toHaveBeenCalled();
+  });
+
   it('persists timing spans in the session branch without adding model context', async () => {
     const {sessionEvents, session} = await createBackend();
     sessionEvents.emit('event', {type: 'agent_start'});

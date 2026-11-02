@@ -251,7 +251,7 @@ export async function handleAgentRoutes(
         ctx.voice?.recordUserPrompt(id, String(b.message ?? ''));
         ctx.sessionNamer?.recordUserPrompt(id, String(b.message ?? ''));
       }
-      const disposition = await ctx.agents.command(id, parts[4] as any, b.message ?? '');
+      const disposition = await ctx.agents.submitCommand(id, parts[4] as any, b.message ?? '');
       const record = ctx.agents.get(id).record;
       ctx.metadata.scheduleAgent(record);
       if (parts[4] === 'prompt') void ctx.indexAgentSession(id);

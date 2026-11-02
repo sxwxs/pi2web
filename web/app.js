@@ -87,6 +87,8 @@
     mediaBackendId: null,
     /** Messages that failed after the user switched away; restored when that Agent is selected again. */
     failedSends: new Map(),
+    /** Lost acknowledgements are notices, not drafts to send again. Kept across focus snapshots. */
+    uncertainSends: new Map(),
     mailBackendId: null,
     mailRequest: 0,
     sottoBackendId: null,
@@ -2030,6 +2032,7 @@
       box.scrollTop = box.scrollHeight;
     } else box.innerHTML = '<div class="empty">正在加载…</div>';
     if (!sendFocus(true) && !cached) box.innerHTML = '<div class="empty">等待连接 backend…</div>';
+    for (const text of state.uncertainSends.get(agent.agentId) || []) showUncertainSend(agent.agentId, text);
   }
   /** Ask for a new snapshot, e.g. when the branch changed. */
   function refocus() {
@@ -2046,6 +2049,8 @@
     timeline.ready = true;
     applyLive(message.live);
     restoreExtensionRequests(message.agentId, {dialogRequests: message.dialogRequests || []});
+    for (const text of state.uncertainSends.get(message.agentId) || [])
+      showUncertainSend(message.agentId, text);
     saveTimelineCache();
     box.scrollTop = box.scrollHeight;
   }
@@ -4304,6 +4309,25 @@
   function prependInput(text) {
     $('input').value = text + ($('input').value ? `\n${$('input').value}` : '');
   }
+  function showUncertainSend(agentId, text) {
+    const card = addCard(
+      '送达状态未知',
+      `连接中断，以下消息可能已送达。请先核对会话和队列，不要直接重复发送。\n\n${text}`,
+      'error',
+      true
+    );
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.textContent = '已核对，关闭提示';
+    dismiss.onclick = () => {
+      const pending = state.uncertainSends.get(agentId) || [],
+        index = pending.indexOf(text);
+      if (index >= 0) pending.splice(index, 1);
+      if (!pending.length) state.uncertainSends.delete(agentId);
+      removeCard(card);
+    };
+    card.details.append(dismiss);
+  }
   $('prompt').onsubmit = async event => {
     event.preventDefault();
     if (!state.agent) return toast('请先创建或选择 Agent');
@@ -4341,6 +4365,17 @@
       if (mode !== 'prompt' && sent?.disposition)
         toast(sent.disposition === 'queued' ? '已排队，等待当前回合' : '已送达当前回合');
     } catch (e) {
+      // A lost response (including a gateway timeout) says nothing about whether Pi accepted the
+      // input. Keep the text for review, but never turn it back into a sendable draft automatically.
+      if (!e.status || e.status === 408 || e.status >= 500) {
+        const pending = state.uncertainSends.get(agentId) || [];
+        pending.push(text);
+        state.uncertainSends.set(agentId, pending);
+        if (state.selectedKind === 'agent' && state.agent?.agentId === agentId)
+          showUncertainSend(agentId, text);
+        else toast('消息送达状态未知；切回该会话后请核对会话和队列');
+        return;
+      }
       // The composer is shared: only restore into it while the failed Agent is still selected.
       if (state.agent?.agentId === agentId) {
         prependInput(text);

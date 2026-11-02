@@ -7,10 +7,12 @@ import {WorkspaceStore} from '../src/workspaces.js';
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(r => {
-    resolve = r;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
   });
-  return {promise, resolve};
+  return {promise, resolve, reject};
 };
 class HeldBackend extends MockBackend {
   turn = deferred<void>();
@@ -34,6 +36,57 @@ async function setup(onCreate?: (backend: HeldBackend, index: number) => Promise
 const template = {id: 't', name: 'T', mode: 'append' as const, systemPrompt: 'Review only.'};
 
 describe('Agent command admission', () => {
+  it('acknowledges acceptance without releasing the running command or its write admission', async () => {
+    const {agents, id, backend} = await setup();
+    const prompt = vi.spyOn(backend, 'prompt');
+    await agents.submitCommand(id, 'prompt', 'one');
+    expect(agents.get(id)).toMatchObject({promptPending: true, writes: 1, record: {status: 'streaming'}});
+    expect(await agents.submitCommand(id, 'prompt', 'two')).toBe('queued');
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(await agents.queue(id)).toEqual({steering: [], followUp: ['two']});
+    backend.turn.resolve();
+    await vi.waitFor(() => expect(agents.get(id)).toMatchObject({promptPending: false, writes: 0}));
+    await agents.dispose(id);
+  });
+
+  it('waits for preflight and rejects a prompt that was not accepted', async () => {
+    const {agents, id, backend} = await setup();
+    const preflight = deferred<void>();
+    vi.spyOn(backend, 'prompt').mockImplementation(() => preflight.promise);
+    const accepted = vi.fn(),
+      rejected = vi.fn();
+    const pending = agents.submitCommand(id, 'prompt', 'one');
+    void pending.then(accepted, rejected);
+    await vi.waitFor(() => expect(backend.prompt).toHaveBeenCalledOnce());
+    expect(agents.get(id)).toMatchObject({promptPending: true, writes: 1});
+    expect(accepted).not.toHaveBeenCalled();
+    expect(rejected).not.toHaveBeenCalled();
+    preflight.reject(new Error('No API key'));
+    await expect(pending).rejects.toThrow('No API key');
+    expect(accepted).not.toHaveBeenCalled();
+    expect(agents.get(id)).toMatchObject({promptPending: false, writes: 0});
+    await agents.dispose(id);
+  });
+
+  it('reports an execution failure after acknowledgement as an event, not a failed send', async () => {
+    const {agents, id, backend} = await setup();
+    const notify = vi.fn();
+    agents.subscribeAll((_id, published) => {
+      if (published.event.type === 'extension_ui_notify') notify(published.event);
+    });
+    await agents.submitCommand(id, 'prompt', 'one');
+    backend.turn.reject(new Error('Execution failed'));
+    await vi.waitFor(() =>
+      expect(notify).toHaveBeenCalledWith({
+        type: 'extension_ui_notify',
+        notificationType: 'error',
+        message: 'Execution failed'
+      })
+    );
+    expect(agents.get(id)).toMatchObject({promptPending: false, writes: 0});
+    await agents.dispose(id);
+  });
+
   it.each(['prompt', 'steer', 'follow-up'] as const)(
     'reserves one first turn and queues a concurrent %s',
     async kind => {
