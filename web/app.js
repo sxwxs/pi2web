@@ -1307,7 +1307,9 @@
     button.disabled = !!pause?.reached;
   }
   function setAgentActivity(agentId, activity) {
-    if (window.ActivityView.isBusy(activity)) state.activities.set(agentId, activity);
+    // A pause request outlives the run (agent_end → agent_settled); its safe_pause event clears it.
+    if (window.ActivityView.isBusy(activity) || activity?.pauseRequested)
+      state.activities.set(agentId, activity);
     else state.activities.delete(agentId);
     sessionKeyboard.setActivity(agentId, activity);
     refreshToolCards(agentId);
