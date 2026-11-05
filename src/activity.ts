@@ -25,11 +25,15 @@ export type Activity = {
   /** The current LLM run, from agent_start until it ends. */
   run: {startedAt: number} | null;
   phase: ActivityPhase;
-  /** Current model turn only. Token count is an estimate from streamed text, not provider usage. */
+  /**
+   * Current model turn only. `chars` and `estimatedTokens` count what the current streaming phase
+   * (thinking, text or tool call arguments) has produced since `streamStartedAt`, its first delta;
+   * they restart with each such phase. Tokens are estimated from streamed text, not provider usage.
+   */
   metrics?: {
     turnStartedAt: number;
     firstResponseAt?: number;
-    textStartedAt?: number;
+    streamStartedAt?: number;
     chars: number;
     estimatedTokens: number;
   };
@@ -119,35 +123,33 @@ export class ActivityTracker {
           s.metrics.firstResponseAt === undefined &&
           (type === 'thinking_delta' || type === 'text_delta' || type === 'toolcall_delta');
         if (firstResponse) s.metrics!.firstResponseAt = at;
+        let changed: boolean;
         if (type === 'thinking_start' || type === 'thinking_delta')
-          return this.setPhase({kind: 'thinking'}) || firstResponse;
-        if (type === 'text_start' || type === 'text_delta') {
-          const changed = this.setPhase({kind: 'generating'});
-          if (s.metrics && type === 'text_delta' && typeof update.delta === 'string') {
-            s.metrics.textStartedAt ??= at;
-            const delta = update.delta as string;
-            // Approximate Latin/code text at 4 chars/token, CJK at 1.5 chars/token.
-            const cjk = delta.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/gu)?.length ?? 0;
-            const chars = [...delta].length;
-            s.metrics.chars += chars;
-            s.metrics.estimatedTokens += (chars - cjk) / 4 + cjk / 1.5;
-            if (changed || at - this.lastMetricsPublish >= 1000) {
-              this.lastMetricsPublish = at;
-              return true;
-            }
-          }
-          return changed || firstResponse;
-        }
-        if (type === 'toolcall_start' || type === 'toolcall_delta') {
+          changed = this.setPhase({kind: 'thinking'});
+        else if (type === 'text_start' || type === 'text_delta')
+          changed = this.setPhase({kind: 'generating'});
+        else if (type === 'toolcall_start' || type === 'toolcall_delta') {
           const toolName = str(update.partial?.content?.[update.contentIndex]?.name);
           // The name may only arrive with a later delta: fill it in without restarting the timer.
           if (s.phase.kind === 'preparing_tool' && !s.phase.toolName && toolName) {
             s.phase.toolName = toolName;
+            this.countDelta(update);
+            this.lastMetricsPublish = at;
             return true;
           }
-          return this.setPhase({kind: 'preparing_tool', ...(toolName ? {toolName} : {})}) || firstResponse;
+          changed = this.setPhase({kind: 'preparing_tool', ...(toolName ? {toolName} : {})});
+        } else return false;
+        if (changed && s.metrics) {
+          // Throughput is per streaming phase, so thinking does not dilute the text rate and so on.
+          delete s.metrics.streamStartedAt;
+          s.metrics.chars = 0;
+          s.metrics.estimatedTokens = 0;
         }
-        return false;
+        if (this.countDelta(update) && (changed || at - this.lastMetricsPublish >= 1000)) {
+          this.lastMetricsPublish = at;
+          return true;
+        }
+        return changed || firstResponse;
       }
       case 'tool_execution_start': {
         // Tools called by other tools run inside their caller's time; show only top-level calls.
@@ -238,6 +240,21 @@ export class ActivityTracker {
       default:
         return false;
     }
+  }
+
+  /** Adds a thinking, text or tool call delta to the current stream's estimate. Returns whether it counted. */
+  private countDelta(update: any) {
+    const metrics = this.state.metrics,
+      delta = update?.delta;
+    if (!metrics || !String(update?.type).endsWith('_delta') || typeof delta !== 'string' || !delta)
+      return false;
+    metrics.streamStartedAt ??= this.now();
+    // Approximate Latin/code text at 4 chars/token, CJK at 1.5 chars/token.
+    const cjk = delta.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/gu)?.length ?? 0;
+    const chars = [...delta].length;
+    metrics.chars += chars;
+    metrics.estimatedTokens += (chars - cjk) / 4 + cjk / 1.5;
+    return true;
   }
 
   private endRun(settled = false) {

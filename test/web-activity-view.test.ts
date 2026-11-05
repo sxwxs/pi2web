@@ -46,7 +46,33 @@ describe('activity view', () => {
     expect(text({kind: 'idle'})).toBeUndefined();
   });
 
-  it('shows TTFT and makes the approximate throughput available to the status chip', () => {
+  it('shows TTFT and the approximate throughput of every streaming phase', () => {
+    const metrics = {
+      turnStartedAt: 1000,
+      firstResponseAt: 1750,
+      streamStartedAt: 2000,
+      chars: 10,
+      estimatedTokens: 3
+    };
+    const thinking = activityParts({phase: {kind: 'thinking', since: 1750}, metrics})[0];
+    expect(thinking.text).toBe('LLM 思考中 · TTFT 750 ms · 已思考 10 字');
+    expect(thinking.speed).toEqual({tokens: 3, since: 2000});
+    const generating = activityParts({phase: {kind: 'generating', since: 2000}, metrics})[0];
+    expect(generating.text).toBe('LLM 输出中 · TTFT 750 ms · 已输出 10 字');
+    expect(generating.speed).toEqual({tokens: 3, since: 2000});
+    const tool = activityParts({phase: {kind: 'preparing_tool', since: 2000, toolName: 'write'}, metrics})[0];
+    expect(tool.text).toBe('生成工具参数：write · TTFT 750 ms · 参数 10 字');
+    expect(tool.speed).toEqual({tokens: 3, since: 2000});
+    // Before the phase's first delta (e.g. a provider that hides its reasoning) there is no rate.
+    const hidden = activityParts({
+      phase: {kind: 'thinking', since: 1750},
+      metrics: {turnStartedAt: 1000, firstResponseAt: 1750, chars: 0, estimatedTokens: 0}
+    })[0];
+    expect(hidden.text).toBe('LLM 思考中 · TTFT 750 ms');
+    expect(hidden.speed).toBeUndefined();
+  });
+
+  it('keeps showing the text rate of backends that only measured text', () => {
     const metrics = {
       turnStartedAt: 1000,
       firstResponseAt: 1750,
@@ -54,13 +80,11 @@ describe('activity view', () => {
       chars: 10,
       estimatedTokens: 3
     };
-    const thinking = activityParts({phase: {kind: 'thinking', since: 1750}, metrics})[0];
-    expect(thinking.text).toBe('LLM 思考中 · TTFT 750 ms');
     const generating = activityParts({phase: {kind: 'generating', since: 2000}, metrics})[0];
-    expect(generating.text).toBe('LLM 输出中 · TTFT 750 ms · 已输出 10 字');
     expect(generating.speed).toEqual({tokens: 3, since: 2000});
-    const tool = activityParts({phase: {kind: 'preparing_tool', since: 2000, toolName: 'write'}, metrics})[0];
-    expect(tool.text).toBe('生成工具参数：write · TTFT 750 ms');
+    const thinking = activityParts({phase: {kind: 'thinking', since: 2500}, metrics})[0];
+    expect(thinking.text).toBe('LLM 思考中 · TTFT 750 ms');
+    expect(thinking.speed).toBeUndefined();
   });
 
   it('treats an idle activity as not busy', () => {

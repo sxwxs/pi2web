@@ -73,28 +73,57 @@ describe('ActivityTracker', () => {
     expect(apply('agent_settled')).toBe(false);
   });
 
-  it('tracks TTFT and throttles estimated text throughput without retaining output text', () => {
+  it('tracks TTFT and throttles estimated throughput per streaming phase without retaining output', () => {
     const {t, at, apply} = tracker();
     apply('agent_start');
     at(1100);
     apply('turn_start');
     at(1600);
-    apply('message_update', update('thinking_delta', {delta: 'thought'}));
-    expect(t.snapshot().metrics?.firstResponseAt).toBe(1600);
-    at(1800);
+    expect(apply('message_update', update('thinking_delta', {delta: 'thought'}))).toBe(true);
+    expect(t.snapshot().metrics).toMatchObject({
+      firstResponseAt: 1600,
+      streamStartedAt: 1600,
+      chars: 7,
+      estimatedTokens: 7 / 4
+    });
+    at(1700);
+    expect(apply('message_update', update('thinking_delta', {delta: 'more'}))).toBe(false);
+    at(2600);
+    expect(apply('message_update', update('thinking_delta', {delta: 'x'}))).toBe(true);
+    expect(t.snapshot().metrics?.chars).toBe(12);
+    at(2800);
+    expect(apply('message_update', update('text_start'))).toBe(true);
+    expect(t.snapshot().metrics).toEqual({
+      turnStartedAt: 1100,
+      firstResponseAt: 1600,
+      chars: 0,
+      estimatedTokens: 0
+    });
+    at(2900);
     apply('message_update', update('text_delta', {delta: 'hello世界'}));
     expect(t.snapshot().metrics).toMatchObject({
       turnStartedAt: 1100,
       firstResponseAt: 1600,
-      textStartedAt: 1800,
+      streamStartedAt: 2900,
       chars: 7,
       estimatedTokens: 5 / 4 + 2 / 1.5
     });
-    at(1900);
+    at(3000);
     expect(apply('message_update', update('text_delta', {delta: 'more'}))).toBe(false);
-    at(2900);
+    at(4000);
     expect(apply('message_update', update('text_delta', {delta: 'x'}))).toBe(true);
     expect(t.snapshot().metrics?.chars).toBe(12);
+    at(4100);
+    apply(
+      'message_update',
+      update('toolcall_delta', {
+        delta: '{"path":',
+        contentIndex: 0,
+        partial: {content: [{type: 'toolCall', name: 'write'}]}
+      })
+    );
+    expect(t.snapshot().phase).toEqual({kind: 'preparing_tool', since: 4100, toolName: 'write'});
+    expect(t.snapshot().metrics).toMatchObject({streamStartedAt: 4100, chars: 8, estimatedTokens: 2});
     apply('turn_start');
     expect(t.snapshot().metrics).toMatchObject({chars: 0, estimatedTokens: 0});
     apply('agent_end');

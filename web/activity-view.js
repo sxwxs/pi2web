@@ -13,6 +13,8 @@
     compacting: ['🗜️', '压缩上下文'],
     stopping: ['⏹️', '正在停止']
   };
+  /** Streaming phases that report an estimated throughput, and how their output count reads. */
+  const STREAM_COUNT = {thinking: '已思考', generating: '已输出', preparing_tool: '参数'};
 
   const isBusy = activity =>
     !!activity &&
@@ -49,6 +51,15 @@
         metrics?.firstResponseAt === undefined
           ? ''
           : ` · TTFT ${formatDuration(metrics.firstResponseAt - metrics.turnStartedAt)}`;
+      // `textStartedAt`: backends before per-phase throughput only measured the text phase.
+      const streamStartedAt = metrics?.streamStartedAt ?? metrics?.textStartedAt;
+      const streaming =
+        STREAM_COUNT[phase.kind] && (metrics?.streamStartedAt !== undefined || phase.kind === 'generating');
+      const output = streaming && metrics?.chars ? ` · ${STREAM_COUNT[phase.kind]} ${metrics.chars} 字` : '';
+      const speed =
+        streaming && streamStartedAt !== undefined
+          ? {speed: {tokens: metrics.estimatedTokens, since: streamStartedAt}}
+          : {};
       if (phase.kind === 'running_tools')
         for (const tool of phase.tools || [])
           parts.push({
@@ -59,8 +70,9 @@
       else if (phase.kind === 'preparing_tool')
         parts.push({
           icon,
-          text: `${label}${phase.toolName ? `：${phase.toolName}` : ''}${ttft}`,
-          since: phase.since
+          text: `${label}${phase.toolName ? `：${phase.toolName}` : ''}${ttft}${output}`,
+          since: phase.since,
+          ...speed
         });
       else if (phase.kind === 'retrying')
         parts.push({
@@ -68,17 +80,7 @@
           text: `${label}${phase.attempt ? ` ${phase.attempt}/${phase.maxAttempts || '?'}` : ''}${phase.error ? ` · ${phase.error}` : ''}`,
           since: phase.since
         });
-      else {
-        const output = phase.kind === 'generating' && metrics?.chars ? ` · 已输出 ${metrics.chars} 字` : '';
-        parts.push({
-          icon,
-          text: `${label}${ttft}${output}`,
-          since: phase.since,
-          ...(phase.kind === 'generating' && metrics?.textStartedAt !== undefined
-            ? {speed: {tokens: metrics.estimatedTokens, since: metrics.textStartedAt}}
-            : {})
-        });
-      }
+      else parts.push({icon, text: `${label}${ttft}${output}`, since: phase.since, ...speed});
     }
     if (activity.pauseRequested)
       parts.push({
