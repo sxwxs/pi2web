@@ -130,6 +130,29 @@ describe('ActivityTracker', () => {
     expect(t.snapshot().metrics).toBeUndefined();
   });
 
+  it('restarts the stream for each content block and publishes its first count at once', () => {
+    const {t, at, apply} = tracker();
+    const write = (type: string, extra: Record<string, unknown> = {}) =>
+      update(type, {contentIndex: 0, partial: {content: [{type: 'toolCall', name: 'write'}]}, ...extra});
+    apply('agent_start');
+    at(1500);
+    apply('message_update', write('toolcall_start'));
+    apply('message_update', write('toolcall_delta', {delta: '{"path":"a"}'}));
+    expect(t.snapshot().metrics).toMatchObject({streamStartedAt: 1500, chars: 12});
+    at(1600);
+    // A second `write` in the same message: same phase and label, but a new stream.
+    expect(apply('message_update', write('toolcall_start'))).toBe(true);
+    expect(t.snapshot().phase).toEqual({kind: 'preparing_tool', since: 1500, toolName: 'write'});
+    expect(t.snapshot().metrics).toMatchObject({chars: 0, estimatedTokens: 0});
+    expect(t.snapshot().metrics?.streamStartedAt).toBeUndefined();
+    at(1700);
+    // Within a second of the last publish, yet the stream's first count is published.
+    expect(apply('message_update', write('toolcall_delta', {delta: '{'}))).toBe(true);
+    expect(t.snapshot().metrics).toMatchObject({streamStartedAt: 1700, chars: 1});
+    at(1800);
+    expect(apply('message_update', write('toolcall_delta', {delta: '"'}))).toBe(false);
+  });
+
   it('publishes the new turn even when the last tool already left the phase waiting', () => {
     const {t, at, apply} = tracker();
     apply('agent_start');

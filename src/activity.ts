@@ -133,23 +133,19 @@ export class ActivityTracker {
           // The name may only arrive with a later delta: fill it in without restarting the timer.
           if (s.phase.kind === 'preparing_tool' && !s.phase.toolName && toolName) {
             s.phase.toolName = toolName;
-            this.countDelta(update);
-            this.lastMetricsPublish = at;
-            return true;
-          }
-          changed = this.setPhase({kind: 'preparing_tool', ...(toolName ? {toolName} : {})});
+            changed = true;
+          } else changed = this.setPhase({kind: 'preparing_tool', ...(toolName ? {toolName} : {})});
         } else return false;
-        if (changed && s.metrics) {
-          // Throughput is per streaming phase, so thinking does not dilute the text rate and so on.
-          delete s.metrics.streamStartedAt;
-          s.metrics.chars = 0;
-          s.metrics.estimatedTokens = 0;
-        }
-        if (this.countDelta(update) && (changed || at - this.lastMetricsPublish >= 1000)) {
+        // Throughput is per stream: each content block, e.g. each of two consecutive `write` calls,
+        // and each phase, so thinking does not dilute the text rate.
+        const cleared = (changed || type.endsWith('_start')) && this.clearStream();
+        const counted = this.countDelta(update);
+        // Publish a stream's first count at once; later ones at most once a second.
+        if (counted && (counted === 'first' || at - this.lastMetricsPublish >= 1000)) {
           this.lastMetricsPublish = at;
           return true;
         }
-        return changed || firstResponse;
+        return changed || cleared || firstResponse;
       }
       case 'tool_execution_start': {
         // Tools called by other tools run inside their caller's time; show only top-level calls.
@@ -243,18 +239,33 @@ export class ActivityTracker {
   }
 
   /** Adds a thinking, text or tool call delta to the current stream's estimate. Returns whether it counted. */
-  private countDelta(update: any) {
+  /** Restarts the current stream's counters. Returns whether there was anything to clear. */
+  private clearStream() {
+    const metrics = this.state.metrics;
+    if (!metrics || (metrics.streamStartedAt === undefined && !metrics.chars)) return false;
+    delete metrics.streamStartedAt;
+    metrics.chars = 0;
+    metrics.estimatedTokens = 0;
+    return true;
+  }
+
+  /**
+   * Adds a thinking, text or tool call delta to the current stream's estimate. Returns `'first'` for
+   * the stream's first counted delta, `true` for later ones and `false` if nothing was counted.
+   */
+  private countDelta(update: any): 'first' | boolean {
     const metrics = this.state.metrics,
       delta = update?.delta;
     if (!metrics || !String(update?.type).endsWith('_delta') || typeof delta !== 'string' || !delta)
       return false;
-    metrics.streamStartedAt ??= this.now();
+    const first = metrics.streamStartedAt === undefined;
+    if (first) metrics.streamStartedAt = this.now();
     // Approximate Latin/code text at 4 chars/token, CJK at 1.5 chars/token.
     const cjk = delta.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/gu)?.length ?? 0;
     const chars = [...delta].length;
     metrics.chars += chars;
     metrics.estimatedTokens += (chars - cjk) / 4 + cjk / 1.5;
-    return true;
+    return first ? 'first' : true;
   }
 
   private endRun(settled = false) {
