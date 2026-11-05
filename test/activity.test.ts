@@ -73,32 +73,104 @@ describe('ActivityTracker', () => {
     expect(apply('agent_settled')).toBe(false);
   });
 
-  it('tracks TTFT and throttles estimated text throughput without retaining output text', () => {
+  it('tracks TTFT and throttles estimated throughput per streaming phase without retaining output', () => {
     const {t, at, apply} = tracker();
     apply('agent_start');
     at(1100);
     apply('turn_start');
     at(1600);
-    apply('message_update', update('thinking_delta', {delta: 'thought'}));
-    expect(t.snapshot().metrics?.firstResponseAt).toBe(1600);
-    at(1800);
+    expect(apply('message_update', update('thinking_delta', {delta: 'thought'}))).toBe(true);
+    expect(t.snapshot().metrics).toMatchObject({
+      firstResponseAt: 1600,
+      streamStartedAt: 1600,
+      chars: 7,
+      estimatedTokens: 7 / 4
+    });
+    at(1700);
+    expect(apply('message_update', update('thinking_delta', {delta: 'more'}))).toBe(false);
+    at(2600);
+    expect(apply('message_update', update('thinking_delta', {delta: 'x'}))).toBe(true);
+    expect(t.snapshot().metrics?.chars).toBe(12);
+    at(2800);
+    expect(apply('message_update', update('text_start'))).toBe(true);
+    expect(t.snapshot().metrics).toEqual({
+      turnStartedAt: 1100,
+      firstResponseAt: 1600,
+      chars: 0,
+      estimatedTokens: 0
+    });
+    at(2900);
     apply('message_update', update('text_delta', {delta: 'hello世界'}));
     expect(t.snapshot().metrics).toMatchObject({
       turnStartedAt: 1100,
       firstResponseAt: 1600,
-      textStartedAt: 1800,
+      streamStartedAt: 2900,
       chars: 7,
       estimatedTokens: 5 / 4 + 2 / 1.5
     });
-    at(1900);
+    at(3000);
     expect(apply('message_update', update('text_delta', {delta: 'more'}))).toBe(false);
-    at(2900);
+    at(4000);
     expect(apply('message_update', update('text_delta', {delta: 'x'}))).toBe(true);
     expect(t.snapshot().metrics?.chars).toBe(12);
+    at(4100);
+    apply(
+      'message_update',
+      update('toolcall_delta', {
+        delta: '{"path":',
+        contentIndex: 0,
+        partial: {content: [{type: 'toolCall', name: 'write'}]}
+      })
+    );
+    expect(t.snapshot().phase).toEqual({kind: 'preparing_tool', since: 4100, toolName: 'write'});
+    expect(t.snapshot().metrics).toMatchObject({streamStartedAt: 4100, chars: 8, estimatedTokens: 2});
     apply('turn_start');
     expect(t.snapshot().metrics).toMatchObject({chars: 0, estimatedTokens: 0});
     apply('agent_end');
     expect(t.snapshot().metrics).toBeUndefined();
+  });
+
+  it('restarts the stream for each content block and publishes its first count at once', () => {
+    const {t, at, apply} = tracker();
+    const write = (type: string, extra: Record<string, unknown> = {}) =>
+      update(type, {contentIndex: 0, partial: {content: [{type: 'toolCall', name: 'write'}]}, ...extra});
+    apply('agent_start');
+    at(1500);
+    apply('message_update', write('toolcall_start'));
+    apply('message_update', write('toolcall_delta', {delta: '{"path":"a"}'}));
+    expect(t.snapshot().metrics).toMatchObject({streamStartedAt: 1500, chars: 12});
+    at(1600);
+    // A second `write` in the same message: same phase and label, but a new stream.
+    expect(apply('message_update', write('toolcall_start'))).toBe(true);
+    expect(t.snapshot().phase).toEqual({kind: 'preparing_tool', since: 1500, toolName: 'write'});
+    expect(t.snapshot().metrics).toMatchObject({chars: 0, estimatedTokens: 0});
+    expect(t.snapshot().metrics?.streamStartedAt).toBeUndefined();
+    at(1700);
+    // Within a second of the last publish, yet the stream's first count is published.
+    expect(apply('message_update', write('toolcall_delta', {delta: '{'}))).toBe(true);
+    expect(t.snapshot().metrics).toMatchObject({streamStartedAt: 1700, chars: 1});
+    at(1800);
+    expect(apply('message_update', write('toolcall_delta', {delta: '"'}))).toBe(false);
+  });
+
+  it('keeps the running stream when the tool name arrives with a later delta', () => {
+    const {t, at, apply} = tracker();
+    apply('agent_start');
+    at(1500);
+    apply(
+      'message_update',
+      update('toolcall_delta', {delta: '{"path":', contentIndex: 0, partial: {content: [{}]}})
+    );
+    expect(t.snapshot().phase).toEqual({kind: 'preparing_tool', since: 1500});
+    at(1600);
+    expect(
+      apply(
+        'message_update',
+        update('toolcall_delta', {delta: '"a"}', contentIndex: 0, partial: {content: [{name: 'write'}]}})
+      )
+    ).toBe(true);
+    expect(t.snapshot().phase).toEqual({kind: 'preparing_tool', since: 1500, toolName: 'write'});
+    expect(t.snapshot().metrics).toMatchObject({streamStartedAt: 1500, chars: 12, estimatedTokens: 3});
   });
 
   it('publishes the new turn even when the last tool already left the phase waiting', () => {

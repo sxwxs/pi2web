@@ -69,6 +69,8 @@
     voiceEnabled: false,
     voiceSttEnabled: false,
     voicePlaybackEnabled: localStorage.rpVoicePlayback === 'true',
+    // Per browser: 'enter' sends on Enter (Shift+Enter for a new line), 'ctrl-enter' on Ctrl/⌘+Enter.
+    enterSendMode: localStorage.rpEnterSendMode === 'enter' ? 'enter' : 'ctrl-enter',
     voiceAudio: {
       context: null,
       nextTime: 0,
@@ -4199,6 +4201,18 @@
     }
   };
   $('workspaces').onchange = () => void selectWorkspace();
+  function applyEnterSendMode() {
+    $('enterSendMode').value = state.enterSendMode;
+    $('input').placeholder = `输入 @ 引用文件，/ 使用命令，! 执行 Shell；${
+      state.enterSendMode === 'enter' ? 'Enter 发送，Shift+Enter 换行' : 'Ctrl/⌘+Enter 发送'
+    }`;
+  }
+  applyEnterSendMode();
+  $('enterSendMode').onchange = () => {
+    state.enterSendMode = $('enterSendMode').value === 'enter' ? 'enter' : 'ctrl-enter';
+    localStorage.rpEnterSendMode = state.enterSendMode;
+    applyEnterSendMode();
+  };
   $('agentPageSize').value = String(state.agentPageSize);
   $('agentPageSize').onchange = () => {
     state.agentPageSize = Number($('agentPageSize').value) || 10;
@@ -4407,6 +4421,15 @@
       }
     }
   };
+  /**
+   * Whether a keydown in the prompt sends it. Ctrl/⌘+Enter always sends; in 'enter' mode a plain Enter
+   * does too. Enter that confirms an IME composition never sends.
+   */
+  function isSendKey(event, mode) {
+    if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return false;
+    if (event.ctrlKey || event.metaKey) return true;
+    return mode === 'enter' && !event.shiftKey && !event.altKey;
+  }
   $('input').onkeydown = event => {
     if (event.altKey && event.shiftKey && event.key.toLowerCase() === 'v' && !event.isComposing) {
       event.preventDefault();
@@ -4447,7 +4470,8 @@
         return;
       }
     }
-    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+    if (isSendKey(event, state.enterSendMode)) {
+      event.preventDefault();
       $('prompt').requestSubmit();
     }
   };
