@@ -123,7 +123,8 @@ export class ActivityTracker {
           s.metrics.firstResponseAt === undefined &&
           (type === 'thinking_delta' || type === 'text_delta' || type === 'toolcall_delta');
         if (firstResponse) s.metrics!.firstResponseAt = at;
-        let changed: boolean;
+        let changed: boolean,
+          lateName = false;
         if (type === 'thinking_start' || type === 'thinking_delta')
           changed = this.setPhase({kind: 'thinking'});
         else if (type === 'text_start' || type === 'text_delta')
@@ -133,12 +134,13 @@ export class ActivityTracker {
           // The name may only arrive with a later delta: fill it in without restarting the timer.
           if (s.phase.kind === 'preparing_tool' && !s.phase.toolName && toolName) {
             s.phase.toolName = toolName;
-            changed = true;
+            changed = lateName = true;
           } else changed = this.setPhase({kind: 'preparing_tool', ...(toolName ? {toolName} : {})});
         } else return false;
         // Throughput is per stream: each content block, e.g. each of two consecutive `write` calls,
         // and each phase, so thinking does not dilute the text rate.
-        const cleared = (changed || type.endsWith('_start')) && this.clearStream();
+        // A late tool name only labels the stream already running; it does not start a new one.
+        const cleared = ((changed && !lateName) || type.endsWith('_start')) && this.clearStream();
         const counted = this.countDelta(update);
         // Publish a stream's first count at once; later ones at most once a second.
         if (counted && (counted === 'first' || at - this.lastMetricsPublish >= 1000)) {

@@ -153,6 +153,26 @@ describe('ActivityTracker', () => {
     expect(apply('message_update', write('toolcall_delta', {delta: '"'}))).toBe(false);
   });
 
+  it('keeps the running stream when the tool name arrives with a later delta', () => {
+    const {t, at, apply} = tracker();
+    apply('agent_start');
+    at(1500);
+    apply(
+      'message_update',
+      update('toolcall_delta', {delta: '{"path":', contentIndex: 0, partial: {content: [{}]}})
+    );
+    expect(t.snapshot().phase).toEqual({kind: 'preparing_tool', since: 1500});
+    at(1600);
+    expect(
+      apply(
+        'message_update',
+        update('toolcall_delta', {delta: '"a"}', contentIndex: 0, partial: {content: [{name: 'write'}]}})
+      )
+    ).toBe(true);
+    expect(t.snapshot().phase).toEqual({kind: 'preparing_tool', since: 1500, toolName: 'write'});
+    expect(t.snapshot().metrics).toMatchObject({streamStartedAt: 1500, chars: 12, estimatedTokens: 3});
+  });
+
   it('publishes the new turn even when the last tool already left the phase waiting', () => {
     const {t, at, apply} = tracker();
     apply('agent_start');
