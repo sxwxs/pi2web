@@ -28,6 +28,7 @@ const OVERVIEW_EVENTS = new Set([
   'agent_settled',
   'activity_changed',
   'queue_update',
+  'safe_pause',
   'session_info_changed',
   'agent_unloaded',
   'agent_loaded',

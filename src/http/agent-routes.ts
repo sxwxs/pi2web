@@ -197,6 +197,12 @@ export async function handleAgentRoutes(
       ctx.metadata.scheduleAgent(ctx.agents.get(id).record);
       return send(200, {data: result});
     }
+    // Safe pause: POST asks the running turn to stop before its next model request; DELETE withdraws that.
+    if (parts[4] === 'pause' && (req.method === 'POST' || req.method === 'DELETE')) {
+      if (req.method === 'POST') await ctx.agents.requestPause(id);
+      else await ctx.agents.cancelPause(id);
+      return send(200, {data: {success: true}});
+    }
     if (req.method === 'POST' && parts[4] === 'bash-abort') {
       await ctx.agents.abortBash(id);
       return send(200, {data: {aborted: true}});

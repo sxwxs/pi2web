@@ -279,8 +279,8 @@ export class VoiceManager {
         userPrompt = this.lastPrompt.get(agentId) ?? '';
       this.lastAssistant.delete(agentId);
       this.lastPrompt.delete(agentId);
-      // A run the user cancelled has no result worth speaking; Pi 0.99+ reports that as `aborted`.
-      if (finalOutput && event.aborted !== true)
+      // A run the user cancelled or safely paused has no result worth speaking (`aborted` / `paused`).
+      if (finalOutput && event.aborted !== true && event.paused !== true)
         void this.announce(agentId, {userPrompt, finalOutput, ...context});
     }
   }
