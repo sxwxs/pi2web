@@ -83,7 +83,7 @@ export async function handleAgentRoutes(
           throw Object.assign(new Error('model.provider and model.modelId are required'), {
             code: 'INVALID_REQUEST'
           });
-        await ctx.agents.setModel(agent.agentId, b.model.provider, b.model.modelId);
+        await ctx.agents.setModel(agent.agentId, b.model.provider, b.model.modelId, true);
       }
       if (b.sessionName !== undefined) {
         if (typeof b.sessionName !== 'string')
@@ -156,7 +156,8 @@ export async function handleAgentRoutes(
     }
     if (req.method === 'POST' && parts[4] === 'model') {
       const b = await ctx.body();
-      await ctx.agents.setModel(id, b.provider, b.modelId);
+      // A model the user picks becomes the default of the next new session.
+      await ctx.agents.setModel(id, b.provider, b.modelId, true);
       return send(200, {data: await ctx.agents.capabilities(id)});
     }
     if (req.method === 'POST' && parts[4] === 'thinking') {
