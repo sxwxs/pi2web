@@ -61,6 +61,7 @@ function setup() {
     removeCard,
     toast,
     closeCommandPicker: vi.fn(),
+    followLatest: vi.fn(),
     agentLabel: () => 'Agent A',
     document: {createElement: () => ({})},
     WebSocket: Socket,

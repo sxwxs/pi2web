@@ -15,8 +15,17 @@ class Element {
   className = '';
   textContent = '';
   title = '';
-  scrollTop = 0;
+  hidden = false;
   scrollHeight = 0;
+  clientHeight = 0;
+  private top = 0;
+  // Like a browser, the scroll position stays within the content.
+  get scrollTop() {
+    return this.top;
+  }
+  set scrollTop(value: number) {
+    this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight));
+  }
   dataset: Record<string, string> = {};
   children: Element[] = [];
   parent: Element | null = null;
@@ -109,8 +118,11 @@ class Element {
 }
 
 function setup(olderPages: any[] = []) {
-  const messages = new Element();
+  const messages = new Element(),
+    jump = Object.assign(new Element(), {hidden: true, textContent: '↓ 最新'}); // As in index.html.
   const state: any = {
+    followOutput: true,
+    messagesScrollTop: 0,
     selectedKind: 'agent',
     agent: {agentId: 'bk:agent-a', backendId: 'bk'},
     timeline: null,
@@ -133,10 +145,10 @@ function setup(olderPages: any[] = []) {
     renderTranscriptEvent = vi.fn(),
     showUncertainSend = vi.fn();
   const api = runInNewContext(
-    `${timelineSource}\n({loadTimeline, handleDetail, addCard, refreshToolCards})`,
+    `${timelineSource}\n({loadTimeline, handleDetail, addCard, refreshToolCards, followLatest, onMessagesScroll})`,
     {
       state,
-      $: () => messages,
+      $: (id: string) => (id === 'jumpToLatest' ? jump : messages),
       window: {},
       requestAgent,
       sendFocused,
@@ -176,6 +188,7 @@ function setup(olderPages: any[] = []) {
     });
   return {
     messages,
+    jump,
     state,
     requestAgent,
     sendFocused,
@@ -371,5 +384,86 @@ describe('timeline rendering', () => {
     await (button as any).onclick();
     await vi.waitFor(() => expect(ui.ids()).toEqual(['e0', 'e1']));
     expect(ui.requestAgent).toHaveBeenLastCalledWith('bk:agent-a', '/timeline?limit=50&before=e1');
+  });
+});
+
+describe('following the newest output', () => {
+  /** A transcript taller than its view, opened at its end. */
+  const opened = () => {
+    const ui = setup();
+    ui.messages.clientHeight = 400;
+    ui.messages.scrollHeight = 1000;
+    ui.open([user]);
+    ui.onMessagesScroll();
+    // The reader scrolls; the browser then reports it.
+    const scrollTo = (top: number) => {
+      ui.messages.scrollTop = top;
+      ui.onMessagesScroll();
+    };
+    const grow = (height = 300) => (ui.messages.scrollHeight += height);
+    const streamed = async (delta: string) => {
+      grow();
+      ui.detail({type: 'delta', kind: 'text', delta});
+      await new Promise(resolve => setTimeout(resolve, 0));
+    };
+    return {...ui, scrollTo, grow, streamed};
+  };
+
+  it('keeps to the end while streaming and shows no jump button', async () => {
+    const ui = opened();
+    expect(ui.messages.scrollTop).toBe(600);
+    await ui.streamed('Hel');
+    expect(ui.messages.scrollTop).toBe(900);
+    expect(ui.jump.hidden).toBe(true);
+  });
+
+  it('stops following as soon as the reader scrolls up, even a little, and marks new output', async () => {
+    const ui = opened();
+    ui.scrollTo(590); // Within the slack, but moving up.
+    expect(ui.state.followOutput).toBe(false);
+    expect(ui.jump.hidden).toBe(false);
+    expect(ui.jump.textContent).toBe('↓ 最新');
+    await ui.streamed('Hel');
+    ui.grow();
+    ui.detail({type: 'items', items: [{id: 'e4', kind: 'user', size: 1, body: 'x'}]});
+    ui.addCard('note', 'n');
+    expect(ui.messages.scrollTop).toBe(590);
+    expect(ui.jump.textContent).toBe('↓ 有新输出');
+    expect(ui.jump.classList.contains('has-new')).toBe(true);
+  });
+
+  it('follows again when the reader scrolls back near the end', async () => {
+    const ui = opened();
+    ui.scrollTo(200);
+    await ui.streamed('Hel'); // The end is now at 900.
+    ui.scrollTo(870);
+    expect(ui.state.followOutput).toBe(true);
+    expect(ui.jump.hidden).toBe(true);
+    expect(ui.jump.classList.contains('has-new')).toBe(false);
+    await ui.streamed('lo');
+    expect(ui.messages.scrollTop).toBe(1200);
+  });
+
+  it('jumps to the end and follows again from the button', async () => {
+    const ui = opened();
+    ui.scrollTo(100);
+    await ui.streamed('Hel');
+    ui.followLatest(true);
+    expect(ui.messages.scrollTop).toBe(900);
+    expect(ui.jump.hidden).toBe(true);
+    await ui.streamed('lo');
+    expect(ui.messages.scrollTop).toBe(1200);
+  });
+
+  it('keeps a scrolled-up reader in place through a new snapshot, but not through a switch', () => {
+    const ui = opened();
+    ui.scrollTo(100);
+    ui.detail({type: 'timeline_reset'});
+    ui.detail({type: 'focus_state', page: {items: [user], total: 1, start: 0, hasMore: false}, live: null});
+    expect(ui.messages.scrollTop).toBe(100);
+    expect(ui.jump.classList.contains('has-new')).toBe(false);
+    ui.loadTimeline(ui.state.agent);
+    expect(ui.state.followOutput).toBe(true);
+    expect(ui.messages.scrollTop).toBe(600);
   });
 });
