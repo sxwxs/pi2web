@@ -2064,8 +2064,9 @@
   /**
    * Show an Agent: its cached timeline at once, then the snapshot the server answers `focus` with.
    * Until that arrives, detail messages are older than it and are ignored.
+   * `jumpToLatest` is false when a reconnect reloads the Agent being read: the reader keeps their place.
    */
-  function loadTimeline(agent) {
+  function loadTimeline(agent, jumpToLatest = true) {
     const timeline = {
       agentId: agent.agentId,
       backendId: agent.backendId,
@@ -2080,12 +2081,14 @@
     state.timeline = timeline;
     discardStreams();
     const box = $('messages'),
-      cached = state.timelineCache.get(agent.agentId);
+      cached = state.timelineCache.get(agent.agentId),
+      top = box.scrollTop;
     if (cached) {
       timeline.sessionId = cached.sessionId;
       renderTimelinePage(cached, false);
     } else box.innerHTML = '<div class="empty">正在加载…</div>';
-    followLatest(true);
+    if (jumpToLatest || state.followOutput) followLatest(true);
+    else box.scrollTop = top;
     if (!sendFocus(true) && !cached) box.innerHTML = '<div class="empty">等待连接 backend…</div>';
     for (const text of state.uncertainSends.get(agent.agentId) || []) showUncertainSend(agent.agentId, text);
   }
@@ -3022,7 +3025,8 @@
       ws.send(JSON.stringify({type: 'subscribe_drafts'}));
       // Nothing is replayed: refocus and reload what may have changed while disconnected.
       backend.focused = undefined;
-      if (state.selectedKind === 'agent' && state.agent?.backendId === backend.id) loadTimeline(state.agent);
+      if (state.selectedKind === 'agent' && state.agent?.backendId === backend.id)
+        loadTimeline(state.agent, false);
       else sendFocus();
     };
     ws.onmessage = event => {

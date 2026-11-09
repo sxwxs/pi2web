@@ -466,4 +466,17 @@ describe('following the newest output', () => {
     expect(ui.state.followOutput).toBe(true);
     expect(ui.messages.scrollTop).toBe(600);
   });
+
+  it('keeps a scrolled-up reader in place through a reconnect, and a following one at the end', () => {
+    const ui = opened();
+    ui.scrollTo(100);
+    ui.loadTimeline(ui.state.agent, false); // What a reconnect does.
+    expect(ui.messages.scrollTop).toBe(100);
+    expect(ui.state.followOutput).toBe(false);
+    expect(ui.jump.hidden).toBe(false);
+    ui.followLatest(true);
+    ui.grow();
+    ui.loadTimeline(ui.state.agent, false);
+    expect(ui.messages.scrollTop).toBe(900);
+  });
 });
