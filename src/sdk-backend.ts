@@ -267,10 +267,16 @@ export class SdkBackend implements AgentBackend {
   compact(instructions?: string) {
     return this.session.compact(instructions);
   }
-  async setModel(provider: string, modelId: string) {
+  /**
+   * `persist` also makes the model Pi's global default, so the next new session starts with it.
+   * Since pi 0.84.3 setModel() is session-scoped unless asked to persist (the TUI's Ctrl+S).
+   */
+  async setModel(provider: string, modelId: string, persist = false) {
     const model = this.session.modelRuntime.getModel(provider, modelId);
     if (!model) throw Object.assign(new Error('Model not found'), {code: 'MODEL_NOT_FOUND'});
-    await this.session.setModel(model);
+    await this.session.setModel(model, {persist});
+    // The settings write is queued; finish it before a new session reads the default.
+    if (persist) await this.session.settingsManager.flush();
   }
   async setThinkingLevel(level: string) {
     if (level !== 'off' && !this.session.getAvailableThinkingLevels().includes(level as any))

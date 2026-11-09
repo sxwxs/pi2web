@@ -98,6 +98,7 @@
 .template-editor{margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:6px;background:#262a33}
 #activityBar{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-bottom:8px;padding:6px 10px;font-size:12px;background:#2f3542;border:1px solid var(--line);border-left:3px solid var(--yellow);border-radius:6px}
 #activityBar[hidden],.agent-activity[hidden]{display:none}
+#jumpToLatest{position:absolute;right:24px;bottom:calc(100% + 10px);z-index:6;padding:6px 14px;font-size:12px;border-radius:999px;background:#3b4252f0;border-color:#67738a;box-shadow:0 4px 14px #0008}#jumpToLatest.has-new{color:#161c24;background:var(--blue);border-color:var(--blue);font-weight:600}
 .activity-chip{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%}
 .activity-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .activity-speed{flex:0 0 auto;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--blue)}

@@ -121,7 +121,7 @@ export interface AgentBackend {
   getSession(): Promise<Record<string, unknown>>;
   getSessionInfo(): Promise<Record<string, unknown>>;
   compact(instructions?: string): Promise<unknown>;
-  setModel(provider: string, modelId: string): Promise<void>;
+  setModel(provider: string, modelId: string, persist?: boolean): Promise<void>;
   setThinkingLevel(level: string): Promise<void>;
   setSessionName(name: string): Promise<void>;
   navigate(entryId: string): Promise<unknown>;
@@ -870,8 +870,9 @@ export class AgentManager {
   async compact(id: string, instructions?: string) {
     return this.writeSession(id, backend => backend.compact(instructions));
   }
-  async setModel(id: string, provider: string, modelId: string) {
-    return this.writeSession(id, backend => backend.setModel(provider, modelId));
+  /** `persist`: the user picked this model, so it becomes the default for new sessions. */
+  async setModel(id: string, provider: string, modelId: string, persist = false) {
+    return this.writeSession(id, backend => backend.setModel(provider, modelId, persist));
   }
   async setThinkingLevel(id: string, level: string) {
     return this.writeSession(id, backend => backend.setThinkingLevel(level));

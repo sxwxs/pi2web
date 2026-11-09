@@ -61,6 +61,7 @@ function setup() {
     removeCard,
     toast,
     closeCommandPicker: vi.fn(),
+    followLatest: vi.fn(),
     agentLabel: () => 'Agent A',
     document: {createElement: () => ({})},
     WebSocket: Socket,
@@ -121,7 +122,8 @@ describe('prompt send acknowledgement', () => {
     ui.connectSocket(ui.backend);
     ui.sockets[0].onopen();
     expect(ui.sockets[0].sent).toEqual([{type: 'subscribe_all'}, {type: 'subscribe_drafts'}]);
-    expect(ui.loadTimeline).toHaveBeenCalledExactlyOnceWith(ui.state.agent);
+    // A reconnect keeps the reader's scroll position.
+    expect(ui.loadTimeline).toHaveBeenCalledExactlyOnceWith(ui.state.agent, false);
     await ui.submit();
     expect(ui.postAgent).toHaveBeenCalledOnce();
   });

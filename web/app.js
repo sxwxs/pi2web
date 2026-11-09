@@ -59,6 +59,9 @@
     bashCards: new Map(),
     // Prompts shown before the server records them.
     optimistic: [],
+    // Whether the transcript keeps to its newest output; see followLatest.
+    followOutput: true,
+    messagesScrollTop: 0,
     commands: [],
     commandsAgentId: null,
     commandFiltered: [],
@@ -1762,8 +1765,51 @@
   }
   function addCard(title, content, kind = 'system', open = false, timestamp, target = $('messages')) {
     const card = placeCard(createCard(title, content, kind, open, timestamp), target, timestamp);
-    if (target === $('messages')) $('messages').scrollTop = $('messages').scrollHeight;
+    if (target === $('messages')) followLatest();
     return card;
+  }
+
+  // ---- Following the newest output. The transcript keeps to its end while the reader is there.
+  // Scrolling up frees it; scrolling back to the end, or the jump button, follows again.
+  const FOLLOW_SLACK = 40;
+  function setFollowOutput(on) {
+    state.followOutput = on;
+    const jump = $('jumpToLatest');
+    jump.hidden = on;
+    if (on) {
+      jump.classList.toggle('has-new', false);
+      jump.textContent = '↓ 最新';
+    }
+  }
+  /** New output arrived: stay at the end when following, otherwise just say there is more below. */
+  function followLatest(force = false) {
+    if (force && !state.followOutput) setFollowOutput(true);
+    if (!state.followOutput) {
+      const jump = $('jumpToLatest');
+      if (!jump.classList.contains('has-new')) {
+        jump.classList.toggle('has-new', true);
+        jump.textContent = '↓ 有新输出';
+      }
+      return;
+    }
+    const box = $('messages');
+    box.scrollTop = box.scrollHeight;
+    state.messagesScrollTop = box.scrollTop;
+  }
+  /**
+   * Moving up stops following at once, so the stream cannot pull a reader back down. Following stays
+   * correct through our own scrolling and through content shrinking: both leave the view at its end.
+   */
+  function onMessagesScroll() {
+    const box = $('messages'),
+      top = box.scrollTop,
+      distance = box.scrollHeight - box.clientHeight - top;
+    if (distance <= 1) {
+      if (!state.followOutput) setFollowOutput(true);
+    } else if (top < state.messagesScrollTop) {
+      if (state.followOutput) setFollowOutput(false);
+    } else if (distance <= FOLLOW_SLACK && !state.followOutput) setFollowOutput(true);
+    state.messagesScrollTop = top;
   }
   /** Pi 0.99+ reports the recorded execution time of a finished tool call. */
   function setToolDuration(card, durationMs) {
@@ -2018,8 +2064,9 @@
   /**
    * Show an Agent: its cached timeline at once, then the snapshot the server answers `focus` with.
    * Until that arrives, detail messages are older than it and are ignored.
+   * `jumpToLatest` is false when a reconnect reloads the Agent being read: the reader keeps their place.
    */
-  function loadTimeline(agent) {
+  function loadTimeline(agent, jumpToLatest = true) {
     const timeline = {
       agentId: agent.agentId,
       backendId: agent.backendId,
@@ -2034,12 +2081,14 @@
     state.timeline = timeline;
     discardStreams();
     const box = $('messages'),
-      cached = state.timelineCache.get(agent.agentId);
+      cached = state.timelineCache.get(agent.agentId),
+      top = box.scrollTop;
     if (cached) {
       timeline.sessionId = cached.sessionId;
       renderTimelinePage(cached, false);
-      box.scrollTop = box.scrollHeight;
     } else box.innerHTML = '<div class="empty">正在加载…</div>';
+    if (jumpToLatest || state.followOutput) followLatest(true);
+    else box.scrollTop = top;
     if (!sendFocus(true) && !cached) box.innerHTML = '<div class="empty">等待连接 backend…</div>';
     for (const text of state.uncertainSends.get(agent.agentId) || []) showUncertainSend(agent.agentId, text);
   }
@@ -2050,8 +2099,7 @@
     sendFocus(true);
   }
   function showSnapshot(message) {
-    const timeline = state.timeline,
-      box = $('messages');
+    const timeline = state.timeline;
     timeline.sessionId = message.sessionId;
     timeline.snapshots = (timeline.snapshots || 0) + 1;
     renderTimelinePage(message.page, false);
@@ -2061,7 +2109,8 @@
     for (const text of state.uncertainSends.get(message.agentId) || [])
       showUncertainSend(message.agentId, text);
     saveTimelineCache();
-    box.scrollTop = box.scrollHeight;
+    // A reconnect or branch switch re-renders; a reader scrolled up keeps their place.
+    if (state.followOutput) followLatest();
   }
   async function loadOlderItems(limit = TIMELINE_PAGE) {
     const timeline = state.timeline;
@@ -2126,7 +2175,7 @@
     // Older calls without a result are no longer the newest: they did not finish.
     if (calls.length) refreshToolCards(timeline.agentId);
     saveTimelineCache();
-    box.scrollTop = box.scrollHeight;
+    followLatest();
   }
   /** Messages of the focused Agent's detail stream, and its events that add to the transcript. */
   function handleDetail(message) {
@@ -2181,7 +2230,7 @@
       0,
       160
     );
-    $('messages').scrollTop = $('messages').scrollHeight;
+    followLatest();
   }
   function scheduleStreamPaint(card) {
     if (card.renderFrame === null) card.renderFrame = requestAnimationFrame(() => paintStream(card));
@@ -2976,7 +3025,8 @@
       ws.send(JSON.stringify({type: 'subscribe_drafts'}));
       // Nothing is replayed: refocus and reload what may have changed while disconnected.
       backend.focused = undefined;
-      if (state.selectedKind === 'agent' && state.agent?.backendId === backend.id) loadTimeline(state.agent);
+      if (state.selectedKind === 'agent' && state.agent?.backendId === backend.id)
+        loadTimeline(state.agent, false);
       else sendFocus();
     };
     ws.onmessage = event => {
@@ -4376,6 +4426,8 @@
           : 'prompt',
       agentId = state.agent.agentId;
     $('messages').querySelector('.empty')?.remove();
+    // Whoever sends wants to see what comes back.
+    followLatest(true);
     // `!cmd` runs inside the Agent session (output is recorded in the Session); `!!cmd` keeps the output out of the model context.
     if (text.startsWith('!')) {
       const excludeFromContext = text.startsWith('!!'),
@@ -4503,6 +4555,8 @@
     renderMentionItems(filter);
   };
   // Clearing hands the queued messages back, so nothing typed is lost when a run is redirected.
+  $('messages').addEventListener('scroll', onMessagesScroll, {passive: true});
+  $('jumpToLatest').onclick = () => followLatest(true);
   $('queueClear').onclick = async () => {
     if (!state.agent) return;
     const agentId = state.agent.agentId;
