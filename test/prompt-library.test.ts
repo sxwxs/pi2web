@@ -46,12 +46,23 @@ describe('composer history navigation', () => {
       historyStep({items, nav: idle, value: 'abc', selectionStart: 0, selectionEnd: 2}, 'up')
     ).toBeNull();
     expect(historyStep({items, nav: idle, ...at('abc')}, 'down')).toBeNull();
-    expect(historyStep({items, nav: {index: 1, draft: ''}, ...at('a\nb', 0)}, 'down')).toBeNull();
+    expect(historyStep({items, nav: {index: 1, draft: ''}, ...at('two\nlines', 0)}, 'down')).toBeNull();
     expect(historyStep({items: [], nav: idle, ...at('')}, 'up')).toBeNull();
   });
 
   it('skips an entry equal to what the composer already shows', () => {
     expect(historyStep({items, nav: idle, ...at('newest')}, 'up')?.value).toBe('two\nlines');
+  });
+
+  it('treats text changed without typing as a new draft instead of discarding it', () => {
+    // ↑ recalled `newest`, then dictation appended to it without an input event.
+    const nav = {index: 0, draft: 'my draft'};
+    expect(historyStep({items, nav, ...at('newest and dictated')}, 'down')).toBeNull();
+    expect(historyStep({items, nav, ...at('newest and dictated')}, 'up')).toEqual({
+      nav: {index: 0, draft: 'newest and dictated'},
+      value: 'newest',
+      caret: 6
+    });
   });
 });
 
@@ -128,6 +139,29 @@ describe('Pi prompt template store', () => {
     expect(() => store.save('empty', {content: '  '})).toThrow(/content is required/);
     store.remove('plain');
     expect(() => store.get('plain')).toThrow(/not found/);
+  });
+
+  it('treats names as case-insensitive on every file system', async () => {
+    const dir = await temp('pi2web-prompts-case-'),
+      store = new PromptTemplateStore(() => dir);
+    store.save('review', {content: 'v1'});
+    expect(store.get('REVIEW')).toMatchObject({name: 'review', content: 'v1'});
+    expect(() => store.save('Review', {content: 'other'})).toThrow(/already exists/);
+    // Editing with only the case changed writes the same file and keeps its name.
+    expect(store.save('Review', {content: 'v2'}, {editing: 'review'})).toMatchObject({
+      name: 'review',
+      content: 'v2'
+    });
+    store.save('other', {content: 'x'});
+    expect(() => store.save('Review', {content: 'x'}, {editing: 'other'})).toThrow(/already exists/);
+    // Overwriting keeps the existing file too.
+    expect(store.save('REVIEW', {content: 'v3'}, {overwrite: true}).name).toBe('review');
+    expect(store.list().templates.map(t => [t.name, t.content])).toEqual([
+      ['other', 'x'],
+      ['review', 'v3']
+    ]);
+    store.remove('Review');
+    expect(store.list().templates.map(t => t.name)).toEqual(['other']);
   });
 
   it('never lets a body that starts with --- be read as front matter', () => {

@@ -1104,11 +1104,12 @@
     state.historyNav = {index: -1, draft: ''};
   }
   async function loadPromptTemplates(backendId = libraryBackendId()) {
-    if (!backendId) return;
+    // Only the selected Agent's backend: the rows' edit and delete buttons act on that backend.
+    if (!backendId || backendId !== libraryBackendId()) return;
     const request = ++state.library.request;
     try {
       const data = await requestBackend(backendId, '/api/v1/prompt-templates');
-      if (request !== state.library.request) return;
+      if (request !== state.library.request || backendId !== libraryBackendId()) return;
       Object.assign(state.library, {
         backendId,
         dir: data.dir || '',
@@ -1206,7 +1207,7 @@
           row.title = item.content;
         } else row.append(el('span', {className: 'library-text', textContent: item, title: item}));
         row.onmouseenter = () => setLibrarySelection(index);
-        row.onclick = () => void chooseLibraryItem(item);
+        row.onclick = () => chooseLibraryItem(item);
         return row;
       })
     );
@@ -1220,20 +1221,14 @@
     input.focus();
     input.setSelectionRange(result.caret, result.caret);
   }
-  async function chooseLibraryItem(item) {
+  /** History entries and templates both go in as text; a template's $1/$@ are left for the person to replace. */
+  function chooseLibraryItem(item) {
     if (item === undefined) return;
     closeLibrary();
     if (typeof item === 'string') return putInComposer(item);
-    // A template with $1/$@ runs as `/name args`, but only a session that has loaded it expands the
-    // command: Pi reads templates when a session starts. Otherwise its text goes in for manual editing.
-    if (promptLibrary.usesArguments(item.content) && !$('input').value.trim() && state.agent) {
-      const agentId = state.agent.agentId,
-        commands = await loadCommands(agentId).catch(() => []);
-      if (state.agent?.agentId === agentId && commands.some(command => command.name === item.name))
-        return putInComposer(`/${item.name} `);
-      toast('该模板带参数，当前会话尚未加载它：已插入原文，请手动替换 $1 等占位符');
-    }
     putInComposer(item.content);
+    if (promptLibrary.usesArguments(item.content))
+      toast('模板含 $1 等参数占位符，请手动替换；也可以输入 /名称 参数 由 Pi 展开');
   }
   async function editPromptTemplate(template = null, initialContent = '') {
     const backendId = libraryBackendId();
@@ -2699,13 +2694,7 @@
     if (suggestion) {
       // A template with $1/$@ placeholders needs editing before it can be sent.
       const sendable = !(suggestion.source === 'template' && promptLibrary.usesArguments(suggestion.text));
-      actions.append(
-        button('填入', () =>
-          suggestion.source === 'template'
-            ? void chooseLibraryItem({name: suggestion.name, content: suggestion.text})
-            : useSuggestion(suggestion.text, false)
-        )
-      );
+      actions.append(button('填入', () => useSuggestion(suggestion.text, false)));
       if (sendable) actions.append(button('发送', () => useSuggestion(suggestion.text, true)));
     }
     actions.append(button('×', () => void dismissAdvice(agentId), '忽略这条建议'));
@@ -3594,7 +3583,7 @@
   }
   /** Follow-up settings belong to a backend: the selected Agent's, otherwise the primary one. */
   function followUpConfigBackend() {
-    const selected = state.agent ? backendOf(state.agent.backendId) : null;
+    const selected = backendOf(libraryBackendId());
     return selected?.status === 'connected' ? selected : primaryBackend();
   }
   function fillFollowUpForm(settings) {
@@ -3641,7 +3630,7 @@
           draftModel: $('followUpDraftModel').value.trim()
         })
       });
-      fillFollowUpForm(data.settings);
+      // The form keeps what was typed: by now it may show another backend, which a late reply must not overwrite.
       toast(data.settings.enabled ? '跟进建议已启用' : '跟进建议已关闭');
     } catch (error) {
       toast(`保存跟进设置失败：${error.message}`);
@@ -5066,7 +5055,7 @@
     } else if (event.key === 'Enter') {
       // The picker sits inside the composer form: Enter must choose, never submit the prompt.
       event.preventDefault();
-      void chooseLibraryItem(state.library.filtered[state.library.index]);
+      chooseLibraryItem(state.library.filtered[state.library.index]);
     } else if (event.key === 'Escape') {
       event.preventDefault();
       closeLibrary();

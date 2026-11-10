@@ -11,6 +11,8 @@
    */
   function historyStep({items, nav, value, selectionStart, selectionEnd}, direction) {
     if (selectionStart !== selectionEnd) return null;
+    // Text changed without typing (dictation, a voice draft, a restored queue) is a new draft, never discarded.
+    if (nav.index >= 0 && value !== items[nav.index]) nav = {index: -1, draft: ''};
     if (direction === 'up') {
       if (value.slice(0, selectionStart).includes('\n')) return null;
       // Skip an entry equal to what is already shown, or ↑ would seem to do nothing.
