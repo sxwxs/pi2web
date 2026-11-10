@@ -5,6 +5,7 @@ import type {CollabHub} from '../collab/hub.js';
 import type {DraftHub} from '../drafts.js';
 import type {SessionNamer} from '../session-namer.js';
 import type {VoiceManager} from '../voice.js';
+import type {FollowUpAdvisor} from '../follow-up-advisor.js';
 
 export type AgentSocketContext = {
   agents: AgentManager;
@@ -12,6 +13,9 @@ export type AgentSocketContext = {
   collab: CollabHub;
   voice?: VoiceManager;
   sessionNamer?: SessionNamer;
+  /** Adds what a person typed to the shared composer history. Never throws. */
+  recordPrompt?: (text: string) => void;
+  followUp?: FollowUpAdvisor;
   /** Every open socket, so the server can count and close them. */
   clients: Set<WebSocket>;
 };
@@ -137,6 +141,9 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
   const unsubscribeNamer = ctx.sessionNamer?.subscribe((agentId, event) => {
     if (subscriptions.has('*')) send({type: 'session_namer_event', agentId, event});
   });
+  const unsubscribeFollowUp = ctx.followUp?.subscribe((agentId, advice) => {
+    if (subscriptions.has('*')) send({type: 'follow_up_advice', agentId, advice});
+  });
   ws.on('close', () => {
     focusRequest++; // A focus still loading is for a socket that no longer exists.
     if (batchTimer) clearTimeout(batchTimer);
@@ -145,6 +152,7 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
     ctx.clients.delete(ws);
     unsubscribeVoice?.();
     unsubscribeNamer?.();
+    unsubscribeFollowUp?.();
     for (const unsubscribe of subscriptions.values()) unsubscribe();
   });
   ws.on('message', raw => {
@@ -177,12 +185,17 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
         if (m.type === 'subscribe_all') {
           subscriptions.get('*')?.();
           // State first: events that follow are then always newer than what the client holds.
-          for (const agent of ctx.agents.list())
+          const agents = ctx.agents.list();
+          for (const agent of agents)
             send({
               type: 'agent_state',
               agentId: agent.agentId,
               state: ctx.agents.snapshotState(agent.agentId)
             });
+          // After every agent_state, which makes a client drop advice it held for that Agent.
+          const known = new Set(agents.map(agent => agent.agentId));
+          for (const [agentId, advice] of ctx.followUp?.all() ?? [])
+            if (known.has(agentId)) send({type: 'follow_up_advice', agentId, advice});
           subscriptions.set(
             '*',
             ctx.agents.subscribeAll((agentId, e) => {
@@ -237,6 +250,7 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
         }
         if (['prompt', 'steer', 'follow-up', 'abort'].includes(m.type)) {
           if (m.type !== 'abort') {
+            ctx.recordPrompt?.(String(m.message ?? ''));
             ctx.voice?.recordUserPrompt(m.agentId, String(m.message ?? ''));
             ctx.sessionNamer?.recordUserPrompt(m.agentId, String(m.message ?? ''));
           }

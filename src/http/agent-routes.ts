@@ -19,6 +19,8 @@ export type AgentRouteContext = {
   sessionNamer?: SessionNamer;
   ensureSessionIndex(workspace: Workspace, cwd: string, force?: boolean): Promise<void>;
   indexAgentSession(agentId: string): Promise<void>;
+  /** Adds what a person typed to the shared composer history. Never throws. */
+  recordPrompt?(text: string): void;
   body(): Promise<any>;
   binaryBody(): Promise<Buffer>;
 };
@@ -194,6 +196,7 @@ export async function handleAgentRoutes(
       if (!command) throw Object.assign(new Error('command is required'), {code: 'INVALID_REQUEST'});
       if (command.length > 8000)
         throw Object.assign(new Error('command is too long'), {code: 'INVALID_REQUEST'});
+      ctx.recordPrompt?.(`${b.excludeFromContext === true ? '!!' : '!'}${command}`);
       const result = await ctx.agents.runBash(id, command, b.excludeFromContext === true);
       ctx.metadata.scheduleAgent(ctx.agents.get(id).record);
       return send(200, {data: result});
@@ -255,6 +258,7 @@ export async function handleAgentRoutes(
     if (req.method === 'POST' && ['prompt', 'steer', 'follow-up', 'abort'].includes(parts[4])) {
       const b = await ctx.body();
       if (parts[4] !== 'abort') {
+        ctx.recordPrompt?.(String(b.message ?? ''));
         ctx.voice?.recordUserPrompt(id, String(b.message ?? ''));
         ctx.sessionNamer?.recordUserPrompt(id, String(b.message ?? ''));
       }

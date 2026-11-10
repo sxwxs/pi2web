@@ -167,6 +167,24 @@ pi2web \
 
 命名失败不会影响 Agent，本次失败会通过 WebSocket 的 `session_namer_event`（`session_name_error`）上报。`GET /api/v1/system/status` 的 `sessionNamingEnabled` 可以确认是否开启。
 
+## 会话结束后的跟进建议
+
+默认关闭，在「配置 → 会话结束后的跟进建议」中开启。设置保存在当前选中 Agent 所属的 Backend（未选中时为主 Backend），对它的所有 Agent 生效。需要一个同时提供两个接口的 OpenAI 兼容服务：
+
+- 判断模型：`POST /v1/decisions`（[OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions)），默认 `gpt-6-luna-decisions`。
+- 草拟模型：`POST /v1/chat/completions`，默认 `gpt-6.1-terra`。
+- 服务地址默认 `http://localhost:8313/`；需要 API key 时用 `--follow-up-api-key-env <环境变量名>` 启动（key 不进数据库，也不能在网页上修改）。
+
+每轮对话正常结束（`agent_settled`）后，取用户本轮输入和 Agent 的最终回复，用一次 Decisions 请求同时问三件事：
+
+1. 接下来是「已完成，无需跟进」、「AI 可以直接继续」（停在半途，或只是在问要不要做它已经提出的下一步）还是「需要你回复」（在方案间做选择、补充信息或权限、处理新的反馈或结果、指出错误或未完成的部分）。
+2. 回答是否完整（显示为「回答完整度」）。
+3. 提示词模板库（Pi 全局 `~/.pi/agent/prompts`，按描述和内容，最多最近修改的 50 个）里哪个最像你下一条要发的消息。
+
+「需要你回复」时，匹配概率不低于 50% 的模板作为建议；都不匹配才调用草拟模型写一条回复（看不出来的信息会用「【待填：…】」占位）。结果显示在输入框上方（可「填入」「发送」或忽略）和会话列表的图标里：✅ 已完成、▶️ 可直接继续、💬 需要你回复、🤔 判断中。**任何建议都不会自动发送**，包括「AI 可以直接继续」。
+
+被取消、安全暂停、以错误结束的运行和协作（`profile=collab`）Agent 不做判断。建议只保存在服务进程内存中，刷新或重连后由 WebSocket（`follow_up_advice`）补发；Agent 开始新一轮、点忽略或关闭功能时撤回。判断或草拟失败只显示在建议栏，不影响 Agent。
+
 ## 本地开发
 
 项目 Review 中发现的问题和修复状态见 [`PROJECT_REVIEW_ISSUES.md`](https://github.com/sxwxs/pi2web/blob/main/PROJECT_REVIEW_ISSUES.md)。
@@ -196,6 +214,7 @@ python scripts/migrate_data_dir.py             # 复制 ~/.pi/remote-pi -> ~/.pi
 - `workspaces`：Workspace ID、名称、根目录和创建时间。
 - `agents`：Agent 与 Workspace/Session 的映射、cwd、状态、创建/最后活动时间以及 Archive 状态。
 - `sessions`：用于 Session 列表、排序和分页的轻量索引，包括名称、文件路径、消息数量、文件 mtime/size 和最后活动时间。
+- `prompt_history`：各客户端发出的输入（最近 500 条），供输入框 `↑`/`↓` 和历史面板使用。
 - `agents.template`：Agent 的 System Prompt 模板快照（JSON）。仅在第一条会话消息前可修改，保存成功后才生效；对话开始后固定，卸载或重启不会改变。
 - `agent-templates/*.md`：可分享的 Agent 模板文件，见下文「System Prompt 与 Agent 模板」。
 - `auth.json`：配对码的 SHA-256 hash、创建和轮换时间；认证数据仍单独保存，不保存配对码明文，文件权限为 `0600`。
@@ -233,6 +252,7 @@ Web 端能力：
 - 工具栏 `MCP` 按钮列出当前 Agent 读取到的 MCP 服务器（来源、传输方式、exposure），可启用/停用；修改写入 `mcp.json`，在 Agent 下次加载时生效。
 - 输入 `/` 浏览并补全当前目录可用的 prompt template 和 skill（由 Pi session 自行展开）。
 - 输入 `!命令` 在 Agent Session 内执行 Shell 并把输出写入上下文，`!!命令` 只执行不写入上下文。
+- 提示词历史与模板，见下文「提示词历史与模板」。
 - Session 命名、Tree Navigate、Undo/Fork、Compact。
 - 模型和 Thinking level 切换。
 - 输入 `@` 浏览并引用 Workspace 文件或目录。
@@ -242,6 +262,13 @@ Web 端能力：
 Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Workspace 路径只决定初始 cwd，并不是安全沙箱；Shell 可以访问 Workspace 之外的文件及继承到的环境变量。获得配对码的人实际上也获得了该用户的 Shell 权限，请勿将服务直接暴露到不可信网络。每个服务进程最多同时运行 8 个 Terminal，每个 Terminal 只保留最近 512 KiB 输出用于浏览器重连。
 
 配对码默认仅保存在当前页面的 JS 内存中；连接成功后会询问是否保存，只有用户确认才写入 localStorage。服务地址、当前 Workspace/Agent 和事件 sequence cursor 会保存在 localStorage。浏览器通知要求 HTTPS 安全上下文（`localhost` 可使用 HTTP）；通过局域网 IP 的 HTTP 地址访问时无法启用。自定义 Pi TUI Component 无法在浏览器通用渲染。
+
+### 提示词历史与模板
+
+- **历史**：发出的 Prompt、Steer、Follow-up 和 `!命令` 由服务端记在 SQLite（`prompt_history`），同一 Backend 的手机、电脑共用。输入框光标在第一行时按 `↑` 翻到更早的输入，在最后一行时按 `↓` 翻回，翻到底恢复未发送的草稿；修改翻出的内容后再按 `↑` 从最新一条重新开始。保留最近 500 条，相同内容只留一条；超过 20000 字的粘贴不记录。
+- **模板**：输入框旁的 📋 打开面板，「模板」页列出 Pi 全局 prompt template（`~/.pi/agent/prompts/*.md`，文件名即 `/命令名`），点一下把内容填进输入框（不会直接发送；输入框已有内容时插在光标处）。「＋ 保存为模板」把当前输入存成模板，可编辑、改名、删除；描述写在 front matter 的 `description`，其他 front matter 字段编辑时保留。模板名不区分大小写（`Review` 与 `review` 是同一个模板，只改大小写不会改名），同名模板不会被静默覆盖。因为存的就是 Pi 的模板文件，Pi CLI 和输入框 `/` 菜单都能用 `/名称` 调用。
+- 模板一律按原文填入；带参数（`$1`、`$@` 等）的模板会提示手动替换占位符。要由 Pi 展开参数，在输入框输入 `/名称 参数`；Pi 只在会话加载时读取模板，所以新建或修改的模板要等会话下次加载后 `/` 菜单和 `/名称` 才是最新内容。
+- 「历史」页可以筛选并点选历史输入，没有方向键的手机也能用。
 
 ### 六键 Session 键盘（WebHID）
 

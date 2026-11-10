@@ -30,6 +30,9 @@ const asTime = (value: string | Date | number | undefined) => {
   return Number.isFinite(time) ? time : Date.now();
 };
 
+export const PROMPT_HISTORY_LIMIT = 500;
+export const PROMPT_HISTORY_MAX_CHARS = 20_000;
+
 const parseTemplate = (value: unknown): AgentTemplateSnapshot | undefined => {
   if (typeof value !== 'string' || !value) return;
   try {
@@ -117,6 +120,12 @@ export class MetadataStore {
         archived_at INTEGER,
         FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL
       );
+      CREATE TABLE IF NOT EXISTS prompt_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT NOT NULL UNIQUE,
+        used_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS prompt_history_recent ON prompt_history(used_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS agents_active_recent ON agents(last_active_at DESC,id DESC) WHERE archived_at IS NULL;
       CREATE INDEX IF NOT EXISTS agents_workspace_active_recent ON agents(workspace_id,last_active_at DESC,id DESC) WHERE archived_at IS NULL;
       CREATE INDEX IF NOT EXISTS sessions_active_recent ON sessions(last_active_at DESC,session_id DESC) WHERE archived_at IS NULL;
@@ -163,6 +172,33 @@ export class MetadataStore {
         'INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at'
       )
       .run(key, JSON.stringify(value), Date.now());
+  }
+  /**
+   * Remember what a person typed into a composer, like a shell history shared by every browser of this
+   * backend. Re-entering a text moves it to the front instead of adding a duplicate. Very long inputs
+   * are pastes rather than something to recall, and are not kept.
+   */
+  recordPrompt(text: string, usedAt = Date.now()) {
+    const value = text.trim();
+    if (!value || value.length > PROMPT_HISTORY_MAX_CHARS) return;
+    const db = this.database;
+    db.transaction(() => {
+      db.prepare(
+        'INSERT INTO prompt_history(text,used_at) VALUES(?,?) ON CONFLICT(text) DO UPDATE SET used_at=excluded.used_at'
+      ).run(value, usedAt);
+      db.prepare(
+        'DELETE FROM prompt_history WHERE id NOT IN (SELECT id FROM prompt_history ORDER BY used_at DESC,id DESC LIMIT ?)'
+      ).run(PROMPT_HISTORY_LIMIT);
+    })();
+  }
+  /** Newest first. */
+  listPromptHistory(limit = PROMPT_HISTORY_LIMIT): {text: string; usedAt: string}[] {
+    const bounded = Math.min(PROMPT_HISTORY_LIMIT, Math.max(1, Math.trunc(limit) || PROMPT_HISTORY_LIMIT));
+    return (
+      this.database
+        .prepare('SELECT text,used_at FROM prompt_history ORDER BY used_at DESC,id DESC LIMIT ?')
+        .all(bounded) as {text: string; used_at: number}[]
+    ).map(row => ({text: row.text, usedAt: new Date(row.used_at).toISOString()}));
   }
   listWorkspaces(): Workspace[] {
     return (

@@ -67,6 +67,24 @@
     commandFiltered: [],
     commandIndex: 0,
     commandRequest: 0,
+    // Composer history of the selected Agent's backend (texts, newest first) and the ↑/↓ position in it.
+    promptHistory: {backendId: null, items: [], request: 0},
+    historyNav: {index: -1, draft: ''},
+    // Server-made follow-up advice of each Agent after its last run; see renderAdviceBar.
+    advice: new Map(),
+    followUpBackendId: null,
+    followUpRequest: 0,
+    // The template / history picker next to the composer.
+    library: {
+      tab: localStorage.rpLibraryTab === 'history' ? 'history' : 'templates',
+      backendId: null,
+      dir: '',
+      templates: [],
+      error: '',
+      request: 0,
+      filtered: [],
+      index: 0
+    },
     agentPageSize: Number(localStorage.rpAgentPageSize || 10),
     agentVisibleCount: Number(localStorage.rpAgentPageSize || 10),
     voiceEnabled: false,
@@ -315,6 +333,7 @@
     state.widgets.clear();
     renderExtensionStatus();
     renderWidgets();
+    renderAdviceBar();
   }
 
   function clearTerminalSelection(backendId) {
@@ -335,6 +354,9 @@
     closeBackendSocket(backend);
     if (state.voiceAudio.backendId === backend.id) stopVoiceAudio();
     backendRegistry.deactivate(backend, status, error);
+    // Its advice comes back with the next subscribe_all.
+    for (const agentId of [...state.advice.keys()])
+      if (splitResourceKey(agentId).backendId === backend.id) state.advice.delete(agentId);
     clearWorkspaceSelection(backend.id);
     clearAgentSelection(backend.id);
     clearTerminalSelection(backend.id);
@@ -925,6 +947,7 @@
     if (!state.workspace) return;
     const request = ++state.mentionRequest;
     state.mentionPath = path;
+    closeLibrary();
     $('mentionPicker').hidden = false;
     $('mentionPath').textContent = absolutePath(path);
     try {
@@ -1024,6 +1047,7 @@
     if (!state.agent) return;
     const agentId = state.agent.agentId,
       request = ++state.commandRequest;
+    closeLibrary();
     $('commandPicker').hidden = false;
     if (state.commandsAgentId !== agentId) {
       state.commands = [];
@@ -1049,6 +1073,228 @@
     $('commandPicker').hidden = true;
     state.commandFiltered = [];
     state.commandIndex = 0;
+  }
+
+  // Prompt library: composer history and Pi prompt templates, both kept by the selected Agent's backend
+  // so every browser of that backend shares them.
+  const promptLibrary = window.PromptLibrary;
+  const libraryBackendId = () =>
+    state.selectedKind === 'agent' && state.agent ? state.agent.backendId : null;
+  async function loadPromptHistory(backendId = libraryBackendId()) {
+    if (!backendId || backendOf(backendId)?.status !== 'connected') return;
+    const request = ++state.promptHistory.request;
+    if (state.promptHistory.backendId !== backendId) state.promptHistory = {backendId, items: [], request};
+    try {
+      const data = await requestBackend(backendId, '/api/v1/prompt-history');
+      if (request !== state.promptHistory.request) return;
+      state.promptHistory.items = (data.items || []).map(item => item.text);
+      if (!$('libraryPicker').hidden && state.library.tab === 'history') renderLibraryItems();
+    } catch (error) {
+      // Backends older than the shared history answer 404; ↑/↓ then simply has nothing to recall.
+      console.warn('Unable to load prompt history', error);
+    }
+  }
+  /** The server records every sent input; mirror it so ↑ recalls it before the next refresh. */
+  function rememberPrompt(text) {
+    const value = text.trim();
+    if (!value || state.promptHistory.backendId !== libraryBackendId()) return;
+    state.promptHistory.items = [value, ...state.promptHistory.items.filter(item => item !== value)];
+  }
+  function resetHistoryNav() {
+    state.historyNav = {index: -1, draft: ''};
+  }
+  async function loadPromptTemplates(backendId = libraryBackendId()) {
+    // Only the selected Agent's backend: the rows' edit and delete buttons act on that backend.
+    if (!backendId || backendId !== libraryBackendId()) return;
+    const request = ++state.library.request;
+    try {
+      const data = await requestBackend(backendId, '/api/v1/prompt-templates');
+      if (request !== state.library.request || backendId !== libraryBackendId()) return;
+      Object.assign(state.library, {
+        backendId,
+        dir: data.dir || '',
+        templates: data.templates || [],
+        error: ''
+      });
+    } catch (error) {
+      if (request !== state.library.request) return;
+      Object.assign(state.library, {backendId, dir: '', templates: [], error: error.message});
+    }
+    if (!$('libraryPicker').hidden) renderLibraryItems();
+  }
+  function setLibraryTab(tab) {
+    state.library.tab = tab === 'history' ? 'history' : 'templates';
+    localStorage.rpLibraryTab = state.library.tab;
+    $('libraryPicker')
+      .querySelectorAll('.library-tabs button')
+      .forEach(button => button.classList.toggle('selected', button.dataset.tab === state.library.tab));
+    $('librarySave').hidden = state.library.tab !== 'templates';
+  }
+  function openLibrary(tab = state.library.tab) {
+    if (!state.agent) return toast('请先创建或选择 Agent');
+    closeCommandPicker();
+    closeMention();
+    setLibraryTab(tab);
+    $('libraryFilter').value = '';
+    $('libraryPicker').hidden = false;
+    if (state.library.backendId !== state.agent.backendId) state.library.templates = [];
+    renderLibraryItems();
+    void loadPromptTemplates();
+    void loadPromptHistory();
+    // On a phone, focusing the filter would cover the list with the keyboard.
+    if (!isMobile()) $('libraryFilter').focus();
+  }
+  function closeLibrary() {
+    $('libraryPicker').hidden = true;
+  }
+  function setLibrarySelection(index) {
+    const count = state.library.filtered.length;
+    state.library.index = count ? (index + count) % count : 0;
+    $('libraryItems')
+      .querySelectorAll('.library-item')
+      .forEach((element, i) => element.classList.toggle('selected', i === state.library.index));
+    $('libraryItems').querySelector('.library-item.selected')?.scrollIntoView({block: 'nearest'});
+  }
+  function renderLibraryItems() {
+    const query = $('libraryFilter').value,
+      templates = state.library.tab === 'templates',
+      items = templates
+        ? state.library.templates.filter(t => promptLibrary.matches(query, t.name, t.description, t.content))
+        : state.promptHistory.items.filter(text => promptLibrary.matches(query, text));
+    state.library.filtered = items;
+    state.library.index = 0;
+    $('libraryNote').textContent = templates
+      ? state.library.error
+        ? `无法读取模板：${state.library.error}（Backend 可能版本过旧）`
+        : `Pi 全局 prompt template${state.library.dir ? ` · ${state.library.dir}` : ''}；Pi CLI 中也可用 /名称 调用`
+      : `最近 ${state.promptHistory.items.length} 条，该 Backend 的所有设备共享；输入框中按 ↑/↓ 也可翻看`;
+    if (!items.length) {
+      const empty = el('div', {
+        className: 'picker-empty muted',
+        textContent: query.trim()
+          ? '没有匹配的内容'
+          : templates
+            ? '还没有模板：在输入框写好提示词后点「＋ 保存为模板」'
+            : '还没有历史记录'
+      });
+      $('libraryItems').replaceChildren(empty);
+      return;
+    }
+    $('libraryItems').replaceChildren(
+      ...items.map((item, index) => {
+        const row = el('div', {className: `picker-item library-item${index === 0 ? ' selected' : ''}`});
+        if (templates) {
+          const summary = item.description || item.content.split('\n').find(line => line.trim()) || '';
+          const edit = el('button', {type: 'button', textContent: '✎', title: '编辑模板'}),
+            remove = el('button', {type: 'button', textContent: '🗑', title: '删除模板'});
+          edit.onclick = event => {
+            event.stopPropagation();
+            void editPromptTemplate(item);
+          };
+          remove.onclick = event => {
+            event.stopPropagation();
+            void deletePromptTemplate(item);
+          };
+          row.append(
+            el(
+              'div',
+              {className: 'library-main'},
+              el('b', {textContent: `/${item.name}${item.argumentHint ? ` ${item.argumentHint}` : ''}`}),
+              el('small', {className: 'muted', textContent: summary})
+            ),
+            el('span', {className: 'library-actions'}, edit, remove)
+          );
+          row.title = item.content;
+        } else row.append(el('span', {className: 'library-text', textContent: item, title: item}));
+        row.onmouseenter = () => setLibrarySelection(index);
+        row.onclick = () => chooseLibraryItem(item);
+        return row;
+      })
+    );
+  }
+  /** Put text into the composer without losing what is already typed there. */
+  function putInComposer(text) {
+    const input = $('input'),
+      result = promptLibrary.insertText(input.value, input.selectionStart, input.selectionEnd, text);
+    input.value = result.value;
+    resetHistoryNav();
+    input.focus();
+    input.setSelectionRange(result.caret, result.caret);
+  }
+  /** History entries and templates both go in as text; a template's $1/$@ are left for the person to replace. */
+  function chooseLibraryItem(item) {
+    if (item === undefined) return;
+    closeLibrary();
+    if (typeof item === 'string') return putInComposer(item);
+    putInComposer(item.content);
+    if (promptLibrary.usesArguments(item.content))
+      toast('模板含 $1 等参数占位符，请手动替换；也可以输入 /名称 参数 由 Pi 展开');
+  }
+  async function editPromptTemplate(template = null, initialContent = '') {
+    const backendId = libraryBackendId();
+    if (!backendId) return toast('请先选择 Agent');
+    const result = await modal(
+      template ? `编辑模板 /${template.name}` : '保存为提示词模板',
+      body => {
+        const name = field(body, '名称（即 /命令名，不含空格）', template?.name || ''),
+          description = field(
+            body,
+            '描述（可选；自动跟进判断是否匹配模板时主要看它）',
+            template?.description || ''
+          ),
+          area = el('textarea', {className: 'prompt-editor', value: template?.content ?? initialContent});
+        body.append(
+          el('label', {textContent: '内容'}, area),
+          el('small', {
+            className: 'muted',
+            textContent: `保存为 ${state.library.dir || '~/.pi/agent/prompts'}/<名称>.md。新模板在这里立即可用；/ 命令在会话下次加载后可用。`
+          })
+        );
+        if (!template) setTimeout(() => name.focus());
+        return () => ({name: name.value.trim(), description: description.value.trim(), content: area.value});
+      },
+      '保存'
+    );
+    if (!result) return;
+    if (!result.name || /[\s\\/:*?"<>|]/.test(result.name) || result.name.startsWith('.'))
+      return toast('名称不能为空，不能以 . 开头，不能包含空格或 \\ / : * ? " < > |');
+    if (!result.content.trim()) return toast('模板内容不能为空');
+    const save = overwrite =>
+      requestBackend(backendId, `/api/v1/prompt-templates/${encodeURIComponent(result.name)}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          description: result.description,
+          content: result.content,
+          editing: template?.name,
+          overwrite
+        })
+      });
+    try {
+      try {
+        await save(false);
+      } catch (error) {
+        if (error.status !== 409) throw error;
+        if (!confirm(`模板 /${result.name} 已存在，覆盖它？`)) return;
+        await save(true);
+      }
+      toast(`模板 /${result.name} 已保存`);
+      await loadPromptTemplates(backendId);
+    } catch (error) {
+      toast(`保存模板失败：${error.message}`);
+    }
+  }
+  async function deletePromptTemplate(template) {
+    const backendId = libraryBackendId();
+    if (!backendId || !confirm(`删除模板 /${template.name}？文件会从 Pi 的 prompts 目录中删除。`)) return;
+    try {
+      await requestBackend(backendId, `/api/v1/prompt-templates/${encodeURIComponent(template.name)}`, {
+        method: 'DELETE'
+      });
+      toast(`模板 /${template.name} 已删除`);
+      await loadPromptTemplates(backendId);
+    } catch (error) {
+      toast(`删除失败：${error.message}`);
+    }
   }
 
   function agentName(agent) {
@@ -1213,6 +1459,15 @@
             tag.textContent = item.template.name || item.template.id;
             tag.title = `System Prompt 模板：${item.template.name || item.template.id}（${templateModeText(item.template.mode)}，创建时固定）`;
             el.querySelector('.agent-top').append(tag);
+          }
+          const advice = state.advice.get(item.agentId);
+          if (advice) {
+            const [icon, label] = adviceSummary(advice),
+              mark = document.createElement('span');
+            mark.className = `advice-mark advice-${advice.state === 'ready' ? advice.outcome : advice.state}`;
+            mark.textContent = icon;
+            mark.title = `跟进建议：${label}`;
+            el.querySelector('.agent-top b').after(mark);
           }
           const activityLine = activityView.line(state.activities.get(item.agentId), item.backendId);
           if (activityLine) el.querySelector('small').after(activityLine);
@@ -1641,9 +1896,12 @@
       $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
     $('messages').replaceChildren();
     closeCommandPicker();
+    closeLibrary();
+    if (state.promptHistory.backendId !== agent.backendId) void loadPromptHistory(agent.backendId);
     state.commands = [];
     state.commandsAgentId = null;
     renderQueueBar();
+    renderAdviceBar();
     try {
       loadTimeline(agent);
       await loadSessionIdentity();
@@ -2366,6 +2624,97 @@
     }
     bar.hidden = false;
   }
+  // Follow-up advice: what the server's decision model thinks should happen after a run settled.
+  const ADVICE_OUTCOMES = {
+    done: ['✅', '已完成，无需跟进'],
+    continue: ['▶️', 'AI 可以直接继续'],
+    needs_user: ['💬', '需要你回复']
+  };
+  const percent = value => `${Math.round(Number(value) * 100)}%`;
+  /** Icon and one-line description of an advice, for the bar and the session list. */
+  function adviceSummary(advice) {
+    if (advice.state === 'analyzing') return ['🤔', '正在判断是否需要跟进…'];
+    if (advice.state === 'error') return ['⚠️', advice.error || '跟进判断失败'];
+    return ADVICE_OUTCOMES[advice.outcome] || ['❔', advice.outcome];
+  }
+  function setAgentAdvice(agentId, advice) {
+    if (advice) state.advice.set(agentId, advice);
+    else if (!state.advice.delete(agentId)) return;
+    renderAgentList();
+    if (state.agent?.agentId === agentId) renderAdviceBar();
+  }
+  async function dismissAdvice(agentId) {
+    setAgentAdvice(agentId, null);
+    try {
+      await requestAgent(agentId, '/follow-up-advice', {method: 'DELETE'});
+    } catch (error) {
+      console.warn('Unable to dismiss follow-up advice', error);
+    }
+  }
+  /** Fill the composer with a suggestion; send it only when the composer had nothing of its own. */
+  function useSuggestion(text, send) {
+    const empty = !$('input').value.trim();
+    putInComposer(text);
+    if (!send) return;
+    if (empty) $('prompt').requestSubmit();
+    else toast('输入框里已有内容：建议已插入，请确认后发送');
+  }
+  function renderAdviceBar() {
+    const bar = $('adviceBar'),
+      agent = state.selectedKind === 'agent' ? state.agent : null,
+      advice = agent && state.advice.get(agent.agentId);
+    if (!advice) {
+      bar.hidden = true;
+      bar.replaceChildren();
+      return;
+    }
+    const agentId = agent.agentId,
+      [icon, label] = adviceSummary(advice),
+      meta = [];
+    if (advice.state === 'ready') {
+      if (Number.isFinite(advice.probability)) meta.push(`把握 ${percent(advice.probability)}`);
+      if (Number.isFinite(advice.complete)) meta.push(`回答完整度 ${percent(advice.complete)}`);
+    }
+    const button = (text, onclick, title = '') =>
+      el('button', {type: 'button', textContent: text, title, onclick});
+    const head = el(
+      'div',
+      {className: 'advice-head'},
+      el('b', {textContent: `${icon} ${label}`}),
+      el('small', {textContent: meta.join(' · ')})
+    );
+    const actions = el('span', {className: 'advice-actions'});
+    if (advice.state === 'ready' && advice.outcome === 'continue')
+      actions.append(
+        button('填入「继续」', () => useSuggestion('继续', false)),
+        button('发送「继续」', () => useSuggestion('继续', true))
+      );
+    const suggestion = advice.suggestion;
+    if (suggestion) {
+      // A template with $1/$@ placeholders needs editing before it can be sent.
+      const sendable = !(suggestion.source === 'template' && promptLibrary.usesArguments(suggestion.text));
+      actions.append(button('填入', () => useSuggestion(suggestion.text, false)));
+      if (sendable) actions.append(button('发送', () => useSuggestion(suggestion.text, true)));
+    }
+    actions.append(button('×', () => void dismissAdvice(agentId), '忽略这条建议'));
+    head.append(actions);
+    const nodes = [head];
+    if (suggestion) {
+      const source =
+        suggestion.source === 'template'
+          ? `匹配模板 /${suggestion.name}（${percent(suggestion.probability)}）`
+          : `草拟回复 · ${suggestion.model}`;
+      nodes.push(
+        el('small', {className: 'advice-source', textContent: source}),
+        el('div', {className: 'advice-text', textContent: suggestion.text, title: suggestion.text})
+      );
+    }
+    if (advice.state === 'ready' && advice.error)
+      nodes.push(el('small', {className: 'advice-error', textContent: advice.error}));
+    bar.className = `advice-${advice.state === 'ready' ? advice.outcome : advice.state}`;
+    bar.replaceChildren(...nodes);
+    bar.hidden = false;
+  }
   function restoreExtensionRequests(agentId, activity) {
     if (state.selectedKind !== 'agent' || state.agent?.agentId !== agentId || !activity?.dialogRequests)
       return;
@@ -2840,7 +3189,13 @@
         backend.clockOffset = message.serverTime - Date.now();
       return;
     }
+    if (message.type === 'follow_up_advice') {
+      setAgentAdvice(message.agentId, message.advice || null);
+      return;
+    }
     if (message.type === 'agent_state') {
+      // subscribe_all resends every current advice right after the states.
+      setAgentAdvice(message.agentId, null);
       sessionKeyboard.updateAgent({...message.state, agentId: message.agentId});
       setAgentStatus(message.agentId, message.state.status);
       setAgentQueue(message.agentId, message.state.activity?.queue);
@@ -3225,6 +3580,63 @@
       $('saveSotto').disabled = !backendOf(backendId);
     }
   }
+  /** Follow-up settings belong to a backend: the selected Agent's, otherwise the primary one. */
+  function followUpConfigBackend() {
+    const selected = backendOf(libraryBackendId());
+    return selected?.status === 'connected' ? selected : primaryBackend();
+  }
+  function fillFollowUpForm(settings) {
+    $('followUpEnabled').checked = !!settings.enabled;
+    $('followUpBaseUrl').value = settings.baseUrl || '';
+    $('followUpDecisionModel').value = settings.decisionModel || '';
+    $('followUpDraftModel').value = settings.draftModel || '';
+  }
+  async function loadFollowUpSettings() {
+    const backend = followUpConfigBackend(),
+      request = ++state.followUpRequest;
+    state.followUpBackendId = null;
+    $('saveFollowUp').disabled = true;
+    if (!backend) {
+      $('followUpStatus').textContent = '连接 Backend 后可以配置跟进建议。';
+      return;
+    }
+    $('followUpStatus').textContent = `正在读取「${backend.name}」的跟进建议设置…`;
+    try {
+      const data = await requestBackend(backend.id, '/api/v1/follow-up-advisor');
+      if (request !== state.followUpRequest || !$('configDialog').open) return;
+      state.followUpBackendId = backend.id;
+      fillFollowUpForm(data.settings);
+      $('saveFollowUp').disabled = false;
+      $('followUpStatus').textContent = `设置保存在 Backend「${backend.name}」，对它的所有 Agent 生效${
+        data.apiKeyConfigured ? '；已通过 --follow-up-api-key-env 配置 API key' : ''
+      }。`;
+    } catch (error) {
+      if (request === state.followUpRequest)
+        $('followUpStatus').textContent = `读取失败：${error.message}（Backend 可能版本过旧）`;
+    }
+  }
+  async function saveFollowUpSettings() {
+    const backendId = state.followUpBackendId;
+    if (!backendId) return toast('请先连接 Backend 并读取设置');
+    $('saveFollowUp').disabled = true;
+    try {
+      const data = await requestBackend(backendId, '/api/v1/follow-up-advisor', {
+        method: 'PUT',
+        body: JSON.stringify({
+          enabled: $('followUpEnabled').checked,
+          baseUrl: $('followUpBaseUrl').value.trim(),
+          decisionModel: $('followUpDecisionModel').value.trim(),
+          draftModel: $('followUpDraftModel').value.trim()
+        })
+      });
+      // The form keeps what was typed: by now it may show another backend, which a late reply must not overwrite.
+      toast(data.settings.enabled ? '跟进建议已启用' : '跟进建议已关闭');
+    } catch (error) {
+      toast(`保存跟进设置失败：${error.message}`);
+    } finally {
+      $('saveFollowUp').disabled = !backendOf(backendId);
+    }
+  }
   function updateConfigUi() {
     const connected = connectedBackends().length;
     $('configConnectionStatus').textContent = connected ? `已连接 ${connected} 个 backend` : '当前未配对';
@@ -3240,6 +3652,7 @@
     renderKeyboardBindings();
     if (!$('configDialog').open) $('configDialog').showModal();
     void loadSottoSettings();
+    void loadFollowUpSettings();
   }
 
   async function saveMailSettings() {
@@ -4207,6 +4620,7 @@
   $('configClose').onclick = () => $('configDialog').close();
   $('configSave').onclick = saveMailSettings;
   $('saveSotto').onclick = saveSottoSettings;
+  $('saveFollowUp').onclick = () => void saveFollowUpSettings();
   $('connect').onclick = () => openPair();
   $('keyboardConnect').onclick = async () => {
     try {
@@ -4417,6 +4831,9 @@
     const text = $('input').value.trim();
     if (!text) return;
     closeCommandPicker();
+    closeLibrary();
+    rememberPrompt(text);
+    resetHistoryNav();
     const selectedMode = $('sendMode').value,
       mode =
         state.agent.status === 'streaming' || state.agent.status === 'waiting_for_user'
@@ -4522,12 +4939,47 @@
         return;
       }
     }
+    if (event.key === 'Escape' && !$('libraryPicker').hidden) {
+      event.preventDefault();
+      closeLibrary();
+      return;
+    }
+    // Shell-like history: ↑ on the first line recalls older inputs, ↓ on the last line newer ones.
+    if (
+      (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      !event.isComposing
+    ) {
+      const input = $('input'),
+        step = promptLibrary.historyStep(
+          {
+            items: state.promptHistory.backendId === libraryBackendId() ? state.promptHistory.items : [],
+            nav: state.historyNav,
+            value: input.value,
+            selectionStart: input.selectionStart,
+            selectionEnd: input.selectionEnd
+          },
+          event.key === 'ArrowUp' ? 'up' : 'down'
+        );
+      if (step) {
+        event.preventDefault();
+        state.historyNav = step.nav;
+        input.value = step.value;
+        input.setSelectionRange(step.caret, step.caret);
+        return;
+      }
+    }
     if (isSendKey(event, state.enterSendMode)) {
       event.preventDefault();
       $('prompt').requestSubmit();
     }
   };
   $('input').oninput = () => {
+    // Editing a recalled entry makes it the new draft; the next ↑ starts again from the newest entry.
+    resetHistoryNav();
     const command = commandContext();
     if (command) {
       if (!$('mentionPicker').hidden) closeMention();
@@ -4579,6 +5031,36 @@
     }
   };
   $('commandClose').onclick = closeCommandPicker;
+  $('libraryToggle').onclick = () => ($('libraryPicker').hidden ? openLibrary() : closeLibrary());
+  $('libraryClose').onclick = () => {
+    closeLibrary();
+    $('input').focus();
+  };
+  $('librarySave').onclick = () => void editPromptTemplate(null, $('input').value.trim());
+  $('libraryPicker')
+    .querySelectorAll('.library-tabs button')
+    .forEach(button => {
+      button.onclick = () => {
+        setLibraryTab(button.dataset.tab);
+        renderLibraryItems();
+      };
+    });
+  $('libraryFilter').oninput = () => renderLibraryItems();
+  $('libraryFilter').onkeydown = event => {
+    if (event.isComposing) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      setLibrarySelection(state.library.index + (event.key === 'ArrowDown' ? 1 : -1));
+    } else if (event.key === 'Enter') {
+      // The picker sits inside the composer form: Enter must choose, never submit the prompt.
+      event.preventDefault();
+      chooseLibraryItem(state.library.filtered[state.library.index]);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeLibrary();
+      $('input').focus();
+    }
+  };
   $('mentionUp').onclick = () => browseMention(parentPath(state.mentionPath));
   $('mentionClose').onclick = closeMention;
   $('workspaceBack').onclick = () => mobileBack('home');
@@ -4607,6 +5089,11 @@
     stopVoiceAudio();
   });
   window.addEventListener('focus', updateNotificationButton);
+  // Another device of the same backend may have sent something since. Not while ↑/↓ browses the list:
+  // a shifted list would make the recalled entry look edited and lose the saved draft.
+  window.addEventListener('focus', () => {
+    if (state.historyNav.index < 0) void loadPromptHistory();
+  });
   setMobileView('home', {replace: true});
   updateConfigUi();
   updateKeyboardUi();
