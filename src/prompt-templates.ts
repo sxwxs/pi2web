@@ -66,8 +66,11 @@ export class PromptTemplateStore {
   private find(name: string) {
     this.fileFor(name);
     const dir = this.dir,
+      entries = existsSync(dir) ? readdirSync(dir) : [],
       wanted = `${name}.md`.toLowerCase(),
-      entry = existsSync(dir) ? readdirSync(dir).find(file => file.toLowerCase() === wanted) : undefined;
+      // An exact match first: a case-sensitive file system can hold `Review.md` and `review.md` side by side.
+      entry =
+        entries.find(file => file === `${name}.md`) ?? entries.find(file => file.toLowerCase() === wanted);
     return entry ? path.join(dir, entry) : undefined;
   }
   private parse(file: string) {

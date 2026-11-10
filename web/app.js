@@ -1897,7 +1897,6 @@
     $('messages').replaceChildren();
     closeCommandPicker();
     closeLibrary();
-    resetHistoryNav();
     if (state.promptHistory.backendId !== agent.backendId) void loadPromptHistory(agent.backendId);
     state.commands = [];
     state.commandsAgentId = null;
@@ -5090,8 +5089,11 @@
     stopVoiceAudio();
   });
   window.addEventListener('focus', updateNotificationButton);
-  // Another device of the same backend may have sent something since.
-  window.addEventListener('focus', () => void loadPromptHistory());
+  // Another device of the same backend may have sent something since. Not while ↑/↓ browses the list:
+  // a shifted list would make the recalled entry look edited and lose the saved draft.
+  window.addEventListener('focus', () => {
+    if (state.historyNav.index < 0) void loadPromptHistory();
+  });
   setMobileView('home', {replace: true});
   updateConfigUi();
   updateKeyboardUi();
