@@ -12,6 +12,8 @@ export type AgentSocketContext = {
   collab: CollabHub;
   voice?: VoiceManager;
   sessionNamer?: SessionNamer;
+  /** Adds what a person typed to the shared composer history. Never throws. */
+  recordPrompt?: (text: string) => void;
   /** Every open socket, so the server can count and close them. */
   clients: Set<WebSocket>;
 };
@@ -237,6 +239,7 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
         }
         if (['prompt', 'steer', 'follow-up', 'abort'].includes(m.type)) {
           if (m.type !== 'abort') {
+            ctx.recordPrompt?.(String(m.message ?? ''));
             ctx.voice?.recordUserPrompt(m.agentId, String(m.message ?? ''));
             ctx.sessionNamer?.recordUserPrompt(m.agentId, String(m.message ?? ''));
           }

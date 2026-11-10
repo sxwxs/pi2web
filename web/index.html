@@ -67,10 +67,12 @@
       <div id="activityBar" hidden></div>
       <div id="queueBar" hidden><span id="queueText"></span><div id="queueItems"></div><button type="button" id="queueClear" title="清空队列并把消息放回输入框">清空队列</button></div>
       <div id="mentionPicker" hidden><div class="picker-head"><button type="button" id="mentionUp">↑</button><b id="mentionPath">.</b><button type="button" id="mentionClose">×</button></div><div id="mentionItems"></div></div>
+      <div id="libraryPicker" hidden><div class="picker-head"><div class="library-tabs" role="tablist"><button type="button" role="tab" data-tab="templates">模板</button><button type="button" role="tab" data-tab="history">历史</button></div><input id="libraryFilter" type="search" placeholder="筛选" aria-label="筛选"><button type="button" id="librarySave" title="把输入框中的内容保存为 Pi prompt template">＋ 保存为模板</button><button type="button" id="libraryClose">×</button></div><small id="libraryNote" class="muted"></small><div id="libraryItems"></div></div>
       <div id="commandPicker" hidden><div class="picker-head"><b>命令 · prompt template / skill</b><button type="button" id="commandClose">×</button></div><div id="commandItems"></div></div>
       <div class="composer-row">
         <select id="sendMode" title="发送方式"><option value="prompt">Prompt</option><option value="steer">Steer</option><option value="follow-up">Follow-up</option></select>
         <textarea id="input" placeholder="输入 @ 引用文件，/ 使用命令，! 执行 Shell；Ctrl/⌘+Enter 发送"></textarea>
+        <button id="libraryToggle" type="button" title="提示词模板与历史（↑/↓ 也可翻看历史）" aria-label="提示词模板与历史">📋</button>
         <button id="voiceInput" type="button" title="开始语音输入" hidden>🎙</button>
         <button type="submit">发送</button>
       </div>
@@ -88,6 +90,7 @@
 <script src="/hid-keyboard.js"></script>
 <script src="/activity-view.js"></script>
 <script src="/backend-state.js"></script>
+<script src="/prompt-library.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

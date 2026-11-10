@@ -196,6 +196,7 @@ python scripts/migrate_data_dir.py             # 复制 ~/.pi/remote-pi -> ~/.pi
 - `workspaces`：Workspace ID、名称、根目录和创建时间。
 - `agents`：Agent 与 Workspace/Session 的映射、cwd、状态、创建/最后活动时间以及 Archive 状态。
 - `sessions`：用于 Session 列表、排序和分页的轻量索引，包括名称、文件路径、消息数量、文件 mtime/size 和最后活动时间。
+- `prompt_history`：各客户端发出的输入（最近 500 条），供输入框 `↑`/`↓` 和历史面板使用。
 - `agents.template`：Agent 的 System Prompt 模板快照（JSON）。仅在第一条会话消息前可修改，保存成功后才生效；对话开始后固定，卸载或重启不会改变。
 - `agent-templates/*.md`：可分享的 Agent 模板文件，见下文「System Prompt 与 Agent 模板」。
 - `auth.json`：配对码的 SHA-256 hash、创建和轮换时间；认证数据仍单独保存，不保存配对码明文，文件权限为 `0600`。
@@ -233,6 +234,7 @@ Web 端能力：
 - 工具栏 `MCP` 按钮列出当前 Agent 读取到的 MCP 服务器（来源、传输方式、exposure），可启用/停用；修改写入 `mcp.json`，在 Agent 下次加载时生效。
 - 输入 `/` 浏览并补全当前目录可用的 prompt template 和 skill（由 Pi session 自行展开）。
 - 输入 `!命令` 在 Agent Session 内执行 Shell 并把输出写入上下文，`!!命令` 只执行不写入上下文。
+- 提示词历史与模板，见下文「提示词历史与模板」。
 - Session 命名、Tree Navigate、Undo/Fork、Compact。
 - 模型和 Thinking level 切换。
 - 输入 `@` 浏览并引用 Workspace 文件或目录。
@@ -242,6 +244,13 @@ Web 端能力：
 Terminal 是以 Remote Pi 进程用户身份运行的完整宿主机 Shell。Workspace 路径只决定初始 cwd，并不是安全沙箱；Shell 可以访问 Workspace 之外的文件及继承到的环境变量。获得配对码的人实际上也获得了该用户的 Shell 权限，请勿将服务直接暴露到不可信网络。每个服务进程最多同时运行 8 个 Terminal，每个 Terminal 只保留最近 512 KiB 输出用于浏览器重连。
 
 配对码默认仅保存在当前页面的 JS 内存中；连接成功后会询问是否保存，只有用户确认才写入 localStorage。服务地址、当前 Workspace/Agent 和事件 sequence cursor 会保存在 localStorage。浏览器通知要求 HTTPS 安全上下文（`localhost` 可使用 HTTP）；通过局域网 IP 的 HTTP 地址访问时无法启用。自定义 Pi TUI Component 无法在浏览器通用渲染。
+
+### 提示词历史与模板
+
+- **历史**：发出的 Prompt、Steer、Follow-up 和 `!命令` 由服务端记在 SQLite（`prompt_history`），同一 Backend 的手机、电脑共用。输入框光标在第一行时按 `↑` 翻到更早的输入，在最后一行时按 `↓` 翻回，翻到底恢复未发送的草稿；修改翻出的内容后再按 `↑` 从最新一条重新开始。保留最近 500 条，相同内容只留一条；超过 20000 字的粘贴不记录。
+- **模板**：输入框旁的 📋 打开面板，「模板」页列出 Pi 全局 prompt template（`~/.pi/agent/prompts/*.md`，文件名即 `/命令名`），点一下把内容填进输入框（不会直接发送；输入框已有内容时插在光标处）。「＋ 保存为模板」把当前输入存成模板，可编辑、改名、删除；描述写在 front matter 的 `description`，其他 front matter 字段编辑时保留。同名模板不会被静默覆盖。因为存的就是 Pi 的模板文件，Pi CLI 和输入框 `/` 菜单都能用 `/名称` 调用。
+- 带参数（`$1`、`$@` 等）的模板在空输入框中填入 `/名称 `，由 Pi 展开；Pi 只在会话加载时读取模板，所以刚新建的模板在已加载的会话里会改为插入原文，`/` 菜单也要等会话下次加载才出现。
+- 「历史」页可以筛选并点选历史输入，没有方向键的手机也能用。
 
 ### 六键 Session 键盘（WebHID）
 

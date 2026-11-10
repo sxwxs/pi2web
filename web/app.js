@@ -67,6 +67,20 @@
     commandFiltered: [],
     commandIndex: 0,
     commandRequest: 0,
+    // Composer history of the selected Agent's backend (texts, newest first) and the ↑/↓ position in it.
+    promptHistory: {backendId: null, items: [], request: 0},
+    historyNav: {index: -1, draft: ''},
+    // The template / history picker next to the composer.
+    library: {
+      tab: localStorage.rpLibraryTab === 'history' ? 'history' : 'templates',
+      backendId: null,
+      dir: '',
+      templates: [],
+      error: '',
+      request: 0,
+      filtered: [],
+      index: 0
+    },
     agentPageSize: Number(localStorage.rpAgentPageSize || 10),
     agentVisibleCount: Number(localStorage.rpAgentPageSize || 10),
     voiceEnabled: false,
@@ -925,6 +939,7 @@
     if (!state.workspace) return;
     const request = ++state.mentionRequest;
     state.mentionPath = path;
+    closeLibrary();
     $('mentionPicker').hidden = false;
     $('mentionPath').textContent = absolutePath(path);
     try {
@@ -1024,6 +1039,7 @@
     if (!state.agent) return;
     const agentId = state.agent.agentId,
       request = ++state.commandRequest;
+    closeLibrary();
     $('commandPicker').hidden = false;
     if (state.commandsAgentId !== agentId) {
       state.commands = [];
@@ -1049,6 +1065,233 @@
     $('commandPicker').hidden = true;
     state.commandFiltered = [];
     state.commandIndex = 0;
+  }
+
+  // Prompt library: composer history and Pi prompt templates, both kept by the selected Agent's backend
+  // so every browser of that backend shares them.
+  const promptLibrary = window.PromptLibrary;
+  const libraryBackendId = () =>
+    state.selectedKind === 'agent' && state.agent ? state.agent.backendId : null;
+  async function loadPromptHistory(backendId = libraryBackendId()) {
+    if (!backendId || backendOf(backendId)?.status !== 'connected') return;
+    const request = ++state.promptHistory.request;
+    if (state.promptHistory.backendId !== backendId) state.promptHistory = {backendId, items: [], request};
+    try {
+      const data = await requestBackend(backendId, '/api/v1/prompt-history');
+      if (request !== state.promptHistory.request) return;
+      state.promptHistory.items = (data.items || []).map(item => item.text);
+      if (!$('libraryPicker').hidden && state.library.tab === 'history') renderLibraryItems();
+    } catch (error) {
+      // Backends older than the shared history answer 404; ↑/↓ then simply has nothing to recall.
+      console.warn('Unable to load prompt history', error);
+    }
+  }
+  /** The server records every sent input; mirror it so ↑ recalls it before the next refresh. */
+  function rememberPrompt(text) {
+    const value = text.trim();
+    if (!value || state.promptHistory.backendId !== libraryBackendId()) return;
+    state.promptHistory.items = [value, ...state.promptHistory.items.filter(item => item !== value)];
+  }
+  function resetHistoryNav() {
+    state.historyNav = {index: -1, draft: ''};
+  }
+  async function loadPromptTemplates(backendId = libraryBackendId()) {
+    if (!backendId) return;
+    const request = ++state.library.request;
+    try {
+      const data = await requestBackend(backendId, '/api/v1/prompt-templates');
+      if (request !== state.library.request) return;
+      Object.assign(state.library, {
+        backendId,
+        dir: data.dir || '',
+        templates: data.templates || [],
+        error: ''
+      });
+    } catch (error) {
+      if (request !== state.library.request) return;
+      Object.assign(state.library, {backendId, dir: '', templates: [], error: error.message});
+    }
+    if (!$('libraryPicker').hidden) renderLibraryItems();
+  }
+  function setLibraryTab(tab) {
+    state.library.tab = tab === 'history' ? 'history' : 'templates';
+    localStorage.rpLibraryTab = state.library.tab;
+    $('libraryPicker')
+      .querySelectorAll('.library-tabs button')
+      .forEach(button => button.classList.toggle('selected', button.dataset.tab === state.library.tab));
+    $('librarySave').hidden = state.library.tab !== 'templates';
+  }
+  function openLibrary(tab = state.library.tab) {
+    if (!state.agent) return toast('请先创建或选择 Agent');
+    closeCommandPicker();
+    closeMention();
+    setLibraryTab(tab);
+    $('libraryFilter').value = '';
+    $('libraryPicker').hidden = false;
+    if (state.library.backendId !== state.agent.backendId) state.library.templates = [];
+    renderLibraryItems();
+    void loadPromptTemplates();
+    void loadPromptHistory();
+    // On a phone, focusing the filter would cover the list with the keyboard.
+    if (!isMobile()) $('libraryFilter').focus();
+  }
+  function closeLibrary() {
+    $('libraryPicker').hidden = true;
+  }
+  function setLibrarySelection(index) {
+    const count = state.library.filtered.length;
+    state.library.index = count ? (index + count) % count : 0;
+    $('libraryItems')
+      .querySelectorAll('.library-item')
+      .forEach((element, i) => element.classList.toggle('selected', i === state.library.index));
+    $('libraryItems').querySelector('.library-item.selected')?.scrollIntoView({block: 'nearest'});
+  }
+  function renderLibraryItems() {
+    const query = $('libraryFilter').value,
+      templates = state.library.tab === 'templates',
+      items = templates
+        ? state.library.templates.filter(t => promptLibrary.matches(query, t.name, t.description, t.content))
+        : state.promptHistory.items.filter(text => promptLibrary.matches(query, text));
+    state.library.filtered = items;
+    state.library.index = 0;
+    $('libraryNote').textContent = templates
+      ? state.library.error
+        ? `无法读取模板：${state.library.error}（Backend 可能版本过旧）`
+        : `Pi 全局 prompt template${state.library.dir ? ` · ${state.library.dir}` : ''}；Pi CLI 中也可用 /名称 调用`
+      : `最近 ${state.promptHistory.items.length} 条，该 Backend 的所有设备共享；输入框中按 ↑/↓ 也可翻看`;
+    if (!items.length) {
+      const empty = el('div', {
+        className: 'picker-empty muted',
+        textContent: query.trim()
+          ? '没有匹配的内容'
+          : templates
+            ? '还没有模板：在输入框写好提示词后点「＋ 保存为模板」'
+            : '还没有历史记录'
+      });
+      $('libraryItems').replaceChildren(empty);
+      return;
+    }
+    $('libraryItems').replaceChildren(
+      ...items.map((item, index) => {
+        const row = el('div', {className: `picker-item library-item${index === 0 ? ' selected' : ''}`});
+        if (templates) {
+          const summary = item.description || item.content.split('\n').find(line => line.trim()) || '';
+          const edit = el('button', {type: 'button', textContent: '✎', title: '编辑模板'}),
+            remove = el('button', {type: 'button', textContent: '🗑', title: '删除模板'});
+          edit.onclick = event => {
+            event.stopPropagation();
+            void editPromptTemplate(item);
+          };
+          remove.onclick = event => {
+            event.stopPropagation();
+            void deletePromptTemplate(item);
+          };
+          row.append(
+            el(
+              'div',
+              {className: 'library-main'},
+              el('b', {textContent: `/${item.name}${item.argumentHint ? ` ${item.argumentHint}` : ''}`}),
+              el('small', {className: 'muted', textContent: summary})
+            ),
+            el('span', {className: 'library-actions'}, edit, remove)
+          );
+          row.title = item.content;
+        } else row.append(el('span', {className: 'library-text', textContent: item, title: item}));
+        row.onmouseenter = () => setLibrarySelection(index);
+        row.onclick = () => void chooseLibraryItem(item);
+        return row;
+      })
+    );
+  }
+  /** Put text into the composer without losing what is already typed there. */
+  function putInComposer(text) {
+    const input = $('input'),
+      result = promptLibrary.insertText(input.value, input.selectionStart, input.selectionEnd, text);
+    input.value = result.value;
+    resetHistoryNav();
+    input.focus();
+    input.setSelectionRange(result.caret, result.caret);
+  }
+  async function chooseLibraryItem(item) {
+    if (item === undefined) return;
+    closeLibrary();
+    if (typeof item === 'string') return putInComposer(item);
+    // A template with $1/$@ runs as `/name args`, but only a session that has loaded it expands the
+    // command: Pi reads templates when a session starts. Otherwise its text goes in for manual editing.
+    if (promptLibrary.usesArguments(item.content) && !$('input').value.trim() && state.agent) {
+      const agentId = state.agent.agentId,
+        commands = await loadCommands(agentId).catch(() => []);
+      if (state.agent?.agentId === agentId && commands.some(command => command.name === item.name))
+        return putInComposer(`/${item.name} `);
+      toast('该模板带参数，当前会话尚未加载它：已插入原文，请手动替换 $1 等占位符');
+    }
+    putInComposer(item.content);
+  }
+  async function editPromptTemplate(template = null, initialContent = '') {
+    const backendId = libraryBackendId();
+    if (!backendId) return toast('请先选择 Agent');
+    const result = await modal(
+      template ? `编辑模板 /${template.name}` : '保存为提示词模板',
+      body => {
+        const name = field(body, '名称（即 /命令名，不含空格）', template?.name || ''),
+          description = field(
+            body,
+            '描述（可选；自动跟进判断是否匹配模板时主要看它）',
+            template?.description || ''
+          ),
+          area = el('textarea', {className: 'prompt-editor', value: template?.content ?? initialContent});
+        body.append(
+          el('label', {textContent: '内容'}, area),
+          el('small', {
+            className: 'muted',
+            textContent: `保存为 ${state.library.dir || '~/.pi/agent/prompts'}/<名称>.md。新模板在这里立即可用；/ 命令在会话下次加载后可用。`
+          })
+        );
+        if (!template) setTimeout(() => name.focus());
+        return () => ({name: name.value.trim(), description: description.value.trim(), content: area.value});
+      },
+      '保存'
+    );
+    if (!result) return;
+    if (!result.name || /[\s\\/:*?"<>|]/.test(result.name) || result.name.startsWith('.'))
+      return toast('名称不能为空，不能以 . 开头，不能包含空格或 \\ / : * ? " < > |');
+    if (!result.content.trim()) return toast('模板内容不能为空');
+    const save = overwrite =>
+      requestBackend(backendId, `/api/v1/prompt-templates/${encodeURIComponent(result.name)}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          description: result.description,
+          content: result.content,
+          editing: template?.name,
+          overwrite
+        })
+      });
+    try {
+      try {
+        await save(false);
+      } catch (error) {
+        if (error.status !== 409) throw error;
+        if (!confirm(`模板 /${result.name} 已存在，覆盖它？`)) return;
+        await save(true);
+      }
+      toast(`模板 /${result.name} 已保存`);
+      await loadPromptTemplates(backendId);
+    } catch (error) {
+      toast(`保存模板失败：${error.message}`);
+    }
+  }
+  async function deletePromptTemplate(template) {
+    const backendId = libraryBackendId();
+    if (!backendId || !confirm(`删除模板 /${template.name}？文件会从 Pi 的 prompts 目录中删除。`)) return;
+    try {
+      await requestBackend(backendId, `/api/v1/prompt-templates/${encodeURIComponent(template.name)}`, {
+        method: 'DELETE'
+      });
+      toast(`模板 /${template.name} 已删除`);
+      await loadPromptTemplates(backendId);
+    } catch (error) {
+      toast(`删除失败：${error.message}`);
+    }
   }
 
   function agentName(agent) {
@@ -1641,6 +1884,9 @@
       $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
     $('messages').replaceChildren();
     closeCommandPicker();
+    closeLibrary();
+    resetHistoryNav();
+    if (state.promptHistory.backendId !== agent.backendId) void loadPromptHistory(agent.backendId);
     state.commands = [];
     state.commandsAgentId = null;
     renderQueueBar();
@@ -4417,6 +4663,9 @@
     const text = $('input').value.trim();
     if (!text) return;
     closeCommandPicker();
+    closeLibrary();
+    rememberPrompt(text);
+    resetHistoryNav();
     const selectedMode = $('sendMode').value,
       mode =
         state.agent.status === 'streaming' || state.agent.status === 'waiting_for_user'
@@ -4522,12 +4771,47 @@
         return;
       }
     }
+    if (event.key === 'Escape' && !$('libraryPicker').hidden) {
+      event.preventDefault();
+      closeLibrary();
+      return;
+    }
+    // Shell-like history: ↑ on the first line recalls older inputs, ↓ on the last line newer ones.
+    if (
+      (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      !event.isComposing
+    ) {
+      const input = $('input'),
+        step = promptLibrary.historyStep(
+          {
+            items: state.promptHistory.backendId === libraryBackendId() ? state.promptHistory.items : [],
+            nav: state.historyNav,
+            value: input.value,
+            selectionStart: input.selectionStart,
+            selectionEnd: input.selectionEnd
+          },
+          event.key === 'ArrowUp' ? 'up' : 'down'
+        );
+      if (step) {
+        event.preventDefault();
+        state.historyNav = step.nav;
+        input.value = step.value;
+        input.setSelectionRange(step.caret, step.caret);
+        return;
+      }
+    }
     if (isSendKey(event, state.enterSendMode)) {
       event.preventDefault();
       $('prompt').requestSubmit();
     }
   };
   $('input').oninput = () => {
+    // Editing a recalled entry makes it the new draft; the next ↑ starts again from the newest entry.
+    resetHistoryNav();
     const command = commandContext();
     if (command) {
       if (!$('mentionPicker').hidden) closeMention();
@@ -4579,6 +4863,36 @@
     }
   };
   $('commandClose').onclick = closeCommandPicker;
+  $('libraryToggle').onclick = () => ($('libraryPicker').hidden ? openLibrary() : closeLibrary());
+  $('libraryClose').onclick = () => {
+    closeLibrary();
+    $('input').focus();
+  };
+  $('librarySave').onclick = () => void editPromptTemplate(null, $('input').value.trim());
+  $('libraryPicker')
+    .querySelectorAll('.library-tabs button')
+    .forEach(button => {
+      button.onclick = () => {
+        setLibraryTab(button.dataset.tab);
+        renderLibraryItems();
+      };
+    });
+  $('libraryFilter').oninput = () => renderLibraryItems();
+  $('libraryFilter').onkeydown = event => {
+    if (event.isComposing) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      setLibrarySelection(state.library.index + (event.key === 'ArrowDown' ? 1 : -1));
+    } else if (event.key === 'Enter') {
+      // The picker sits inside the composer form: Enter must choose, never submit the prompt.
+      event.preventDefault();
+      void chooseLibraryItem(state.library.filtered[state.library.index]);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeLibrary();
+      $('input').focus();
+    }
+  };
   $('mentionUp').onclick = () => browseMention(parentPath(state.mentionPath));
   $('mentionClose').onclick = closeMention;
   $('workspaceBack').onclick = () => mobileBack('home');
@@ -4607,6 +4921,8 @@
     stopVoiceAudio();
   });
   window.addEventListener('focus', updateNotificationButton);
+  // Another device of the same backend may have sent something since.
+  window.addEventListener('focus', () => void loadPromptHistory());
   setMobileView('home', {replace: true});
   updateConfigUi();
   updateKeyboardUi();

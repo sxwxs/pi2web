@@ -107,3 +107,17 @@
 .agent-activity{display:flex;align-items:center;gap:6px;margin-top:5px;font-size:11px;color:#c9d1de}
 .agent-activity .activity-chip{flex:1;min-width:0}
 .performance-list{max-height:58vh;overflow:auto}.performance-run{border:1px solid var(--line);border-radius:6px;margin:8px 0;padding:8px}.performance-run summary{cursor:pointer}.performance-row{margin:9px 0;font-size:12px}.performance-label{display:block;white-space:normal;overflow-wrap:anywhere;margin-bottom:3px}.performance-track{position:relative;height:9px;background:#1a1e26;border-radius:4px}.performance-track i{position:absolute;height:100%;border-radius:4px;min-width:2px}.performance-model{background:var(--blue)}.performance-tool{background:var(--yellow)}.performance-compaction,.performance-retry{background:#b48ead}
+/* Prompt library next to the composer: Pi prompt templates and the shared input history. */
+#libraryPicker{position:absolute;left:115px;right:80px;bottom:88px;max-height:380px;overflow:auto;background:#252a33;border:1px solid #667085;border-radius:7px;box-shadow:0 8px 24px #0008;z-index:15}
+#libraryPicker .picker-head{flex-wrap:wrap;z-index:1}
+.library-tabs{display:flex;gap:4px}.library-tabs button{padding:4px 10px}.library-tabs button.selected{background:#3b4658;border-color:var(--blue);box-shadow:0 0 0 1px #88c0d055}
+#libraryFilter{flex:1;min-width:90px;padding:4px 7px}
+#libraryPicker .picker-head>button{padding:4px 8px}
+#libraryNote{display:block;padding:5px 9px 0;font-size:11px;overflow-wrap:anywhere}
+.library-item{display:flex;align-items:flex-start;gap:8px}
+.library-main{flex:1;min-width:0}
+.library-main b,.library-main small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.library-main small{margin-top:2px;font-size:11px}
+.library-text{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.library-actions{display:flex;gap:4px;flex:0 0 auto}.library-actions button{padding:2px 7px;font-size:12px}
+@media(max-width:700px){#libraryPicker{left:8px;right:8px;bottom:116px;max-height:55vh}.composer-row{grid-template-columns:minmax(0,1fr) auto auto auto}}
