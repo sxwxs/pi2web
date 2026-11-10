@@ -54,7 +54,7 @@ function setup() {
   messages.append(queueBar, queueText, queueItems);
   const $ = (id: string) => [messages, ...messages.descendants()].find(element => element.id === id);
   const agent = {agentId: 'agent-a', status: 'idle'};
-  const state = {agent, agents: [agent], selectedKind: 'agent', queues: new Map()};
+  const state = {agent, agents: [agent], selectedKind: 'agent', queues: new Map(), advice: new Map()};
   const postAgent = vi.fn(async () => {});
   const addCard = vi.fn(() => {
     const body = new Element();

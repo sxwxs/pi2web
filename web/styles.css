@@ -121,3 +121,12 @@
 .library-text{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .library-actions{display:flex;gap:4px;flex:0 0 auto}.library-actions button{padding:2px 7px;font-size:12px}
 @media(max-width:700px){#libraryPicker{left:8px;right:8px;bottom:116px;max-height:55vh}.composer-row{grid-template-columns:minmax(0,1fr) auto auto auto}}
+/* Follow-up advice after a run settled: shown above the composer, never sent on its own. */
+#adviceBar{margin-bottom:8px;padding:7px 10px;font-size:12px;background:#2f3542;border:1px solid var(--line);border-left:3px solid var(--muted);border-radius:6px}
+#adviceBar.advice-done{border-left-color:var(--green)}#adviceBar.advice-continue{border-left-color:var(--blue)}#adviceBar.advice-needs_user{border-left-color:var(--yellow)}#adviceBar.advice-error{border-left-color:var(--red)}
+.advice-head{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px}.advice-head>small{color:var(--muted)}
+.advice-actions{display:flex;gap:6px;margin-left:auto}.advice-actions button{padding:3px 9px;font-size:12px}
+.advice-source{display:block;margin-top:6px;color:var(--muted)}
+.advice-text{margin-top:4px;max-height:7.5em;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:6px 8px;background:#20232b;border-radius:4px}
+.advice-error{display:block;margin-top:6px;color:var(--red)}
+.advice-mark{flex:0 0 auto;font-size:13px;line-height:1}.advice-mark.advice-analyzing{opacity:.7}

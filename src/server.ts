@@ -20,6 +20,7 @@ import {DraftHub} from './drafts.js';
 import {AGENT_TEMPLATES_DIR, defaultDataDir} from './paths.js';
 import {AgentTemplateStore} from './agent-templates.js';
 import {PromptTemplateStore} from './prompt-templates.js';
+import {FollowUpAdvisor, type FollowUpSettings} from './follow-up-advisor.js';
 import type {CollabAction, CollabToolBridge} from './collab/pi-extension.js';
 import {SessionManager, VERSION as PI_VERSION} from '@earendil-works/pi-coding-agent';
 import pkg from '../package.json' with {type: 'json'};
@@ -54,6 +55,10 @@ export type ServerOptions = {
   mailNotifier?: MailNotifier;
   /** Pi's global prompt templates; tests point it at a temporary directory. */
   promptTemplates?: PromptTemplateStore;
+  /** Bearer key for the follow-up decision and draft models; settings themselves live in the database. */
+  followUpApiKey?: string;
+  /** Tests replace the follow-up model endpoints. */
+  followUpFetcher?: typeof fetch;
 };
 export {LOOPBACK_HOSTS};
 export class RemotePiServer {
@@ -66,6 +71,7 @@ export class RemotePiServer {
   metadata: MetadataStore;
   templates: AgentTemplateStore;
   promptTemplates: PromptTemplateStore;
+  readonly followUp: FollowUpAdvisor;
   collab!: CollabHub;
   private collabRouter!: CollabRouter;
   private collabDispatcher!: CollabDispatcher;
@@ -98,6 +104,11 @@ export class RemotePiServer {
     this.sottoStt = new SottoSttService(this.metadata);
     this.templates = new AgentTemplateStore(path.join(this.dataDir, AGENT_TEMPLATES_DIR));
     this.promptTemplates = options.promptTemplates ?? new PromptTemplateStore();
+    this.followUp = new FollowUpAdvisor({
+      templates: () => this.promptTemplates.list().templates,
+      apiKey: options.followUpApiKey,
+      fetcher: options.followUpFetcher
+    });
     this.workspaces = options.workspaces ?? new WorkspaceStore();
     this.voice = options.voice;
     this.sessionNamer = options.sessionNamer;
@@ -152,6 +163,7 @@ export class RemotePiServer {
             voice: this.voice,
             sessionNamer: this.sessionNamer,
             recordPrompt: text => this.recordPrompt(text),
+            followUp: this.followUp,
             clients: this.clients
           },
           ws
@@ -197,6 +209,13 @@ export class RemotePiServer {
           console.error(`Ignoring invalid stored mail notification settings: ${(error as Error).message}`);
         }
     }
+    const followUpSettings = this.metadata.getSetting<Partial<FollowUpSettings>>('followUpAdvisor');
+    if (followUpSettings)
+      try {
+        this.followUp.updateSettings(followUpSettings);
+      } catch (error) {
+        console.error(`Ignoring invalid stored follow-up settings: ${(error as Error).message}`);
+      }
     await this.loadMetadata();
     // Only now: resuming a queued wake-up calls agents.command(), which fails with "unknown agent" until the
     // persisted agents have been restored, and a failed dispatch is logged, not retried.
@@ -222,6 +241,7 @@ export class RemotePiServer {
         workspaceLabel: this.workspaces.get(record.workspaceId)?.label,
         cwd: record.cwd
       });
+      this.followUp.handleAgentEvent(agentId, event.event, {profile: record.profile});
       if (
         ['message_end', 'agent_end', 'agent_settled', 'session_info_changed'].includes(
           String(event.event.type)
@@ -400,6 +420,7 @@ export class RemotePiServer {
     this.unsubscribeMetadata = undefined;
     this.voice?.close();
     this.sessionNamer?.close();
+    this.followUp.close();
     await this.mailNotifier?.close();
     await Promise.allSettled([...this.sessionIndexJobs.values(), ...this.agentIndexJobs.values()]);
     this.metadata.flush();
@@ -673,6 +694,7 @@ export class RemotePiServer {
             },
             sottoStt: this.sottoStt.getSettings(),
             sessionNamingEnabled: !!this.sessionNamer,
+            followUpAdviceEnabled: this.followUp.getSettings().enabled,
             mailNotificationsConfigured: !!this.mailNotifier,
             mailNotificationsEnabled: this.mailNotifier?.getSettings().enabled ?? false
           }
@@ -715,7 +737,13 @@ export class RemotePiServer {
       if (await handleWorkspaceRoutes(workspaceContext, req, res, u, parts, requestId)) return;
       if (
         await handlePromptLibraryRoutes(
-          {metadata: this.metadata, promptTemplates: this.promptTemplates, body: () => readJsonBody(req)},
+          {
+            metadata: this.metadata,
+            promptTemplates: this.promptTemplates,
+            followUp: this.followUp,
+            agents: this.agents,
+            body: () => readJsonBody(req)
+          },
           req,
           res,
           u,

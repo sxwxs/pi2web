@@ -167,6 +167,24 @@ pi2web \
 
 命名失败不会影响 Agent，本次失败会通过 WebSocket 的 `session_namer_event`（`session_name_error`）上报。`GET /api/v1/system/status` 的 `sessionNamingEnabled` 可以确认是否开启。
 
+## 会话结束后的跟进建议
+
+默认关闭，在「配置 → 会话结束后的跟进建议」中开启。设置保存在当前选中 Agent 所属的 Backend（未选中时为主 Backend），对它的所有 Agent 生效。需要一个同时提供两个接口的 OpenAI 兼容服务：
+
+- 判断模型：`POST /v1/decisions`（[OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions)），默认 `gpt-6-luna-decisions`。
+- 草拟模型：`POST /v1/chat/completions`，默认 `gpt-6.1-terra`。
+- 服务地址默认 `http://localhost:8313/`；需要 API key 时用 `--follow-up-api-key-env <环境变量名>` 启动（key 不进数据库，也不能在网页上修改）。
+
+每轮对话正常结束（`agent_settled`）后，取用户本轮输入和 Agent 的最终回复，用一次 Decisions 请求同时问三件事：
+
+1. 接下来是「已完成，无需跟进」、「AI 可以直接继续」（停在半途，或只是在问要不要做它已经提出的下一步）还是「需要你回复」（在方案间做选择、补充信息或权限、处理新的反馈或结果、指出错误或未完成的部分）。
+2. 回答是否完整（显示为「回答完整度」）。
+3. 提示词模板库（Pi 全局 `~/.pi/agent/prompts`，按描述和内容，最多最近修改的 50 个）里哪个最像你下一条要发的消息。
+
+「需要你回复」时，匹配概率不低于 50% 的模板作为建议；都不匹配才调用草拟模型写一条回复（看不出来的信息会用「【待填：…】」占位）。结果显示在输入框上方（可「填入」「发送」或忽略）和会话列表的图标里：✅ 已完成、▶️ 可直接继续、💬 需要你回复、🤔 判断中。**任何建议都不会自动发送**，包括「AI 可以直接继续」。
+
+被取消、安全暂停、以错误结束的运行和协作（`profile=collab`）Agent 不做判断。建议只保存在服务进程内存中，刷新或重连后由 WebSocket（`follow_up_advice`）补发；Agent 开始新一轮、点忽略或关闭功能时撤回。判断或草拟失败只显示在建议栏，不影响 Agent。
+
 ## 本地开发
 
 项目 Review 中发现的问题和修复状态见 [`PROJECT_REVIEW_ISSUES.md`](https://github.com/sxwxs/pi2web/blob/main/PROJECT_REVIEW_ISSUES.md)。
