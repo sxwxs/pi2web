@@ -23,7 +23,16 @@ function harness({enabled = true, remote = false} = {}) {
     setSelectionRange: vi.fn(),
     focus: vi.fn()
   };
-  const backend = {id: 'local', statusInfo: {voiceCorrection: {enabled}}};
+  const backend = {
+    id: 'local',
+    statusInfo: {
+      voiceCorrection: {
+        enabled,
+        baseUrl: 'http://localhost:8313/',
+        model: 'gpt-6.1-terra'
+      }
+    }
+  };
   let agent = {agentId: remote ? 'remote:agent' : 'local:agent', backendId: remote ? 'remote' : 'local'};
   const owner = {agentId: agent.agentId, transcribeBackendId: backend.id, input, at: input.value.length};
   const requests: ReturnType<typeof deferred>[] = [];
@@ -199,5 +208,113 @@ describe('voice correction preview and acceptance', () => {
     expect(h.$('voiceCorrectionPanel').hidden).toBe(false);
     h.correction.clear('remote');
     expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
+  });
+});
+
+const appSource = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
+const settingsSource = appSource.slice(
+  appSource.indexOf('  function applyVoiceCorrectionSettings('),
+  appSource.indexOf('  /** Follow-up settings belong to a backend:')
+);
+function settingsHarness(enabled = true) {
+  const h = harness({enabled});
+  h.$('configDialog').open = true;
+  const state: any = {voiceCorrection: h.correction, voiceStream: null, voiceCorrectionSettingsRequest: 0};
+  let serverSettings = {...h.backend.statusInfo.voiceCorrection};
+  const requestBackend = vi.fn(async () => ({settings: serverSettings, apiKeyConfigured: false}));
+  const api = runInNewContext(
+    `${settingsSource}\n({loadVoiceCorrectionSettings, saveVoiceCorrectionSettings})`,
+    {
+      state,
+      $: h.$,
+      localBackend: () => h.backend,
+      backendOf: () => h.backend,
+      requestBackend,
+      toast: h.toast
+    }
+  );
+  return {
+    ...h,
+    state,
+    api,
+    requestBackend,
+    setServerSettings: (patch: Partial<typeof serverSettings>) => {
+      serverSettings = {...serverSettings, ...patch};
+    }
+  };
+}
+
+describe('correction settings refreshed when configuration is reopened', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('updates both the form and the dictation gate after another page enables correction', async () => {
+    const h = settingsHarness(false);
+    h.setServerSettings({enabled: true});
+    await h.api.loadVoiceCorrectionSettings();
+    expect(h.$('voiceCorrectionEnabled').checked).toBe(true);
+    expect(h.backend.statusInfo.voiceCorrection.enabled).toBe(true);
+    h.correction.begin(h.owner);
+    h.observe('下一次录音');
+    h.correction.end(h.owner, '下一次录音');
+    expect(h.request).toHaveBeenCalledTimes(1);
+    h.correction.clear();
+  });
+
+  it('leaves an edited candidate intact when fetched settings have not changed', async () => {
+    const h = settingsHarness();
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    h.requests[0].resolve({corrected: '修正'});
+    await vi.advanceTimersByTimeAsync(0);
+    h.$('voiceCorrectionText').value = '用户编辑后的候选';
+    const session = h.correction.session;
+    await h.api.loadVoiceCorrectionSettings();
+    expect(h.correction.session).toBe(session);
+    expect(h.$('voiceCorrectionText').value).toBe('用户编辑后的候选');
+    h.correction.clear();
+  });
+
+  it('invalidates a pending preview when the refreshed settings disable correction', async () => {
+    const h = settingsHarness();
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    h.setServerSettings({enabled: false});
+    await h.api.loadVoiceCorrectionSettings();
+    expect((h.request.mock.calls[0] as any)[2].signal.aborted).toBe(true);
+    expect(h.backend.statusInfo.voiceCorrection.enabled).toBe(false);
+    h.requests[0].resolve({corrected: '晚到的候选'});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
+    expect(h.input.value).toBe('已有草稿 原文');
+  });
+
+  it('refreshes the endpoint and model and cancels a candidate based on old settings', async () => {
+    const h = settingsHarness();
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    h.setServerSettings({baseUrl: 'http://localhost:9000/v1', model: 'another-model'});
+    await h.api.loadVoiceCorrectionSettings();
+    expect(h.backend.statusInfo.voiceCorrection).toMatchObject({
+      baseUrl: 'http://localhost:9000/v1',
+      model: 'another-model'
+    });
+    expect(h.$('voiceCorrectionModel').value).toBe('another-model');
+    expect(h.correction.session).toBeNull();
+    expect((h.request.mock.calls[0] as any)[2].signal.aborted).toBe(true);
+  });
+
+  it('can attach correction to an existing live recording when refreshed settings enable it', async () => {
+    const h = settingsHarness(false);
+    h.observe('录音原文');
+    const voice = (h.state.voiceStream = {...h.owner, inserted: '录音原文'});
+    h.setServerSettings({enabled: true});
+    await h.api.loadVoiceCorrectionSettings();
+    expect(h.correction.session.owner).toBe(voice);
+    expect(h.correction.session.original).toBe('录音原文');
+    expect(h.$('voiceCorrectionAccept').disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.request).toHaveBeenCalledTimes(1);
+    h.correction.clear();
   });
 });

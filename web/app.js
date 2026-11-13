@@ -111,6 +111,7 @@
     mediaTimer: null,
     mediaAgentId: null,
     mediaBackendId: null,
+    pendingTranscription: null,
     /** Messages that failed after the user switched away; restored when that Agent is selected again. */
     failedSends: new Map(),
     /** Lost acknowledgements are notices, not drafts to send again. Kept across focus snapshots. */
@@ -296,6 +297,19 @@
         state.voiceStream.transcribeBackendId === backendId)
     )
       finishSottoStream(state.voiceStream, true);
+    const pending = state.pendingTranscription;
+    if (
+      pending &&
+      (!backendId ||
+        splitResourceKey(pending.agentId).backendId === backendId ||
+        pending.transcribeBackendId === backendId)
+    ) {
+      state.pendingTranscription = null;
+      pending.controller.abort();
+      $('voiceInput').textContent = '🎙';
+      $('voiceInput').disabled = false;
+      $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+    }
     if (!state.mediaAgentId) return;
     if (
       backendId &&
@@ -3124,6 +3138,12 @@
       $('voiceInput').disabled = false;
       return toast('语音识别 Backend 已断开');
     }
+    const pending = {
+      agentId,
+      transcribeBackendId: speechBackendId,
+      controller: new AbortController()
+    };
+    state.pendingTranscription = pending;
     try {
       const response = await fetch(transcribeBackend.base + '/api/v1/transcribe', {
         method: 'POST',
@@ -3132,9 +3152,11 @@
           'Content-Type': mime,
           'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'
         },
-        body: blob
+        body: blob,
+        signal: pending.controller.signal
       });
       const body = await response.json().catch(() => ({}));
+      if (state.pendingTranscription !== pending) return;
       if (!response.ok) throw Error(body.error?.message || `HTTP ${response.status}`);
       const text = body.data?.text?.trim();
       if (text) {
@@ -3150,11 +3172,14 @@
         toast('语音已转换为文字');
       } else toast('没有识别到语音');
     } catch (error) {
-      toast(`语音识别失败：${error.message}`);
+      if (state.pendingTranscription === pending) toast(`语音识别失败：${error.message}`);
     } finally {
-      $('voiceInput').textContent = '🎙';
-      $('voiceInput').disabled = false;
-      $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+      if (state.pendingTranscription === pending) {
+        state.pendingTranscription = null;
+        $('voiceInput').textContent = '🎙';
+        $('voiceInput').disabled = false;
+        $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+      }
     }
   }
   const handledDrafts = new Set();
@@ -3180,7 +3205,13 @@
         at = draft.mode === 'replace' ? 0 : input.value.length + prefix.length;
       if (draft.mode === 'replace') input.value = draft.text;
       else input.value += prefix + draft.text;
-      if (state.voiceCorrection) {
+      // One voice source owns the preview. External text is still inserted and acknowledged, not queued.
+      if (
+        state.voiceCorrection &&
+        !state.voiceStream &&
+        !state.mediaRecorder &&
+        !state.pendingTranscription
+      ) {
         const owner = {agentId: state.agent.agentId, transcribeBackendId: localBackend()?.id, input, at};
         state.voiceCorrection.begin(owner);
         state.voiceCorrection.end(owner, draft.text);
@@ -3601,6 +3632,22 @@
       $('saveSotto').disabled = !backendOf(backendId);
     }
   }
+  function applyVoiceCorrectionSettings(backend, settings) {
+    const previous = backend.statusInfo?.voiceCorrection;
+    backend.statusInfo = {...backend.statusInfo, voiceCorrection: settings};
+    if (
+      previous?.enabled === settings.enabled &&
+      previous?.baseUrl === settings.baseUrl &&
+      previous?.model === settings.model
+    )
+      return;
+    state.voiceCorrection?.configure(backend);
+    const voice = state.voiceStream;
+    if (settings.enabled && voice?.transcribeBackendId === backend.id) {
+      state.voiceCorrection?.begin(voice);
+      state.voiceCorrection?.observe(voice, voice.inserted);
+    }
+  }
   async function loadVoiceCorrectionSettings() {
     const backend = localBackend(),
       requestId = ++state.voiceCorrectionSettingsRequest;
@@ -3613,6 +3660,7 @@
     try {
       const data = await requestBackend(backend.id, '/api/v1/voice-correction');
       if (requestId !== state.voiceCorrectionSettingsRequest || !$('configDialog').open) return;
+      applyVoiceCorrectionSettings(backend, data.settings);
       state.voiceCorrectionBackendId = backend.id;
       $('voiceCorrectionEnabled').checked = data.settings.enabled;
       $('voiceCorrectionBaseUrl').value = data.settings.baseUrl;
@@ -3643,14 +3691,7 @@
         })
       });
       const backend = backendOf(backendId);
-      if (backend) {
-        state.voiceCorrection.configure(backend);
-        backend.statusInfo = {...backend.statusInfo, voiceCorrection: data.settings};
-        if (data.settings.enabled && state.voiceStream?.transcribeBackendId === backendId) {
-          state.voiceCorrection.begin(state.voiceStream);
-          state.voiceCorrection.observe(state.voiceStream, state.voiceStream.inserted);
-        }
-      }
+      if (backend) applyVoiceCorrectionSettings(backend, data.settings);
       toast(data.settings.enabled ? '语音纠错已启用' : '语音纠错已关闭');
     } catch (error) {
       toast(`保存语音纠错设置失败：${error.message}`);
