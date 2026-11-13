@@ -103,11 +103,15 @@
     },
     mediaRecorder: null,
     voiceStream: null,
+    voiceCorrection: null,
+    voiceCorrectionBackendId: null,
+    voiceCorrectionSettingsRequest: 0,
     mediaChunks: [],
     mediaStream: null,
     mediaTimer: null,
     mediaAgentId: null,
     mediaBackendId: null,
+    pendingTranscription: null,
     /** Messages that failed after the user switched away; restored when that Agent is selected again. */
     failedSends: new Map(),
     /** Lost acknowledgements are notices, not drafts to send again. Kept across focus snapshots. */
@@ -285,6 +289,7 @@
   }
 
   function cancelVoiceRecording(backendId) {
+    state.voiceCorrection?.clear(backendId);
     if (
       state.voiceStream &&
       (!backendId ||
@@ -292,6 +297,19 @@
         state.voiceStream.transcribeBackendId === backendId)
     )
       finishSottoStream(state.voiceStream, true);
+    const pending = state.pendingTranscription;
+    if (
+      pending &&
+      (!backendId ||
+        splitResourceKey(pending.agentId).backendId === backendId ||
+        pending.transcribeBackendId === backendId)
+    ) {
+      state.pendingTranscription = null;
+      pending.controller.abort();
+      $('voiceInput').textContent = '🎙';
+      $('voiceInput').disabled = false;
+      $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+    }
     if (!state.mediaAgentId) return;
     if (
       backendId &&
@@ -2842,6 +2860,7 @@
     }
     input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
     voice.inserted = text;
+    state.voiceCorrection?.observe(voice, text);
   }
   function finishSottoStream(voice, abort = false, reason = '') {
     if (state.voiceStream !== voice) return;
@@ -2871,7 +2890,9 @@
     ) {
       const text = [...voice.finals.values()].filter(Boolean).join(' ');
       voice.input.setRangeText(text, voice.at, voice.at + voice.inserted.length, 'end');
+      voice.inserted = text;
     }
+    state.voiceCorrection?.end(voice, voice.inserted);
     if (reason) toast(reason);
   }
   function finishSottoAudio(voice) {
@@ -2948,6 +2969,7 @@
       sink: null
     };
     state.voiceStream = voice;
+    state.voiceCorrection?.begin(voice);
     $('voiceInput').textContent = '…';
     $('voiceInput').title = '正在启动语音输入，点击取消';
     try {
@@ -3064,6 +3086,7 @@
       state.mediaRecorder.ondataavailable = event => {
         if (event.data.size) state.mediaChunks.push(event.data);
       };
+      state.voiceCorrection?.clear();
       state.mediaAgentId = state.agent.agentId;
       state.mediaBackendId = transcriptionBackend()?.id;
       state.mediaRecorder.onstop = () => void transcribeVoice();
@@ -3115,6 +3138,12 @@
       $('voiceInput').disabled = false;
       return toast('语音识别 Backend 已断开');
     }
+    const pending = {
+      agentId,
+      transcribeBackendId: speechBackendId,
+      controller: new AbortController()
+    };
+    state.pendingTranscription = pending;
     try {
       const response = await fetch(transcribeBackend.base + '/api/v1/transcribe', {
         method: 'POST',
@@ -3123,24 +3152,34 @@
           'Content-Type': mime,
           'X-Audio-Filename': mime.includes('mp4') ? 'recording.m4a' : 'recording.webm'
         },
-        body: blob
+        body: blob,
+        signal: pending.controller.signal
       });
       const body = await response.json().catch(() => ({}));
+      if (state.pendingTranscription !== pending) return;
       if (!response.ok) throw Error(body.error?.message || `HTTP ${response.status}`);
       const text = body.data?.text?.trim();
       if (text) {
+        if (state.agent?.agentId !== agentId) return;
         const input = $('input'),
-          prefix = input.value && !/\s$/.test(input.value) ? ' ' : '';
+          prefix = input.value && !/\s$/.test(input.value) ? ' ' : '',
+          at = input.value.length + prefix.length;
         input.value += prefix + text;
+        const owner = {agentId, transcribeBackendId: speechBackendId, input, at};
+        state.voiceCorrection?.begin(owner);
+        state.voiceCorrection?.end(owner, text);
         input.focus();
         toast('语音已转换为文字');
       } else toast('没有识别到语音');
     } catch (error) {
-      toast(`语音识别失败：${error.message}`);
+      if (state.pendingTranscription === pending) toast(`语音识别失败：${error.message}`);
     } finally {
-      $('voiceInput').textContent = '🎙';
-      $('voiceInput').disabled = false;
-      $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+      if (state.pendingTranscription === pending) {
+        state.pendingTranscription = null;
+        $('voiceInput').textContent = '🎙';
+        $('voiceInput').disabled = false;
+        $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+      }
     }
   }
   const handledDrafts = new Set();
@@ -3161,9 +3200,22 @@
     try {
       // The voice client cannot select a session: only the input currently shown on this backend is changed.
       if (state.selectedKind !== 'agent' || !state.agent || state.agent.backendId !== backend.id) return;
-      const input = $('input');
+      const input = $('input'),
+        prefix = input.value && !/\s$/.test(input.value) ? ' ' : '',
+        at = draft.mode === 'replace' ? 0 : input.value.length + prefix.length;
       if (draft.mode === 'replace') input.value = draft.text;
-      else input.value += (input.value && !/\s$/.test(input.value) ? ' ' : '') + draft.text;
+      else input.value += prefix + draft.text;
+      // One voice source owns the preview. External text is still inserted and acknowledged, not queued.
+      if (
+        state.voiceCorrection &&
+        !state.voiceStream &&
+        !state.mediaRecorder &&
+        !state.pendingTranscription
+      ) {
+        const owner = {agentId: state.agent.agentId, transcribeBackendId: localBackend()?.id, input, at};
+        state.voiceCorrection.begin(owner);
+        state.voiceCorrection.end(owner, draft.text);
+      }
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
       input.scrollTop = input.scrollHeight;
@@ -3580,6 +3632,76 @@
       $('saveSotto').disabled = !backendOf(backendId);
     }
   }
+  function applyVoiceCorrectionSettings(backend, settings) {
+    const previous = backend.statusInfo?.voiceCorrection;
+    backend.statusInfo = {...backend.statusInfo, voiceCorrection: settings};
+    if (
+      previous?.enabled === settings.enabled &&
+      previous?.includeContext === settings.includeContext &&
+      previous?.baseUrl === settings.baseUrl &&
+      previous?.model === settings.model
+    )
+      return;
+    state.voiceCorrection?.configure(backend);
+    const voice = state.voiceStream;
+    if (settings.enabled && voice?.transcribeBackendId === backend.id) {
+      state.voiceCorrection?.begin(voice);
+      state.voiceCorrection?.observe(voice, voice.inserted);
+    }
+  }
+  async function loadVoiceCorrectionSettings() {
+    const backend = localBackend(),
+      requestId = ++state.voiceCorrectionSettingsRequest;
+    state.voiceCorrectionBackendId = null;
+    $('saveVoiceCorrection').disabled = true;
+    if (!backend) {
+      $('voiceCorrectionSettingsStatus').textContent = '请先连接提供当前页面的本机 Backend。';
+      return;
+    }
+    try {
+      const data = await requestBackend(backend.id, '/api/v1/voice-correction');
+      if (requestId !== state.voiceCorrectionSettingsRequest || !$('configDialog').open) return;
+      applyVoiceCorrectionSettings(backend, data.settings);
+      state.voiceCorrectionBackendId = backend.id;
+      $('voiceCorrectionEnabled').checked = data.settings.enabled;
+      $('voiceCorrectionIncludeContext').checked = !!data.settings.includeContext;
+      $('voiceCorrectionBaseUrl').value = data.settings.baseUrl;
+      $('voiceCorrectionModel').value = data.settings.model;
+      $('saveVoiceCorrection').disabled = false;
+      $('voiceCorrectionSettingsStatus').textContent =
+        `保存在本机 Backend「${backend.name}」，远端会话也使用此配置。${
+          data.apiKeyConfigured
+            ? '已配置 API key。'
+            : '如需 API key，用 --voice-correction-api-key-env 配置。'
+        }`;
+    } catch (error) {
+      if (requestId === state.voiceCorrectionSettingsRequest)
+        $('voiceCorrectionSettingsStatus').textContent = `读取失败：${error.message}`;
+    }
+  }
+  async function saveVoiceCorrectionSettings() {
+    const backendId = state.voiceCorrectionBackendId;
+    if (!backendId || localBackend()?.id !== backendId) return toast('请先连接本机 Backend 并读取设置');
+    $('saveVoiceCorrection').disabled = true;
+    try {
+      const data = await requestBackend(backendId, '/api/v1/voice-correction', {
+        method: 'PUT',
+        body: JSON.stringify({
+          enabled: $('voiceCorrectionEnabled').checked,
+          includeContext: $('voiceCorrectionIncludeContext').checked,
+          baseUrl: $('voiceCorrectionBaseUrl').value.trim(),
+          model: $('voiceCorrectionModel').value.trim()
+        })
+      });
+      const backend = backendOf(backendId);
+      if (backend) applyVoiceCorrectionSettings(backend, data.settings);
+      toast(data.settings.enabled ? '语音纠错已启用' : '语音纠错已关闭');
+    } catch (error) {
+      toast(`保存语音纠错设置失败：${error.message}`);
+    } finally {
+      $('saveVoiceCorrection').disabled = localBackend()?.id !== backendId;
+    }
+  }
   /** Follow-up settings belong to a backend: the selected Agent's, otherwise the primary one. */
   function followUpConfigBackend() {
     const selected = backendOf(libraryBackendId());
@@ -3652,6 +3774,7 @@
     renderKeyboardBindings();
     if (!$('configDialog').open) $('configDialog').showModal();
     void loadSottoSettings();
+    void loadVoiceCorrectionSettings();
     void loadFollowUpSettings();
   }
 
@@ -4616,10 +4739,20 @@
       $('pairSubmit').disabled = false;
     }
   };
+  state.voiceCorrection = new window.RemotePiVoiceCorrection.VoiceCorrection({
+    $,
+    getAgent: () => state.agent,
+    getBackend: backendOf,
+    getContext: (agentId, options) => requestAgent(agentId, '/voice-correction-context', options),
+    request: requestBackend,
+    toast,
+    onAccept: resetHistoryNav
+  });
   $('openConfig').onclick = openConfig;
   $('configClose').onclick = () => $('configDialog').close();
   $('configSave').onclick = saveMailSettings;
   $('saveSotto').onclick = saveSottoSettings;
+  $('saveVoiceCorrection').onclick = () => void saveVoiceCorrectionSettings();
   $('saveFollowUp').onclick = () => void saveFollowUpSettings();
   $('connect').onclick = () => openPair();
   $('keyboardConnect').onclick = async () => {
@@ -4830,6 +4963,7 @@
     if (!state.agent) return toast('请先创建或选择 Agent');
     const text = $('input').value.trim();
     if (!text) return;
+    state.voiceCorrection?.clear();
     closeCommandPicker();
     closeLibrary();
     rememberPrompt(text);
@@ -4978,6 +5112,7 @@
     }
   };
   $('input').oninput = () => {
+    state.voiceCorrection?.render();
     // Editing a recalled entry makes it the new draft; the next ↑ starts again from the newest entry.
     resetHistoryNav();
     const command = commandContext();

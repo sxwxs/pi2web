@@ -31,6 +31,8 @@ function harness({
   const input = {
     value: 'draft ',
     selectionStart: 6,
+    focus: vi.fn(),
+    setSelectionRange: vi.fn(),
     setRangeText(text: string, start: number, end: number) {
       this.value = this.value.slice(0, start) + text + this.value.slice(end);
     }
@@ -72,7 +74,8 @@ function harness({
   const state: any = {
     agent: remote ? {agentId: 'b:remote', backendId: 'b'} : {agentId: 'a:one', backendId: 'a'},
     voiceStream: null,
-    voiceSttEnabled: true
+    voiceSttEnabled: true,
+    selectedKind: 'agent'
   };
   const toast = vi.fn(),
     prompt = vi.fn();
@@ -89,7 +92,8 @@ function harness({
     `${voiceStatus}
     ${section('  function updateSottoDraft(', '  async function transcribeVoice(')}
     ${section('  function cancelVoiceRecording(', '  function clearAgentSelection(')}
-    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability})`,
+    ${section('  const handledDrafts = new Set()', '  function handleAgentEvent(')}
+    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability, handleDraftEvent})`,
     {
       state,
       location: {origin: backend.base},
@@ -137,6 +141,49 @@ function harness({
 describe('Web Sotto input', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
+
+  it('feeds correction previews and the final transcript without replacing the live ASR draft', async () => {
+    const h = harness({remote: true});
+    const correction = {begin: vi.fn(), observe: vi.fn(), end: vi.fn(), clear: vi.fn()};
+    h.state.voiceCorrection = correction;
+    await h.start();
+    const voice = h.state.voiceStream;
+    expect(correction.begin).toHaveBeenCalledWith(voice);
+    h.message({type: 'partial', text: '原始的识别'});
+    expect(correction.observe).toHaveBeenLastCalledWith(voice, '原始的识别');
+    h.message({type: 'final', segment: 0, text: '最终识别'});
+    expect(h.input.value).toBe('draft 最终识别');
+    h.api.stopSottoStream(voice);
+    voice.node.port.onmessage({data: {type: 'flushed'}});
+    h.sockets[0].onclose({code: 1000});
+    expect(correction.end).toHaveBeenLastCalledWith(voice, '最终识别');
+    expect(h.prompt).not.toHaveBeenCalled();
+    h.api.cancelVoiceRecording();
+    expect(correction.clear).toHaveBeenCalled();
+  });
+
+  it('keeps live correction updates and finalization after an external append draft arrives', async () => {
+    const h = harness();
+    const correction = {begin: vi.fn(), observe: vi.fn(), end: vi.fn(), clear: vi.fn()};
+    h.state.voiceCorrection = correction;
+    const send = vi.fn();
+    (h.backend as any).ws = {readyState: 1, send};
+    await h.start();
+    const voice = h.state.voiceStream;
+    h.message({type: 'final', segment: 0, text: '第一句'});
+    h.api.handleDraftEvent({backendId: 'a', draft: {id: 'outside', mode: 'append', text: '外部草稿'}});
+    expect(h.input.value).toBe('draft 第一句 外部草稿');
+    expect(send).toHaveBeenCalledWith(JSON.stringify({type: 'draft_ack', id: 'outside'}));
+    expect(correction.begin).toHaveBeenCalledExactlyOnceWith(voice);
+    expect(correction.end).not.toHaveBeenCalled();
+    h.message({type: 'final', segment: 1, text: '第二句'});
+    expect(h.input.value).toBe('draft 第一句 第二句 外部草稿');
+    expect(correction.observe).toHaveBeenLastCalledWith(voice, '第一句 第二句');
+    h.api.stopSottoStream(voice);
+    voice.node.port.onmessage({data: {type: 'flushed'}});
+    h.sockets[0].onclose({code: 1000});
+    expect(correction.end).toHaveBeenCalledExactlyOnceWith(voice, '第一句 第二句');
+  });
 
   it('uses only the page-serving local backend for speech, even on a remote Agent', () => {
     const mic = {hidden: false, title: ''},

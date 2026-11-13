@@ -10,6 +10,7 @@ import {TerminalManager} from './terminals.js';
 import {MetadataStore} from './metadata-store.js';
 import {VoiceManager} from './voice.js';
 import {SottoSttService} from './sotto-stt.js';
+import {VoiceCorrectionService} from './voice-correction.js';
 import {SessionNamer} from './session-namer.js';
 import {MailNotifier, type MailNotificationSettings} from './mail-notifier.js';
 import {CollabHub} from './collab/hub.js';
@@ -59,6 +60,8 @@ export type ServerOptions = {
   followUpApiKey?: string;
   /** Tests replace the follow-up model endpoints. */
   followUpFetcher?: typeof fetch;
+  voiceCorrectionApiKey?: string;
+  voiceCorrectionFetcher?: typeof fetch;
 };
 export {LOOPBACK_HOSTS};
 export class RemotePiServer {
@@ -91,6 +94,7 @@ export class RemotePiServer {
   private agentIndexJobs = new Map<string, Promise<void>>();
   private voice?: VoiceManager;
   readonly sottoStt: SottoSttService;
+  readonly voiceCorrection: VoiceCorrectionService;
   private sessionNamer?: SessionNamer;
   private mailNotifier?: MailNotifier;
   private loginLimiter = new LoginLimiter();
@@ -102,6 +106,10 @@ export class RemotePiServer {
     this.auth = new AuthStore(this.dataDir);
     this.metadata = new MetadataStore(this.dataDir);
     this.sottoStt = new SottoSttService(this.metadata);
+    this.voiceCorrection = new VoiceCorrectionService(this.metadata, {
+      apiKey: options.voiceCorrectionApiKey,
+      fetcher: options.voiceCorrectionFetcher
+    });
     this.templates = new AgentTemplateStore(path.join(this.dataDir, AGENT_TEMPLATES_DIR));
     this.promptTemplates = options.promptTemplates ?? new PromptTemplateStore();
     this.followUp = new FollowUpAdvisor({
@@ -190,6 +198,7 @@ export class RemotePiServer {
     const first: {token?: string} = this.noAuth ? {} : await this.auth.init();
     this.metadata.init();
     this.sottoStt.load();
+    this.voiceCorrection.load();
     this.collab.init();
     this.unsubscribeCollab = this.collab.subscribe(event => this.collabNotification(event));
     this.collabStallTimer = setInterval(() => {
@@ -419,6 +428,7 @@ export class RemotePiServer {
     this.unsubscribeMetadata?.();
     this.unsubscribeMetadata = undefined;
     this.voice?.close();
+    this.voiceCorrection.close();
     this.sessionNamer?.close();
     this.followUp.close();
     await this.mailNotifier?.close();
@@ -693,12 +703,40 @@ export class RemotePiServer {
               stt: (this.voice?.capabilities().stt ?? false) || this.sottoStt.getSettings().enabled
             },
             sottoStt: this.sottoStt.getSettings(),
+            voiceCorrection: this.voiceCorrection.getSettings(),
             sessionNamingEnabled: !!this.sessionNamer,
             followUpAdviceEnabled: this.followUp.getSettings().enabled,
             mailNotificationsConfigured: !!this.mailNotifier,
             mailNotificationsEnabled: this.mailNotifier?.getSettings().enabled ?? false
           }
         });
+      if (u.pathname === '/api/v1/voice-correction') {
+        if (req.method === 'GET')
+          return json(res, 200, {
+            data: {
+              settings: this.voiceCorrection.getSettings(),
+              apiKeyConfigured: this.voiceCorrection.apiKeyConfigured
+            }
+          });
+        if (req.method === 'PUT')
+          return json(res, 200, {
+            data: {
+              settings: this.voiceCorrection.update(await readJsonBody(req)),
+              apiKeyConfigured: this.voiceCorrection.apiKeyConfigured
+            }
+          });
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req),
+            controller = new AbortController();
+          const cancel = () => controller.abort();
+          res.once('close', cancel);
+          try {
+            return json(res, 200, {data: await this.voiceCorrection.correct(body, controller.signal)});
+          } finally {
+            res.off('close', cancel);
+          }
+        }
+      }
       if (u.pathname === '/api/v1/sotto-stt') {
         if (req.method === 'GET') return json(res, 200, {data: this.sottoStt.getSettings()});
         if (req.method === 'PUT')
