@@ -4,8 +4,8 @@
 
   /** A single dictation's correction preview. Model replies never write to the composer by themselves. */
   class VoiceCorrection {
-    constructor({$, getAgent, getBackend, request, toast, onAccept}) {
-      Object.assign(this, {$, getAgent, getBackend, request, toast, onAccept});
+    constructor({$, getAgent, getBackend, getContext, request, toast, onAccept}) {
+      Object.assign(this, {$, getAgent, getBackend, getContext, request, toast, onAccept});
       this.session = null;
       $('voiceCorrectionAccept').onclick = () => this.accept();
       $('voiceCorrectionKeep').onclick = () => this.clear();
@@ -78,17 +78,34 @@
       s.controller = controller;
       s.requestText = text;
       s.status = 'analyzing';
+      s.contextRequested = !!this.getBackend(s.backendId)?.statusInfo?.voiceCorrection?.includeContext;
+      s.contextUsed = false;
+      s.contextWarning = '';
       this.render();
       try {
+        let context;
+        if (s.contextRequested && this.getContext) {
+          try {
+            const result = await this.getContext(s.agentId, {
+              signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)])
+            });
+            context = result.context;
+          } catch {
+            if (controller.signal.aborted || this.session !== s || s.controller !== controller) return;
+            s.contextWarning = ' 上下文读取失败，已使用无上下文纠错。';
+          }
+        }
+        if (controller.signal.aborted || this.session !== s || s.controller !== controller) return;
         const result = await this.request(s.backendId, '/api/v1/voice-correction', {
           method: 'POST',
-          body: JSON.stringify({text}),
+          body: JSON.stringify({text, ...(context ? {context} : {})}),
           signal: controller.signal
         });
         if (controller.signal.aborted || this.session !== s || s.controller !== controller) return;
         if (typeof result.corrected !== 'string' || !result.corrected.trim())
           throw Error('模型没有返回修正文字');
         this.$('voiceCorrectionText').value = result.corrected;
+        s.contextUsed = result.contextUsed === true;
         s.status = 'ready';
       } catch (error) {
         if (controller.signal.aborted || this.session !== s || s.controller !== controller) return;
@@ -121,7 +138,7 @@
         (busy
           ? '正在调用模型纠错…'
           : s.status === 'ready'
-            ? '修正完成，可编辑后采用。'
+            ? `修正完成，可编辑后采用。${s.contextUsed ? ' 已结合截断的用户/AI消息。' : ' 未使用会话上下文。'}${s.contextWarning || ''}`
             : s.status === 'error'
               ? `纠错失败：${s.error}；原文已保留，可重试或手动修改。`
               : '等待停顿后自动纠错…') +

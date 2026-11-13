@@ -11,7 +11,7 @@ const deferred = () => {
   });
   return {promise, resolve, reject};
 };
-function harness({enabled = true, remote = false} = {}) {
+function harness({enabled = true, remote = false, includeContext = false} = {}) {
   const elements: Record<string, any> = {};
   const $ = (id: string) =>
     (elements[id] ??= {value: '', hidden: true, disabled: false, textContent: '', readOnly: false});
@@ -28,6 +28,7 @@ function harness({enabled = true, remote = false} = {}) {
     statusInfo: {
       voiceCorrection: {
         enabled,
+        includeContext,
         baseUrl: 'http://localhost:8313/',
         model: 'gpt-6.1-terra'
       }
@@ -41,14 +42,16 @@ function harness({enabled = true, remote = false} = {}) {
     requests.push(d);
     return d.promise;
   });
+  const getContext = vi.fn(async (_agentId: string, _options: RequestInit): Promise<any> => ({context: {}}));
   const toast = vi.fn(),
     onAccept = vi.fn(),
     window: any = {};
-  runInNewContext(source, {window, setTimeout, clearTimeout, AbortController});
+  runInNewContext(source, {window, setTimeout, clearTimeout, AbortController, AbortSignal});
   const correction = new window.RemotePiVoiceCorrection.VoiceCorrection({
     $,
     getAgent: () => agent,
     getBackend: () => backend,
+    getContext,
     request,
     toast,
     onAccept
@@ -65,6 +68,7 @@ function harness({enabled = true, remote = false} = {}) {
     $,
     elements,
     request,
+    getContext,
     requests,
     toast,
     onAccept,
@@ -79,6 +83,84 @@ function harness({enabled = true, remote = false} = {}) {
 describe('voice correction preview and acceptance', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
+
+  it('does not read or transmit conversation context unless separately opted in', () => {
+    const h = harness();
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    expect(h.getContext).not.toHaveBeenCalled();
+    expect(JSON.parse((h.request.mock.calls[0] as any)[2].body)).toEqual({text: '原文'});
+    h.correction.clear();
+  });
+
+  it('reads only the owning Agent context and routes correction through the local backend when opted in', async () => {
+    const h = harness({remote: true, includeContext: true});
+    const context = {firstUserMessage: '远端用户消息', latestAssistantMessage: '远端 AI 回复'};
+    h.getContext.mockResolvedValueOnce({context});
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.getContext.mock.calls[0][0]).toBe('remote:agent');
+    expect((h.request.mock.calls[0] as any)[0]).toBe('local');
+    expect(JSON.parse((h.request.mock.calls[0] as any)[2].body)).toEqual({text: '原文', context});
+    h.requests[0].resolve({corrected: '修正', contextUsed: true});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.$('voiceCorrectionStatus').textContent).toContain('已结合截断的用户/AI消息');
+    h.correction.clear();
+  });
+
+  it('falls back to transcript-only correction and reports that context could not be read', async () => {
+    const h = harness({includeContext: true});
+    h.getContext.mockRejectedValueOnce(Error('unavailable'));
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(JSON.parse((h.request.mock.calls[0] as any)[2].body)).toEqual({text: '原文'});
+    h.requests[0].resolve({corrected: '修正', contextUsed: false});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.$('voiceCorrectionStatus').textContent).toContain('上下文读取失败');
+    expect(h.input.value).toBe('已有草稿 原文');
+    h.correction.clear();
+  });
+
+  it.each(['resolve', 'reject'])(
+    'does not call the model after cancellation while reading context (%s)',
+    async outcome => {
+      const h = harness({includeContext: true}),
+        context = deferred();
+      h.getContext.mockReturnValueOnce(context.promise);
+      h.observe('原文');
+      h.correction.end(h.owner, '原文');
+      const signal = h.getContext.mock.calls[0][1].signal!;
+      h.correction.clear();
+      expect(signal.aborted).toBe(true);
+      if (outcome === 'resolve') context.resolve({context: {firstUserMessage: '旧会话'}});
+      else context.reject(Error('aborted'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.request).not.toHaveBeenCalled();
+      expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
+    }
+  );
+
+  it('ignores a late context response after a newer transcript starts correction', async () => {
+    const h = harness({includeContext: true}),
+      old = deferred();
+    h.getContext.mockReturnValueOnce(old.promise);
+    h.observe('旧原文');
+    h.correction.end(h.owner, '旧原文');
+    h.getContext.mockResolvedValueOnce({context: {latestAssistantMessage: '新回复'}});
+    h.observe('新原文');
+    h.correction.end(h.owner, '新原文');
+    await vi.advanceTimersByTimeAsync(0);
+    old.resolve({context: {latestAssistantMessage: '过时回复'}});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.request).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((h.request.mock.calls[0] as any)[2].body)).toEqual({
+      text: '新原文',
+      context: {latestAssistantMessage: '新回复'}
+    });
+    h.correction.clear();
+  });
 
   it('does nothing when disabled', async () => {
     const h = harness({enabled: false});
@@ -247,6 +329,26 @@ function settingsHarness(enabled = true) {
 describe('correction settings refreshed when configuration is reopened', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
+
+  it('refreshes the context privacy flag and cancels previews when that flag changes', async () => {
+    const h = settingsHarness();
+    await h.api.loadVoiceCorrectionSettings();
+    expect(h.$('voiceCorrectionIncludeContext').checked).toBe(false);
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    h.setServerSettings({includeContext: true});
+    await h.api.loadVoiceCorrectionSettings();
+    expect(h.backend.statusInfo.voiceCorrection.includeContext).toBe(true);
+    expect(h.$('voiceCorrectionIncludeContext').checked).toBe(true);
+    expect(h.correction.session).toBeNull();
+    expect((h.request.mock.calls[0] as any)[2].signal.aborted).toBe(true);
+    h.$('voiceCorrectionIncludeContext').checked = false;
+    h.setServerSettings({includeContext: false});
+    await h.api.saveVoiceCorrectionSettings();
+    const options = (h.requestBackend.mock.calls.at(-1) as any)[2];
+    expect(JSON.parse(options.body).includeContext).toBe(false);
+    expect(h.backend.statusInfo.voiceCorrection.includeContext).toBe(false);
+  });
 
   it('updates both the form and the dictation gate after another page enables correction', async () => {
     const h = settingsHarness(false);

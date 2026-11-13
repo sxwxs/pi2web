@@ -3637,6 +3637,7 @@
     backend.statusInfo = {...backend.statusInfo, voiceCorrection: settings};
     if (
       previous?.enabled === settings.enabled &&
+      previous?.includeContext === settings.includeContext &&
       previous?.baseUrl === settings.baseUrl &&
       previous?.model === settings.model
     )
@@ -3663,6 +3664,7 @@
       applyVoiceCorrectionSettings(backend, data.settings);
       state.voiceCorrectionBackendId = backend.id;
       $('voiceCorrectionEnabled').checked = data.settings.enabled;
+      $('voiceCorrectionIncludeContext').checked = !!data.settings.includeContext;
       $('voiceCorrectionBaseUrl').value = data.settings.baseUrl;
       $('voiceCorrectionModel').value = data.settings.model;
       $('saveVoiceCorrection').disabled = false;
@@ -3686,6 +3688,7 @@
         method: 'PUT',
         body: JSON.stringify({
           enabled: $('voiceCorrectionEnabled').checked,
+          includeContext: $('voiceCorrectionIncludeContext').checked,
           baseUrl: $('voiceCorrectionBaseUrl').value.trim(),
           model: $('voiceCorrectionModel').value.trim()
         })
@@ -4740,6 +4743,7 @@
     $,
     getAgent: () => state.agent,
     getBackend: backendOf,
+    getContext: (agentId, options) => requestAgent(agentId, '/voice-correction-context', options),
     request: requestBackend,
     toast,
     onAccept: resetHistoryNav

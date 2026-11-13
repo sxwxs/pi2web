@@ -35,6 +35,7 @@ describe('voice transcript correction', () => {
 
   it.each([
     {enabled: 'yes'},
+    {includeContext: 'yes'},
     {baseUrl: 'file:///tmp/model'},
     {baseUrl: 'not-url'},
     {baseUrl: 'http://name:secret@localhost:8313'},
@@ -74,7 +75,8 @@ describe('voice transcript correction', () => {
       expect(result).toEqual({
         original,
         corrected: '更新最新主分支，并修正语音识别结果。',
-        model: 'gpt-6.1-terra'
+        model: 'gpt-6.1-terra',
+        contextUsed: false
       });
       const [url, options] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
       expect(url).toBe('http://localhost:8313/v1/chat/completions');
@@ -88,6 +90,76 @@ describe('voice transcript correction', () => {
       expect(JSON.stringify(corrector.getSettings())).not.toContain('secret');
     }
   );
+
+  it('keeps context private when loading settings saved before the privacy option existed', () => {
+    const {corrector, metadata} = service();
+    metadata.getSetting.mockReturnValue({
+      enabled: true,
+      baseUrl: 'http://localhost:8313/',
+      model: 'gpt-6.1-terra'
+    });
+    corrector.load();
+    expect(corrector.getSettings()).toMatchObject({enabled: true, includeContext: false});
+    expect(metadata.setSetting).not.toHaveBeenCalled();
+  });
+
+  it('defaults context off and ignores supplied context even if the browser still thinks it is enabled', async () => {
+    const fetcher = vi.fn(async (_url: any, _init: any) => completion());
+    const {corrector} = service({fetcher});
+    corrector.update({enabled: true});
+    const result = await corrector.correct({text: '原文', context: {firstUserMessage: 'PRIVATE_CONTEXT'}});
+    expect(corrector.getSettings().includeContext).toBe(false);
+    expect(result.contextUsed).toBe(false);
+    const messages = JSON.parse(String(fetcher.mock.calls[0][1].body)).messages;
+    expect(JSON.parse(messages[1].content)).toEqual({original: '原文'});
+    expect(JSON.stringify(messages)).not.toContain('PRIVATE_CONTEXT');
+    corrector.update({includeContext: true});
+    corrector.update({includeContext: false});
+    await corrector.correct({text: '原文', context: {firstUserMessage: 'PRIVATE_CONTEXT'}});
+    expect(String(fetcher.mock.calls[1][1].body)).not.toContain('PRIVATE_CONTEXT');
+  });
+
+  it('sends only allowed bounded context strings when explicitly opted in', async () => {
+    const fetcher = vi.fn(async (_url: any, _init: any) => completion());
+    const {corrector} = service({fetcher});
+    corrector.update({enabled: true, includeContext: true});
+    const result = await corrector.correct({
+      text: '语音原文',
+      context: {
+        firstUserMessage: '最初需求',
+        latestUserMessage: '最近需求',
+        latestAssistantMessage: 'AI_START' + '字'.repeat(10000) + 'AI_END',
+        thinking: 'THINKING_SECRET',
+        toolCall: {arguments: 'TOOL_SECRET'},
+        logs: 'LOG_SECRET',
+        system: 'SYSTEM_SECRET'
+      }
+    });
+    expect(result.contextUsed).toBe(true);
+    const messages = JSON.parse(String(fetcher.mock.calls[0][1].body)).messages;
+    expect(messages.map((m: any) => m.role)).toEqual(['system', 'user']);
+    const payload = JSON.parse(messages[1].content);
+    expect(payload.original).toBe('语音原文');
+    expect(Object.keys(payload.context)).toEqual([
+      'firstUserMessage',
+      'latestUserMessage',
+      'latestAssistantMessage'
+    ]);
+    expect(payload.context.latestAssistantMessage.length).toBe(4000);
+    expect(payload.context.latestAssistantMessage).toMatch(/^AI_START[\s\S]*AI_END$/);
+    expect(JSON.stringify(messages)).not.toContain('SECRET');
+    expect(messages[0].content).toContain('输出只校对 original');
+  });
+
+  it('still works without any context when context is enabled but the conversation is empty', async () => {
+    const fetcher = vi.fn(async (_url: any, _init: any) => completion());
+    const {corrector} = service({fetcher});
+    corrector.update({enabled: true, includeContext: true});
+    const result = await corrector.correct({text: '原文', context: {thinking: 'SECRET'}});
+    expect(result.contextUsed).toBe(false);
+    const payload = JSON.parse(JSON.parse(String(fetcher.mock.calls[0][1].body)).messages[1].content);
+    expect(payload).toEqual({original: '原文'});
+  });
 
   it('rejects missing and oversized text without a model call', async () => {
     const fetcher = vi.fn(),
@@ -175,9 +247,10 @@ describe('authenticated voice correction API', () => {
       expect((await call(method, method === 'GET' ? undefined : {text: '原文'}, voiceToken)).status).toBe(
         403
       );
-    const saved = await call('PUT', {enabled: true});
+    const saved = await call('PUT', {enabled: true, includeContext: true});
     expect(saved.status).toBe(200);
     expect(saved.body.data.settings.model).toBe('gpt-6.1-terra');
+    expect(saved.body.data.settings.includeContext).toBe(true);
     expect(JSON.stringify(saved.body)).not.toContain('secret');
     expect((await call('POST', {text: '原文'})).body.data.original).toBe('原文');
     expect(server.agents.list()).toEqual([]);
@@ -191,7 +264,7 @@ describe('authenticated voice correction API', () => {
     server = new RemotePiServer({port: 0, dataDir, voiceCorrectionFetcher: fetcher});
     address = await server.start();
     base = `http://127.0.0.1:${address!.port}`;
-    expect((await call('GET')).body.data.settings.enabled).toBe(true);
+    expect((await call('GET')).body.data.settings).toMatchObject({enabled: true, includeContext: true});
     expect((await call('PUT', {enabled: false})).status).toBe(200);
     expect((await call('POST', {text: '原文'})).status).toBe(503);
     expect(fetcher).toHaveBeenCalledTimes(1);
