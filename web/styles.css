@@ -122,6 +122,11 @@
 .library-actions{display:flex;gap:4px;flex:0 0 auto}.library-actions button{padding:2px 7px;font-size:12px}
 @media(max-width:700px){#libraryPicker{left:8px;right:8px;bottom:116px;max-height:55vh}.composer-row{grid-template-columns:minmax(0,1fr) auto auto auto}}
 /* Follow-up advice after a run settled: shown above the composer, never sent on its own. */
+#voiceCorrectionPanel{margin-bottom:8px;padding:9px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:6px;max-height:36vh;overflow:auto}
+.voice-correction-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}.voice-correction-head small{flex:1;min-width:180px}
+.voice-correction-columns{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:8px 0}.voice-correction-columns label{min-width:0;font-size:12px;color:var(--muted)}.voice-correction-columns textarea{display:block;width:100%;margin-top:4px;min-height:64px;max-height:20vh;resize:vertical;color:var(--text)}
+.voice-correction-actions{display:flex;gap:7px;flex-wrap:wrap}.voice-correction-actions button{padding:5px 9px;font-size:12px}
+@media(max-width:700px){#voiceCorrectionPanel{max-height:32dvh}.voice-correction-columns{grid-template-columns:1fr;gap:6px}.voice-correction-columns textarea{min-height:48px;max-height:10dvh}}
 #adviceBar{margin-bottom:8px;padding:7px 10px;font-size:12px;background:#2f3542;border:1px solid var(--line);border-left:3px solid var(--muted);border-radius:6px}
 #adviceBar.advice-done{border-left-color:var(--green)}#adviceBar.advice-continue{border-left-color:var(--blue)}#adviceBar.advice-needs_user{border-left-color:var(--yellow)}#adviceBar.advice-error{border-left-color:var(--red)}
 .advice-head{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px}.advice-head>small{color:var(--muted)}

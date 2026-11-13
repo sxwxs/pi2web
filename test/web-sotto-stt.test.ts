@@ -138,6 +138,26 @@ describe('Web Sotto input', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it('feeds correction previews and the final transcript without replacing the live ASR draft', async () => {
+    const h = harness({remote: true});
+    const correction = {begin: vi.fn(), observe: vi.fn(), end: vi.fn(), clear: vi.fn()};
+    h.state.voiceCorrection = correction;
+    await h.start();
+    const voice = h.state.voiceStream;
+    expect(correction.begin).toHaveBeenCalledWith(voice);
+    h.message({type: 'partial', text: '原始的识别'});
+    expect(correction.observe).toHaveBeenLastCalledWith(voice, '原始的识别');
+    h.message({type: 'final', segment: 0, text: '最终识别'});
+    expect(h.input.value).toBe('draft 最终识别');
+    h.api.stopSottoStream(voice);
+    voice.node.port.onmessage({data: {type: 'flushed'}});
+    h.sockets[0].onclose({code: 1000});
+    expect(correction.end).toHaveBeenLastCalledWith(voice, '最终识别');
+    expect(h.prompt).not.toHaveBeenCalled();
+    h.api.cancelVoiceRecording();
+    expect(correction.clear).toHaveBeenCalled();
+  });
+
   it('uses only the page-serving local backend for speech, even on a remote Agent', () => {
     const mic = {hidden: false, title: ''},
       playback = {hidden: true};

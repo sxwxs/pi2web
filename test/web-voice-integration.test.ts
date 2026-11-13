@@ -8,6 +8,62 @@ const draft = source.slice(
   source.indexOf('  function handleAgentEvent(')
 );
 
+describe('recorded audio transcription into the Web UI input', () => {
+  const transcription = source.slice(
+    source.indexOf('  async function transcribeVoice('),
+    source.indexOf('  const handledDrafts = new Set()')
+  );
+  function harness() {
+    const input = {value: '已有草稿', focus: vi.fn()};
+    const backend = {id: 'local', base: 'http://localhost:11318', status: 'connected'};
+    const correction = {begin: vi.fn(), end: vi.fn()};
+    const state: any = {
+      mediaRecorder: {mimeType: 'audio/webm'},
+      mediaChunks: [],
+      mediaAgentId: 'remote:agent',
+      mediaBackendId: 'local',
+      agent: {agentId: 'remote:agent'},
+      voiceCorrection: correction
+    };
+    let resolve!: (response: Response) => void;
+    const response = new Promise<Response>(r => {
+      resolve = r;
+    });
+    const fetcher = vi.fn(() => response);
+    const elements: any = {input};
+    const {transcribeVoice} = runInNewContext(`${transcription}\n({transcribeVoice})`, {
+      state,
+      Blob,
+      clearTimeout,
+      backendOf: () => backend,
+      fetch: fetcher,
+      $: (id: string) => (elements[id] ??= {classList: {remove: vi.fn()}}),
+      toast: vi.fn()
+    });
+    return {input, state, correction, transcribeVoice, resolve, fetcher};
+  }
+  it('corrects a recorded result through the speech backend while keeping the original in the composer', async () => {
+    const h = harness(),
+      done = h.transcribeVoice();
+    h.resolve(new Response(JSON.stringify({data: {text: '识别原文'}})));
+    await done;
+    expect(h.input.value).toBe('已有草稿 识别原文');
+    const owner = h.correction.begin.mock.calls[0][0];
+    expect(owner).toMatchObject({agentId: 'remote:agent', transcribeBackendId: 'local', at: 5});
+    expect(h.correction.end).toHaveBeenCalledWith(owner, '识别原文');
+    expect(h.fetcher.mock.calls[0][0]).toBe('http://localhost:11318/api/v1/transcribe');
+  });
+  it('does not insert or correct a late transcription after switching Agent', async () => {
+    const h = harness(),
+      done = h.transcribeVoice();
+    h.state.agent = {agentId: 'remote:other'};
+    h.resolve(new Response(JSON.stringify({data: {text: '晚到原文'}})));
+    await done;
+    expect(h.input.value).toBe('已有草稿');
+    expect(h.correction.begin).not.toHaveBeenCalled();
+  });
+});
+
 describe('draft into the current Web UI input', () => {
   it('never switches Agent and only inserts into the displayed backend', () => {
     const sent: any[] = [],

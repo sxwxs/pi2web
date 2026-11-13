@@ -31,6 +31,10 @@ paths:
   /sotto-stt:
     get: {operationId: getSottoSttSettings, description: 'Backend-wide Sotto transcription setting; disabled by default, endpoint defaults to http://127.0.0.1:8766.', responses: {'200': {$ref: '#/components/responses/Success'}}}
     put: {operationId: setSottoSttSettings, description: 'Body {enabled: boolean, endpoint: http://127.0.0.1:<port>}; probes local Sotto capabilities before enabling. Requires full access token.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
+  /voice-correction:
+    get: {operationId: getVoiceCorrectionSettings, description: 'Full access token only. Data {settings:{enabled,baseUrl,model},apiKeyConfigured}; off by default, defaults http://localhost:8313/ and gpt-6.1-terra. API key only from --voice-correction-api-key-env.', responses: {'200': {$ref: '#/components/responses/Success'}}}
+    put: {operationId: setVoiceCorrectionSettings, description: 'Full access token only. Partial settings {enabled?,baseUrl?,model?}, persisted in the backend database. Cancels outstanding corrections; independent of ASR/TTS.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}}}
+    post: {operationId: correctVoiceTranscript, description: 'Full access token only. Body {text:string}, nonempty, max 20000 characters. Calls configured POST /v1/chat/completions, returns {data:{original,corrected,model}} without sending to an Agent. Timeout 60 seconds. 503 when disabled, 502 on upstream failure, 504 on timeout.', requestBody: {$ref: '#/components/requestBodies/Json'}, responses: {'200': {$ref: '#/components/responses/Success'}, '503': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '504': {$ref: '#/components/responses/Error'}}}
   /transcribe:
     post: {operationId: transcribeDraft, description: 'Backend-wide authenticated transcription, not tied to an Agent. Audio format follows the configured Sotto or STT service; returns {data:{text}}.', responses: {'200': {$ref: '#/components/responses/Success'}}}
   /transcribe/ws:
