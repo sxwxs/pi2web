@@ -4500,8 +4500,10 @@
     if (!agent) return;
     cancelVoiceRecording();
     const result = await postAgent(agent.agentId, '/navigate', {entryId});
-    await selectAgent(agent);
+    // Fill the composer while it is this Agent's, not after awaiting: the user may switch meanwhile.
+    const opening = selectAgent(agent);
     if (result.editorText !== undefined) $('input').value = result.editorText;
+    await opening;
     toast(result.editorText !== undefined ? '已回退到该用户输入，可编辑后重新发送' : '已回退到所选输出');
   }
   const performanceTime = ms =>
@@ -4622,8 +4624,10 @@
     const forked = stampNewItem(source.backendId, result.agent);
     const binding = autoBindNewSession(forked);
     await refreshAgents();
-    await selectAgent(forked);
+    // Put the message back as the fork is shown, not after awaiting: the user may switch meanwhile.
+    const opening = selectAgent(forked);
     if (result.selectedText) prependInput(result.selectedText);
+    await opening;
     toast(
       `已 Fork 新 Session${result.selectedText ? '，所选消息已放回输入框' : ''}${binding ? `；已自动绑定到按键 ${binding.slot + 1}` : ''}`
     );

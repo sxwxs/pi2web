@@ -7,6 +7,17 @@ const forkSource = source.slice(
   source.indexOf('  async function forkPoints('),
   source.indexOf('  async function revert(')
 );
+const navigateSource = source.slice(
+  source.indexOf('  async function navigateAgent('),
+  source.indexOf('  const performanceTime =')
+);
+/** Opening a Session finishes after its summary request; the user may select another one meanwhile. */
+const opening = (order: string[]) =>
+  vi.fn(async () => {
+    order.push('select');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    order.push('loaded');
+  });
 
 /** GET /fork-points: the current branch's user messages, newest first. */
 const points = [
@@ -33,9 +44,7 @@ function setup(data: object[] = points) {
   const requestAgent = vi.fn(async () => data);
   const postAgent = vi.fn(async () => ({agent: {agentId: 'fork'}, selectedText: 'second'}));
   const order: string[] = [];
-  const selectAgent = vi.fn(async () => {
-    order.push('select');
-  });
+  const selectAgent = opening(order);
   const prependInput = vi.fn(() => order.push('input'));
   const toast = vi.fn();
   let dialog: any;
@@ -96,8 +105,8 @@ describe('fork from the Session context menu', () => {
     expect(h.postAgent).toHaveBeenCalledWith('bk:source', '/fork', {entryId: 'u2'});
     expect(h.selectAgent).toHaveBeenCalledWith(h.forked);
     expect(h.prependInput).toHaveBeenCalledWith('second');
-    // Selecting first: the input must hold the message once the new Session is shown.
-    expect(h.order).toEqual(['select', 'input']);
+    // The message lands while the fork is the selected Session, not after it finished loading.
+    expect(h.order).toEqual(['select', 'input', 'loaded']);
   });
 
   it('does not fork a Session without user messages', async () => {
@@ -106,5 +115,30 @@ describe('fork from the Session context menu', () => {
     await h.api.showForkDialog(h.source);
     expect(h.postAgent).not.toHaveBeenCalled();
     expect(h.toast).toHaveBeenCalledWith('这个 Session 还没有用户消息，无法 Fork');
+  });
+});
+
+describe('Undo', () => {
+  it('fills the composer while the Agent is still the selected one', async () => {
+    const order: string[] = [],
+      input = {
+        set value(text: string) {
+          order.push(`input ${text}`);
+        }
+      };
+    const {navigateAgent} = runInNewContext(
+      `${navigateSource}
+({navigateAgent})`,
+      {
+        state: {agent: {agentId: 'bk:a'}},
+        cancelVoiceRecording: vi.fn(),
+        postAgent: vi.fn(async () => ({editorText: 'edit me'})),
+        selectAgent: opening(order),
+        $: () => input,
+        toast: vi.fn()
+      }
+    );
+    await navigateAgent('entry');
+    expect(order).toEqual(['select', 'input edit me', 'loaded']);
   });
 });
