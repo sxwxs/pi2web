@@ -842,7 +842,7 @@
         suppressClickUntil = Date.now() + 700;
         element.classList.remove('long-press-pending');
         navigator.vibrate?.(15);
-        openMenu({preventDefault() {}, clientX: startX, clientY: startY});
+        openMenu({preventDefault() {}, stopPropagation() {}, clientX: startX, clientY: startY});
       }, 550);
     });
     element.addEventListener('pointermove', event => {
@@ -1435,6 +1435,83 @@
     backendId => Date.now() + (backendOf(backendId)?.clockOffset || 0)
   );
   setInterval(activityView.tick, 1000);
+  /**
+   * Each listed Agent or Terminal owns one card, found by its key. A change to one item updates only
+   * its card (renderListItem). renderAgentList decides which cards are listed and in which order; it
+   * reuses and moves cards instead of rebuilding them, so a click or long press on a card survives.
+   */
+  let listCards = new Map();
+  const listKey = (kind, id) => `${kind}:${id}`;
+  function createListCard(kind, id) {
+    const el = document.createElement('div'),
+      card = {kind, id, item: null, el, status: '', html: '', activity: null, activityLine: null};
+    el.className = 'agent';
+    el.dataset.itemId = id;
+    const openMenu = event => showItemContextMenu(event, card.kind, card.item);
+    el.onclick = () => (kind === 'agent' ? selectAgent(card.item) : selectTerminal(card.item));
+    el.oncontextmenu = openMenu;
+    enableLongPressMenu(el, openMenu);
+    return card;
+  }
+  function listCardHtml(kind, item) {
+    const backend =
+      connectedBackends().length > 1
+        ? `<span class="backend-tag" title="${esc(`来自 backend ${item.backendName}`)}">${esc(item.backendName)}</span>`
+        : '';
+    const badge = `<span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span>`;
+    if (kind === 'terminal')
+      return `<div class="agent-top"><span class="terminal-kind">&gt;_</span><b>${esc(item.title || 'Terminal')}</b>${badge}${backend}</div><small>${esc(item.cwd)}</small>`;
+    const usage = state.contexts.get(item.agentId),
+      binding = sessionKeyboard.getBinding(item.agentId),
+      template = item.template,
+      advice = state.advice.get(item.agentId);
+    let tags = '';
+    if (advice) {
+      const [icon, label] = adviceSummary(advice);
+      tags += `<span class="advice-mark advice-${esc(advice.state === 'ready' ? advice.outcome : advice.state)}" title="${esc(`跟进建议：${label}`)}">${esc(icon)}</span>`;
+    }
+    tags += badge;
+    if (binding)
+      tags += `<span class="key-binding" style="--key-color:${esc(binding.color)}" title="${esc(`键盘按键 ${binding.slot + 1} · ${binding.color}`)}">K${binding.slot + 1}</span>`;
+    if (template) {
+      const name = template.name || template.id;
+      tags += `<span class="template-tag" title="${esc(`System Prompt 模板：${name}（${templateModeText(template.mode)}，创建时固定）`)}">${esc(name)}</span>`;
+    }
+    return `<div class="agent-top"><b>${esc(agentLabel(item))}</b>${tags}${backend}</div><small>${esc(agentSubtitle(item))}</small><div class="agent-activity" hidden></div><div class="agent-context ${usageLevel(usage)}"><span>Context</span><div class="mini-track"><i style="width:${Math.min(100, Math.max(0, Number(usage?.percent) || 0))}%"></i></div><span>${esc(usageText(usage))} · ${esc(costText(usage))}</span></div>`;
+  }
+  /** Bring one card in line with its item, touching only what changed. */
+  function updateListCard(card, item) {
+    const isAgent = card.kind === 'agent',
+      selectedId = isAgent ? state.agent?.agentId : state.terminal?.terminalId;
+    card.item = item;
+    card.el.classList.toggle('selected', state.selectedKind === card.kind && selectedId === card.id);
+    if (card.status !== item.status) {
+      if (card.status) card.el.classList.remove(card.status);
+      card.el.classList.add(item.status);
+      card.status = item.status;
+    }
+    const html = listCardHtml(card.kind, item);
+    if (card.html !== html) {
+      card.html = html;
+      card.el.innerHTML = html;
+      card.activityLine = card.el.querySelector('.agent-activity');
+      card.activity = null;
+    }
+    if (!isAgent) return;
+    // The activity changes most often, so it has its own slot; its elapsed times tick in place.
+    const activity = state.activities.get(item.agentId);
+    if (card.activity !== activity) {
+      card.activity = activity;
+      const line = activityView.line(activity, item.backendId);
+      card.activityLine.replaceChildren(...(line ? line.childNodes : []));
+      card.activityLine.hidden = !line;
+    }
+  }
+  /** One item changed: update its own card, if listed, and leave the list and its order alone. */
+  function renderListItem(kind, id) {
+    const card = listCards.get(listKey(kind, id));
+    if (card) updateListCard(card, card.item);
+  }
   function renderAgentList() {
     const recent = (value, fallback) => {
       const time = Date.parse(value || fallback || '');
@@ -1448,61 +1525,21 @@
     );
     if (state.backendFilter)
       allItems = allItems.filter(entry => entry.item.backendId === state.backendFilter);
-    const items = allItems.slice(0, state.agentVisibleCount);
-    $('agents').replaceChildren(
-      ...items.map(({kind, item}) => {
-        const isAgent = kind === 'agent',
-          id = isAgent ? item.agentId : item.terminalId,
-          selected =
-            state.selectedKind === kind &&
-            (isAgent ? state.agent?.agentId : state.terminal?.terminalId) === id;
-        const el = document.createElement('div');
-        el.dataset.itemId = id;
-        el.className = `agent ${item.status}${selected ? ' selected' : ''}`;
-        if (isAgent) {
-          const usage = state.contexts.get(item.agentId),
-            binding = sessionKeyboard.getBinding(item.agentId);
-          el.innerHTML = `<div class="agent-top"><b>${esc(agentLabel(item))}</b><span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span></div><small>${esc(agentSubtitle(item))}</small><div class="agent-context ${usageLevel(usage)}"><span>Context</span><div class="mini-track"><i style="width:${Math.min(100, Math.max(0, Number(usage?.percent) || 0))}%"></i></div><span>${esc(usageText(usage))} · ${esc(costText(usage))}</span></div>`;
-          if (binding) {
-            const badge = document.createElement('span');
-            badge.className = 'key-binding';
-            badge.style.setProperty('--key-color', binding.color);
-            badge.textContent = `K${binding.slot + 1}`;
-            badge.title = `键盘按键 ${binding.slot + 1} · ${binding.color}`;
-            el.querySelector('.agent-top').append(badge);
-          }
-          if (item.template) {
-            const tag = document.createElement('span');
-            tag.className = 'template-tag';
-            tag.textContent = item.template.name || item.template.id;
-            tag.title = `System Prompt 模板：${item.template.name || item.template.id}（${templateModeText(item.template.mode)}，创建时固定）`;
-            el.querySelector('.agent-top').append(tag);
-          }
-          const advice = state.advice.get(item.agentId);
-          if (advice) {
-            const [icon, label] = adviceSummary(advice),
-              mark = document.createElement('span');
-            mark.className = `advice-mark advice-${advice.state === 'ready' ? advice.outcome : advice.state}`;
-            mark.textContent = icon;
-            mark.title = `跟进建议：${label}`;
-            el.querySelector('.agent-top b').after(mark);
-          }
-          const activityLine = activityView.line(state.activities.get(item.agentId), item.backendId);
-          if (activityLine) el.querySelector('small').after(activityLine);
-        } else
-          el.innerHTML = `<div class="agent-top"><span class="terminal-kind">&gt;_</span><b>${esc(item.title || 'Terminal')}</b><span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span></div><small>${esc(item.cwd)}</small>`;
-        if (connectedBackends().length > 1) {
-          const tag = document.createElement('span');
-          tag.className = 'backend-tag';
-          tag.textContent = item.backendName;
-          tag.title = `来自 backend ${item.backendName}`;
-          el.querySelector('.agent-top').append(tag);
-        }
-        el.onclick = () => (isAgent ? selectAgent(item) : selectTerminal(item));
-        el.oncontextmenu = event => showItemContextMenu(event, kind, item);
-        return el;
-      })
-    );
+    const items = allItems.slice(0, state.agentVisibleCount),
+      shown = new Map();
+    const nodes = items.map(({kind, item}) => {
+      const id = kind === 'agent' ? item.agentId : item.terminalId,
+        key = listKey(kind, id),
+        card = listCards.get(key) || createListCard(kind, id);
+      shown.set(key, card);
+      updateListCard(card, item);
+      return card.el;
+    });
+    listCards = shown;
+    const list = $('agents');
+    // Move cards only when the order changed; a moved card is still the same element.
+    if (nodes.length !== list.children.length || nodes.some((node, index) => list.children[index] !== node))
+      list.replaceChildren(...nodes);
     $('agentListCount').textContent = `已显示 ${items.length} / ${allItems.length}`;
     $('loadMoreAgents').hidden = items.length >= allItems.length;
     $('loadMoreAgents').disabled = items.length >= allItems.length;
@@ -1593,7 +1630,7 @@
     else state.activities.delete(agentId);
     sessionKeyboard.setActivity(agentId, activity);
     refreshToolCards(agentId);
-    renderAgentList();
+    renderListItem('agent', agentId);
     if (state.agent?.agentId === agentId) renderActivityBar();
   }
   function setAgentStatus(agentId, status) {
@@ -1602,7 +1639,7 @@
       void refreshAgents();
       return null;
     }
-    // Every event reports the status, so an unchanged one must not rebuild the list for each delta.
+    // Every event reports the status; only a change re-sorts the list, never each delta.
     if (agent.status === status) return agent;
     agent.status = status;
     if (state.agent?.agentId === agentId) state.agent.status = status;
@@ -1771,13 +1808,13 @@
             if (message.data) term.write(message.data);
             terminal.status = message.record.status;
             updateTerminalHeader();
-            renderAgentList();
+            renderListItem('terminal', terminal.terminalId);
           } else if (message.type === 'output') term.write(message.data);
           else if (message.type === 'exit') {
             terminal.status = 'exited';
             terminal.exitCode = message.exitCode;
             updateTerminalHeader();
-            renderAgentList();
+            renderListItem('terminal', terminal.terminalId);
             void refreshAgents();
           } else if (message.type === 'error') toast(message.message);
         } catch (error) {
@@ -1936,7 +1973,7 @@
     const session = await requestAgent(state.agent.agentId, '/session?summary=true');
     state.agent.sessionName = session.sessionName || undefined;
     state.contexts.set(state.agent.agentId, sessionUsage(session));
-    renderAgentList();
+    renderListItem('agent', state.agent.agentId);
     updateAgentHeader();
   }
 
@@ -2658,7 +2695,7 @@
   function setAgentAdvice(agentId, advice) {
     if (advice) state.advice.set(agentId, advice);
     else if (!state.advice.delete(agentId)) return;
-    renderAgentList();
+    renderListItem('agent', agentId);
     if (state.agent?.agentId === agentId) renderAdviceBar();
   }
   async function dismissAdvice(agentId) {
@@ -3310,7 +3347,7 @@
     } else if (ev.type === 'session_info_changed') {
       if (eventAgent) eventAgent.sessionName = ev.name || undefined;
       if (selected) state.agent.sessionName = ev.name || undefined;
-      renderAgentList();
+      renderListItem('agent', message.agentId);
       if (selected) updateAgentHeader();
     }
     if (selected) handleDetail(message);
