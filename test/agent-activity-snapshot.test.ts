@@ -289,6 +289,28 @@ describe('overview stream', () => {
     expect(agents.get(agent.agentId).record.lastActiveAt).toBe(before);
   });
 
+  it('moves an Agent up the list only when a run starts', async () => {
+    const {agents, agent, publish, connect} = await setup();
+    const observer = await connect();
+    observer.send({type: 'subscribe_all'});
+    await observer.wait(m => m.type === 'subscribed_all');
+    const order = () => agents.get(agent.agentId).record.lastActiveAt,
+      created = order();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    // During and after a run, and answering a dialog in it, are not a new run.
+    publish({type: 'turn_start'});
+    publish({type: 'tool_execution_start', toolCallId: 't', toolName: 'read', args: {}});
+    publish({type: 'extension_ui_request', requestId: 'q', kind: 'confirm', title: 'Go?'});
+    publish({type: 'extension_ui_response', requestId: 'q'});
+    publish({type: 'agent_end'});
+    await observer.wait(m => m.event?.type === 'agent_end');
+    expect(order()).toBe(created);
+    publish({type: 'agent_start'});
+    const started = await observer.wait(m => m.event?.type === 'agent_start');
+    expect(order()).toBe(new Date(started.timestamp).toISOString());
+    expect(order() > created).toBe(true);
+  });
+
   it('broadcasts unloading so other clients can clear activity without reconnecting', async () => {
     const {agents, agent, publish, connect, unload, backends} = await setup();
     const observer = await connect();

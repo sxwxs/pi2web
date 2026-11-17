@@ -1431,9 +1431,8 @@
   };
   const sessionUsage = session => ({...(session.contextUsage || {}), cost: session.stats?.cost});
   // Server time for a backend, corrected by the skew measured when its socket subscribed.
-  const activityView = window.ActivityView.createActivityView(
-    backendId => Date.now() + (backendOf(backendId)?.clockOffset || 0)
-  );
+  const serverNow = backendId => Date.now() + (backendOf(backendId)?.clockOffset || 0);
+  const activityView = window.ActivityView.createActivityView(serverNow);
   setInterval(activityView.tick, 1000);
   /**
    * Each Agent or Terminal owns one card, built once with a fixed set of elements. A change to an item
@@ -1548,16 +1547,21 @@
     const card = listCards.get(listKey(kind, id));
     if (card) updateListCard(card, card.item);
   }
+  const recentTime = (value, fallback) => {
+    const time = Date.parse(value || fallback || '');
+    return Number.isFinite(time) ? time : 0;
+  };
+  /**
+   * Newest first by `lastActiveAt`: an Agent's last run start, a Terminal's last input, or creation.
+   * Nothing else changes it, so no other update reorders the list.
+   */
   function renderAgentList() {
-    const recent = (value, fallback) => {
-      const time = Date.parse(value || fallback || '');
-      return Number.isFinite(time) ? time : 0;
-    };
     let allItems = [
       ...state.agents.map(item => ({kind: 'agent', item})),
       ...state.terminals.map(item => ({kind: 'terminal', item}))
     ].sort(
-      (a, b) => recent(b.item.lastActiveAt, b.item.createdAt) - recent(a.item.lastActiveAt, a.item.createdAt)
+      (a, b) =>
+        recentTime(b.item.lastActiveAt, b.item.createdAt) - recentTime(a.item.lastActiveAt, a.item.createdAt)
     );
     if (state.backendFilter)
       allItems = allItems.filter(entry => entry.item.backendId === state.backendFilter);
@@ -1597,13 +1601,6 @@
       agents.map(async agent => {
         const session = await requestAgent(agent.agentId, '/session?summary=true');
         agent.sessionName = session.sessionName || undefined;
-        let lastMessageAt = 0;
-        for (const entry of session.entries || []) {
-          if (entry.type !== 'message') continue;
-          const time = Date.parse(entry.timestamp || '');
-          if (Number.isFinite(time)) lastMessageAt = Math.max(lastMessageAt, time);
-        }
-        if (lastMessageAt) agent.lastActiveAt = new Date(lastMessageAt).toISOString();
         state.contexts.set(agent.agentId, sessionUsage(session));
       })
     );
@@ -1793,8 +1790,14 @@
     term.loadAddon(fit);
     term.open($('terminal'));
     term.onData(data => {
-      if (state.terminalWs?.readyState === WebSocket.OPEN)
-        state.terminalWs.send(JSON.stringify({type: 'input', data}));
+      if (state.terminalWs?.readyState !== WebSocket.OPEN) return;
+      state.terminalWs.send(JSON.stringify({type: 'input', data}));
+      // Typing moves the Terminal up the list, as the server does; see renderAgentList.
+      const listed = state.terminals.find(item => item.terminalId === state.terminal?.terminalId);
+      if (listed) {
+        listed.lastActiveAt = new Date(serverNow(listed.backendId)).toISOString();
+        renderAgentList();
+      }
     });
     term.onResize(size => {
       if (state.terminalWs?.readyState === WebSocket.OPEN)
@@ -3351,14 +3354,15 @@
     const ev = message.event || {},
       selected = state.selectedKind === 'agent' && state.agent?.agentId === message.agentId;
     let eventAgent = state.agents.find(x => x.agentId === message.agentId);
-    // Viewing an Agent loads its backend; that is not activity and must not reorder the list.
+    // Only the start of a run moves an Agent up the list, as on the server (never back, e.g. on replay).
     if (
       eventAgent &&
-      Number(message.timestamp) > 0 &&
-      ev.type !== 'agent_loaded' &&
-      ev.type !== 'agent_unloaded'
-    )
+      ev.type === 'agent_start' &&
+      Number(message.timestamp) > recentTime(eventAgent.lastActiveAt, eventAgent.createdAt)
+    ) {
       eventAgent.lastActiveAt = new Date(Number(message.timestamp)).toISOString();
+      renderAgentList();
+    }
     // Every event carries the authoritative status, including dialog waits.
     if (message.status) eventAgent = setAgentStatus(message.agentId, message.status) || eventAgent;
     if (ev.type === 'queue_update') {

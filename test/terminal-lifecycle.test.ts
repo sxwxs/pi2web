@@ -34,6 +34,9 @@ class TrackedPty implements PtyProcess {
   exit(exitCode = 0) {
     this.emitter.emit('exit', {exitCode});
   }
+  output(data: string) {
+    this.emitter.emit('data', data);
+  }
 }
 
 describe('terminal lifecycle', () => {
@@ -60,5 +63,28 @@ describe('terminal lifecycle', () => {
     ptys[1].exit(0);
     expect(terminals.list().map(item => item.terminalId)).toEqual([second.terminalId]);
     expect(() => terminals.get(first.terminalId)).toThrow('Terminal not found');
+  });
+
+  it('moves a terminal up the list only when someone types into it', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'remote-pi-terminal-')),
+      workspaces = new WorkspaceStore(),
+      workspace = workspaces.add('x', root),
+      ptys: TrackedPty[] = [];
+    const terminals = new TerminalManager(workspaces, () => {
+      const pty = new TrackedPty();
+      ptys.push(pty);
+      return pty;
+    });
+    const first = await terminals.create(workspace.id);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const second = await terminals.create(workspace.id);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const ids = () => terminals.list().map(item => item.terminalId);
+    // A server logging away, or a shell exiting, stays where it is.
+    ptys[0].output('log line');
+    ptys[1].exit(1);
+    expect(ids()).toEqual([second.terminalId, first.terminalId]);
+    terminals.write(first.terminalId, 'ls');
+    expect(ids()).toEqual([first.terminalId, second.terminalId]);
   });
 });
