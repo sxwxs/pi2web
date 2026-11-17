@@ -398,7 +398,7 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET/POST /api/v1/terminals`
 - `GET/DELETE /api/v1/terminals/:id`
 - Terminal WebSocket `/api/v1/terminals/:id/ws` 支持输入、窗口 resize、输出快照和退出事件。
-- Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork`、`archive`、`extension-response`、`commands`、`bash` 和 `bash-abort` 接口。`steer` 与 `follow-up` 的响应带 `disposition`（`handled` 表示当前回合已接收，`queued` 表示排队等待）。
+- Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork-points`、`fork`、`archive`、`extension-response`、`commands`、`bash` 和 `bash-abort` 接口。`steer` 与 `follow-up` 的响应带 `disposition`（`handled` 表示当前回合已接收，`queued` 表示排队等待）。
 - `GET /api/v1/agents/:id/queue` 返回排队中的 steer / follow-up 消息，`DELETE` 清空并返回被清掉的消息，便于客户端放回输入框；队列变化通过 `queue_update` 事件推送。WebSocket 的 `clear-queue` 命令等价。
 - `GET /api/v1/agents/:id/mcp` 返回该 Agent cwd 下的 MCP 服务器配置（全局 `mcp.json` 与受信任项目的 `.pi/mcp.json`），`POST` 用 `{name, enabled}` 启用或停用。只有项目被 Pi 显式信任时才会写入项目级覆盖，否则写全局文件。修改在 Agent 下次加载时生效。
 - `GET /api/v1/agents/:id/commands` 返回该 Agent cwd 下可用的 prompt template 和 skill（`{name, description, argumentHint, source}`）。`prompt` 接口本身会展开 `/命令`、skill 和 prompt template。

@@ -6,7 +6,7 @@ import {createSdkBackend, type BackendOptions} from './sdk-backend.js';
 import type {AgentTemplateSnapshot} from './agent-templates.js';
 import {ActivityTracker, type Activity} from './activity.js';
 import {AgentFeed, type DetailMessage, type TimelineSource} from './agent-feed.js';
-import {buildTimeline, itemBody, pageTimeline, type TimelineEntry} from './timeline.js';
+import {buildTimeline, forkPoints, itemBody, pageTimeline, type TimelineEntry} from './timeline.js';
 import {voiceCorrectionContext} from './voice-correction-context.js';
 import {sessionPerformance} from './session-performance.js';
 export type AgentState = {
@@ -777,6 +777,10 @@ export class AgentManager {
   async voiceCorrectionContext(id: string) {
     const source = (await this.ensureLoaded(id)).timeline();
     return {sessionId: source.sessionId, context: voiceCorrectionContext(source.entries())};
+  }
+  /** Where fork() can cut the current branch, with short previews instead of the whole session. */
+  async forkPoints(id: string) {
+    return forkPoints((await this.ensureLoaded(id)).timeline().entries());
   }
   /** All timing records of the current branch; older sessions only have partial tool timings. */
   async performance(id: string) {

@@ -4521,13 +4521,9 @@
       '关闭'
     );
   }
-  /** Pi forks only before a user message. These are the current branch's, newest first. */
+  /** Pi forks only before a user message: the current branch's, newest first. */
   async function forkPoints(agent) {
-    const session = await requestAgent(agent.agentId, '/session');
-    const entries = new Map((session.entries || []).map(entry => [entry.id, entry]));
-    const messages = [];
-    for (let entry = entries.get(session.leafId); entry; entry = entries.get(entry.parentId))
-      if (entry.type === 'message' && entry.message?.role === 'user') messages.push(entry);
+    const messages = await requestAgent(agent.agentId, '/fork-points');
     if (!messages.length) toast('这个 Session 还没有用户消息，无法 Fork');
     return messages;
   }
@@ -4545,7 +4541,7 @@
   }
   async function forkLatest(agent) {
     const [latest] = await forkPoints(agent);
-    if (latest) await forkAgent(agent, latest.id);
+    if (latest) await forkAgent(agent, latest.entryId);
   }
   async function showForkDialog(agent) {
     const messages = await forkPoints(agent);
@@ -4560,16 +4556,15 @@
         body.append(note);
         const list = document.createElement('div');
         list.className = 'modal-list';
-        let value = messages[0].id;
-        messages.forEach((e, index) => {
-          const text = textContent(e.message.content).trim() || '(无文字内容)',
-            time = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
+        let value = messages[0].entryId;
+        messages.forEach((point, index) => {
+          const time = point.timestamp ? new Date(point.timestamp).toLocaleString() : '';
           const b = document.createElement('button');
           b.type = 'button';
           b.className = index ? 'choice' : 'choice selected';
-          b.innerHTML = `${esc(text.slice(0, 160))}<small>${esc([time, index ? '' : '最新'].filter(Boolean).join(' · '))}</small>`;
+          b.innerHTML = `${esc(point.preview || '(无文字内容)')}<small>${esc([time, index ? '' : '最新'].filter(Boolean).join(' · '))}</small>`;
           b.onclick = () => {
-            value = e.id;
+            value = point.entryId;
             list.querySelectorAll('button').forEach(x => x.classList.remove('selected'));
             b.classList.add('selected');
           };

@@ -8,31 +8,11 @@ const forkSource = source.slice(
   source.indexOf('  async function revert(')
 );
 
-const message = (
-  id: string,
-  parentId: string | null,
-  role: string,
-  content: unknown,
-  timestamp?: string
-) => ({
-  type: 'message',
-  id,
-  parentId,
-  timestamp,
-  message: {role, content}
-});
-/** u1 → a1 → u2 → a2 is the current branch; u3 was abandoned by an Undo back to a1. */
-const session = {
-  leafId: 'a2',
-  entries: [
-    {type: 'model_change', id: 'm0', parentId: null},
-    message('u1', 'm0', 'user', 'first'),
-    message('a1', 'u1', 'assistant', [{type: 'text', text: 'one'}]),
-    message('u3', 'a1', 'user', 'abandoned'),
-    message('u2', 'a1', 'user', [{type: 'text', text: 'second'}], '2026-01-02T03:04:05.000Z'),
-    message('a2', 'u2', 'assistant', [{type: 'text', text: 'two'}])
-  ]
-};
+/** GET /fork-points: the current branch's user messages, newest first. */
+const points = [
+  {entryId: 'u2', preview: 'second', timestamp: Date.UTC(2026, 0, 2)},
+  {entryId: 'u1', preview: ''}
+];
 
 function node(): any {
   return {
@@ -47,7 +27,7 @@ function node(): any {
   };
 }
 
-function setup(data: object = session) {
+function setup(data: object[] = points) {
   const source = {agentId: 'bk:source', backendId: 'bk'},
     forked = {agentId: 'bk:fork', backendId: 'bk'};
   const requestAgent = vi.fn(async () => data);
@@ -66,7 +46,7 @@ function setup(data: object = session) {
     choose(dialog.children[1]);
     return value();
   });
-  const api = runInNewContext(`${forkSource}\n({forkPoints, forkLatest, showForkDialog})`, {
+  const api = runInNewContext(`${forkSource}\n({forkLatest, showForkDialog})`, {
     requestAgent,
     postAgent,
     selectAgent,
@@ -77,9 +57,7 @@ function setup(data: object = session) {
     autoBindNewSession: vi.fn(() => null),
     refreshAgents: vi.fn(async () => {}),
     document: {createElement: node},
-    esc: (text: string) => text,
-    textContent: (content: unknown) =>
-      typeof content === 'string' ? content : (content as any[]).map(part => part.text).join('\n')
+    esc: (text: string) => text
   });
   return {
     api,
@@ -97,19 +75,14 @@ function setup(data: object = session) {
 }
 
 describe('fork from the Session context menu', () => {
-  it('offers the current branch user messages only, newest first', async () => {
-    const h = setup();
-    const points = await h.api.forkPoints(h.source);
-    expect(points.map((entry: any) => entry.id)).toEqual(['u2', 'u1']);
-    expect(h.requestAgent).toHaveBeenCalledWith('bk:source', '/session');
-  });
-
-  it('preselects the newest user message and forks it unless another one is picked', async () => {
+  it('lists the fork points, preselects the newest and forks it unless another one is picked', async () => {
     const h = setup();
     await h.api.showForkDialog(h.source);
+    expect(h.requestAgent).toHaveBeenCalledWith('bk:source', '/fork-points');
     const list = h.dialog().children[1];
     expect(list.children.map((button: any) => button.className)).toEqual(['choice selected', 'choice']);
-    expect(list.children[0].innerHTML).toContain('最新');
+    expect(list.children[0].innerHTML).toMatch(/^second<small>.+ · 最新<\/small>$/);
+    expect(list.children[1].innerHTML).toBe('(无文字内容)<small></small>');
     expect(h.postAgent).toHaveBeenLastCalledWith('bk:source', '/fork', {entryId: 'u2'});
 
     h.onChoose(list => list.children[1].onclick());
@@ -128,7 +101,7 @@ describe('fork from the Session context menu', () => {
   });
 
   it('does not fork a Session without user messages', async () => {
-    const h = setup({leafId: 'm0', entries: [{type: 'model_change', id: 'm0', parentId: null}]});
+    const h = setup([]);
     await h.api.forkLatest(h.source);
     await h.api.showForkDialog(h.source);
     expect(h.postAgent).not.toHaveBeenCalled();

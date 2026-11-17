@@ -1,5 +1,12 @@
 import {describe, expect, it} from 'vitest';
-import {buildTimeline, INLINE_LIMIT, itemBody, pageTimeline, type TimelineEntry} from '../src/timeline.js';
+import {
+  buildTimeline,
+  forkPoints,
+  INLINE_LIMIT,
+  itemBody,
+  pageTimeline,
+  type TimelineEntry
+} from '../src/timeline.js';
 import {AgentFeed, type DetailMessage, type TimelineSource} from '../src/agent-feed.js';
 
 let counter = 0;
@@ -118,6 +125,33 @@ describe('buildTimeline', () => {
     expect(pageTimeline(records, 2, records[2].item.id)?.items.map(i => i.body)).toEqual(['a', 'b']);
     expect(pageTimeline(records, 2, 'missing')).toBeUndefined();
     expect(itemBody(records, records[0].item.id)).toBe('a');
+  });
+});
+
+describe('forkPoints', () => {
+  it('lists only user messages, newest first, with short one-line previews', () => {
+    const first = message({role: 'user', content: 'line one\n\n  line two'}),
+      long = message({role: 'user', content: [{type: 'text', text: 'x'.repeat(500)}]}),
+      image = message({role: 'user', content: [{type: 'image', data: 'AAAA', mimeType: 'image/png'}]});
+    const entries = [
+      first,
+      message({role: 'assistant', content: [{type: 'text', text: 'answer'}, call('c1')]}),
+      result('c1', 'output'),
+      {type: 'model_change', id: 'm1', parentId: null},
+      long,
+      message({role: 'bashExecution', command: 'ls', output: ''}),
+      image
+    ];
+    const points = forkPoints(entries);
+    expect(points.map(point => point.entryId)).toEqual([image.id, long.id, first.id]);
+    expect(points[0].preview).toBe('[image]');
+    expect(points[1].preview).toHaveLength(160);
+    expect(points[1].preview.endsWith('…')).toBe(true);
+    expect(points[2]).toEqual({
+      entryId: first.id,
+      preview: 'line one line two',
+      timestamp: expect.any(Number)
+    });
   });
 });
 
