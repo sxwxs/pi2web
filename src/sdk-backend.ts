@@ -292,8 +292,14 @@ export class SdkBackend implements AgentBackend {
   navigate(entryId: string) {
     return this.session.navigateTree(entryId);
   }
+  /**
+   * A new session file with the branch before the user message `entryId`. The source session is left
+   * as is: like Pi's own fork, the branch is cut on a separate manager opened on the file, because
+   * createBranchedSession() switches the manager it runs on over to the new file.
+   */
   async fork(entryId: string) {
-    const entry: any = this.session.sessionManager.getEntry(entryId);
+    const manager = this.session.sessionManager;
+    const entry: any = manager.getEntry(entryId);
     if (!entry || entry.type !== 'message' || entry.message?.role !== 'user')
       throw Object.assign(new Error('A user message entry is required'), {code: 'SESSION_ENTRY_NOT_FOUND'});
     const content = entry.message.content;
@@ -306,17 +312,14 @@ export class SdkBackend implements AgentBackend {
               .map((part: any) => part.text)
               .join('\n')
           : '';
-    let sessionFile: string | undefined;
-    if (entry.parentId) {
-      sessionFile = this.session.sessionManager.createBranchedSession(entry.parentId);
-    } else {
-      const current = this.session.sessionFile;
-      if (!current)
-        throw Object.assign(new Error('Session persistence is disabled'), {code: 'SESSION_NOT_PERSISTED'});
-      sessionFile = SessionManager.create(this.cwd, this.session.sessionManager.getSessionDir(), {
-        parentSession: current
-      }).getSessionFile();
-    }
+    const current = this.session.sessionFile;
+    if (!manager.isPersisted() || !current)
+      throw Object.assign(new Error('Session persistence is disabled'), {code: 'SESSION_NOT_PERSISTED'});
+    const sessionDir = manager.getSessionDir();
+    // A session file exists once it holds a user message, so the opened copy has every entry of the branch.
+    const sessionFile = entry.parentId
+      ? SessionManager.open(current, sessionDir, manager.getCwd()).createBranchedSession(entry.parentId)
+      : SessionManager.create(this.cwd, sessionDir, {parentSession: current}).getSessionFile();
     return {sessionFile, selectedText};
   }
   async extensionResponse(requestId: string, value: unknown) {

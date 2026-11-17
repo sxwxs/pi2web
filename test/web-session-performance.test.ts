@@ -9,7 +9,7 @@ const factory = source.slice(
 );
 const view = source.slice(
   source.indexOf('  const performanceTime ='),
-  source.indexOf('  async function showSessionTree()')
+  source.indexOf('  async function forkPoints(')
 );
 
 function render(data: object) {

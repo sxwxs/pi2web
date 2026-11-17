@@ -3847,6 +3847,8 @@
       active =
         kind === 'agent' && ['starting', 'streaming', 'waiting_for_user', 'stopping'].includes(item.status),
       binding = kind === 'agent' && sessionKeyboard.getBinding(item.agentId);
+    $('menuForkAgent').hidden = kind !== 'agent';
+    $('menuForkLatest').hidden = kind !== 'agent';
     archive.hidden = kind !== 'agent';
     archive.disabled = active;
     archive.title = active ? 'Agent 执行期间不能 Archive' : '';
@@ -3856,10 +3858,11 @@
     $('menuKeyboardColor').hidden = kind !== 'agent' || !binding;
     $('menuUnbindKeyboard').hidden = kind !== 'agent' || !binding;
     $('menuCloseTerminal').hidden = kind !== 'terminal';
-    const menu = $('agentContextMenu');
+    const menu = $('agentContextMenu'),
+      margin = 8;
     menu.hidden = false;
-    menu.style.left = `${Math.min(event.clientX, innerWidth - 210)}px`;
-    menu.style.top = `${Math.min(event.clientY, innerHeight - 190)}px`;
+    menu.style.left = `${Math.max(margin, Math.min(event.clientX, innerWidth - menu.offsetWidth - margin))}px`;
+    menu.style.top = `${Math.max(margin, Math.min(event.clientY, innerHeight - menu.offsetHeight - margin))}px`;
   }
   async function bindKeyboard({agentId, slot} = {}) {
     const free = sessionKeyboard.getFreeSlots();
@@ -4403,7 +4406,8 @@
       '关闭'
     );
   }
-  async function navigateAgent(entryId, agent = state.agent) {
+  async function navigateAgent(entryId) {
+    const agent = state.agent;
     if (!agent) return;
     cancelVoiceRecording();
     const result = await postAgent(agent.agentId, '/navigate', {entryId});
@@ -4517,53 +4521,66 @@
       '关闭'
     );
   }
-  async function showSessionTree() {
-    const sourceAgent = state.agent;
-    if (!sourceAgent) return toast('请选择 Agent');
-    const session = await requestAgent(sourceAgent.agentId, '/session');
-    const entries = session.entries || [];
-    const choice = await modal(
-      'Session Tree',
+  /** Pi forks only before a user message. These are the current branch's, newest first. */
+  async function forkPoints(agent) {
+    const session = await requestAgent(agent.agentId, '/session');
+    const entries = new Map((session.entries || []).map(entry => [entry.id, entry]));
+    const messages = [];
+    for (let entry = entries.get(session.leafId); entry; entry = entries.get(entry.parentId))
+      if (entry.type === 'message' && entry.message?.role === 'user') messages.push(entry);
+    if (!messages.length) toast('这个 Session 还没有用户消息，无法 Fork');
+    return messages;
+  }
+  /** The new Session holds the conversation before the user message; the message goes back to the input. */
+  async function forkAgent(source, entryId) {
+    const result = await postAgent(source.agentId, '/fork', {entryId});
+    const forked = stampNewItem(source.backendId, result.agent);
+    const binding = autoBindNewSession(forked);
+    await refreshAgents();
+    await selectAgent(forked);
+    if (result.selectedText) prependInput(result.selectedText);
+    toast(
+      `已 Fork 新 Session${result.selectedText ? '，所选消息已放回输入框' : ''}${binding ? `；已自动绑定到按键 ${binding.slot + 1}` : ''}`
+    );
+  }
+  async function forkLatest(agent) {
+    const [latest] = await forkPoints(agent);
+    if (latest) await forkAgent(agent, latest.id);
+  }
+  async function showForkDialog(agent) {
+    const messages = await forkPoints(agent);
+    if (!messages.length) return;
+    const entryId = await modal(
+      'Fork 新 Session',
       body => {
-        const actionLabel = document.createElement('label');
-        actionLabel.textContent = '操作';
-        const action = document.createElement('select');
-        action.innerHTML =
-          '<option value="navigate">Navigate 到条目</option><option value="fork">从用户消息 Fork 新 Agent</option>';
-        actionLabel.append(action);
-        body.append(actionLabel);
+        const note = document.createElement('p');
+        note.className = 'muted';
+        note.textContent =
+          '新 Session 保留所选消息之前的对话，所选消息放回输入框，可修改后发送；原 Session 不变。';
+        body.append(note);
         const list = document.createElement('div');
         list.className = 'modal-list';
-        let selected = '';
-        for (const e of entries) {
+        let value = messages[0].id;
+        messages.forEach((e, index) => {
+          const text = textContent(e.message.content).trim() || '(无文字内容)',
+            time = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
           const b = document.createElement('button');
           b.type = 'button';
-          b.className = 'choice';
-          const text = textContent(e.message?.content || e.content) || e.type;
-          b.innerHTML = `${e.id === session.leafId ? '● ' : '○ '}${esc(text.slice(0, 100))}<small>${esc(e.id)}</small>`;
+          b.className = index ? 'choice' : 'choice selected';
+          b.innerHTML = `${esc(text.slice(0, 160))}<small>${esc([time, index ? '' : '最新'].filter(Boolean).join(' · '))}</small>`;
           b.onclick = () => {
-            selected = e.id;
+            value = e.id;
             list.querySelectorAll('button').forEach(x => x.classList.remove('selected'));
             b.classList.add('selected');
           };
           list.append(b);
-        }
+        });
         body.append(list);
-        return () => (selected ? {entryId: selected, action: action.value} : null);
+        return () => value;
       },
-      '执行'
+      'Fork'
     );
-    if (!choice) return;
-    if (choice.action === 'fork') {
-      const result = await postAgent(sourceAgent.agentId, '/fork', {entryId: choice.entryId});
-      const forkedAgent = stampNewItem(sourceAgent.backendId, result.agent);
-      const binding = autoBindNewSession(forkedAgent);
-      await refreshAgents();
-      await selectAgent(forkedAgent);
-      if (binding) toast(`Fork Session 已自动绑定到按键 ${binding.slot + 1}`);
-    } else {
-      await navigateAgent(choice.entryId, sourceAgent);
-    }
+    if (entryId) await forkAgent(agent, entryId);
   }
   async function revert() {
     if (!state.agent) return toast('请选择 Agent');
@@ -4843,6 +4860,16 @@
     insertMention(state.contextTarget.relativePath);
     $('contextMenu').hidden = true;
   };
+  $('menuForkAgent').onclick = () => {
+    const agent = agentContextTarget?.kind === 'agent' ? agentContextTarget.item : null;
+    $('agentContextMenu').hidden = true;
+    if (agent) void showForkDialog(agent).catch(error => toast(error.message));
+  };
+  $('menuForkLatest').onclick = () => {
+    const agent = agentContextTarget?.kind === 'agent' ? agentContextTarget.item : null;
+    $('agentContextMenu').hidden = true;
+    if (agent) void forkLatest(agent).catch(error => toast(error.message));
+  };
   $('menuBindKeyboard').onclick = () => {
     const agent = agentContextTarget?.kind === 'agent' ? agentContextTarget.item : null;
     $('agentContextMenu').hidden = true;
@@ -4918,7 +4945,6 @@
   $('systemPrompt').onclick = () => showAgentSystemPrompt().catch(e => toast(e.message));
   $('switchPrompt').onclick = () => switchAgentPrompt().catch(e => toast(e.message));
   $('openSystemPrompts').onclick = () => systemPromptManager().catch(e => toast(e.message));
-  $('sessionTree').onclick = () => showSessionTree().catch(e => toast(e.message));
   $('sessionPerformance').onclick = () => showSessionPerformance().catch(e => toast(e.message));
   $('undo').onclick = () => revert().catch(e => toast(e.message));
   $('controls').onclick = () => modelControls().catch(e => toast(e.message));
