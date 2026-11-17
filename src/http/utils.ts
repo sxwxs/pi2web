@@ -39,9 +39,12 @@ export function errorStatus(code: string | undefined) {
   if (code === 'WORKSPACE_PATH_OUTSIDE_ROOT') return 403;
   if (code === 'FILE_TOO_LARGE' || code === 'REQUEST_TOO_LARGE') return 413;
   if (code === 'PROMPT_TEMPLATE_EXISTS') return 409;
+  if (code === 'VOICE_CORRECTION_FAILED') return 502;
+  if (code === 'VOICE_CORRECTION_TIMEOUT') return 504;
   if (
     code === 'VOICE_DISABLED' ||
     code === 'VOICE_STT_DISABLED' ||
+    code === 'VOICE_CORRECTION_DISABLED' ||
     code === 'SOTTO_DISABLED' ||
     code === 'SOTTO_UNAVAILABLE' ||
     code === 'MAIL_NOTIFICATIONS_DISABLED'
