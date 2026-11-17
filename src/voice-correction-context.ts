@@ -37,7 +37,10 @@ export function voiceCorrectionContext(entries: readonly TimelineEntry[]): Voice
     if (entry.type !== 'message') continue;
     const message = entry.message as any;
     if (message?.role !== 'user' && message?.role !== 'assistant') continue;
-    if (message.role === 'assistant' && ['toolUse', 'error', 'aborted'].includes(message.stopReason))
+    if (
+      message.role === 'assistant' &&
+      ['toolUse', 'length', 'error', 'aborted'].includes(message.stopReason)
+    )
       continue;
     const text = (
       typeof message.content === 'string'

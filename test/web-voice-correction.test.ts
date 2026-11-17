@@ -294,6 +294,88 @@ describe('voice correction preview and acceptance', () => {
 });
 
 const appSource = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
+function navigationHarness(h: ReturnType<typeof harness>) {
+  const navigation = deferred(),
+    selectAgent = vi.fn(async () => {});
+  const postAgent = vi.fn(() => {
+    expect(h.correction.session).toBeNull();
+    return navigation.promise;
+  });
+  const state = {agent: {agentId: h.owner.agentId}, voiceCorrection: h.correction};
+  const cancelSource = appSource.slice(
+    appSource.indexOf('  function cancelVoiceRecording('),
+    appSource.indexOf('  function clearAgentSelection(')
+  );
+  const navigateSource = appSource.slice(
+    appSource.indexOf('  async function navigateAgent('),
+    appSource.indexOf('  const performanceTime =')
+  );
+  const {navigateAgent} = runInNewContext(`${cancelSource}\n${navigateSource}\n({navigateAgent})`, {
+    state,
+    $: h.$,
+    clearTimeout,
+    postAgent,
+    selectAgent,
+    toast: h.toast
+  });
+  return {navigation, selectAgent, postAgent, navigateAgent};
+}
+
+describe('same-Agent branch navigation invalidates voice correction', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it.each(['ready', 'model', 'context'])(
+    'cancels the %s preview before navigation and ignores late replies',
+    async phase => {
+      const h = harness({includeContext: phase === 'context'}),
+        context = deferred();
+      if (phase === 'context') h.getContext.mockReturnValueOnce(context.promise);
+      h.observe('原分支的原文');
+      h.correction.end(h.owner, '原分支的原文');
+      if (phase === 'ready') {
+        h.requests[0].resolve({corrected: '原分支的候选'});
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      const {navigateAgent, navigation, selectAgent, postAgent} = navigationHarness(h);
+      const done = navigateAgent('other-branch-entry');
+      expect(postAgent).toHaveBeenCalledWith(h.owner.agentId, '/navigate', {entryId: 'other-branch-entry'});
+      expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
+      if (phase === 'context') {
+        expect(h.getContext.mock.calls[0][1].signal!.aborted).toBe(true);
+        context.resolve({context: {latestAssistantMessage: '旧分支上下文'}});
+      } else {
+        expect((h.request.mock.calls[0] as any)[2].signal.aborted).toBe(true);
+        if (phase === 'model') h.requests[0].resolve({corrected: '迟到的旧候选'});
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      navigation.resolve({});
+      await done;
+      h.correction.accept();
+      expect(h.correction.session).toBeNull();
+      expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
+      expect(h.input.value).toBe('已有草稿 原分支的原文');
+      expect(h.onAccept).not.toHaveBeenCalled();
+      expect(selectAgent).toHaveBeenCalledWith({agentId: h.owner.agentId});
+      if (phase === 'context') expect(h.request).not.toHaveBeenCalled();
+    }
+  );
+
+  it('keeps the existing draft but not its old preview even when navigation fails', async () => {
+    const h = harness();
+    h.observe('保留的原文');
+    h.correction.end(h.owner, '保留的原文');
+    const {navigateAgent, navigation} = navigationHarness(h);
+    const done = navigateAgent('invalid-entry');
+    navigation.reject(Error('Navigation failed'));
+    await expect(done).rejects.toThrow('Navigation failed');
+    h.requests[0].resolve({corrected: '迟到的旧候选'});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.input.value).toBe('已有草稿 保留的原文');
+    expect(h.correction.session).toBeNull();
+  });
+});
+
 const settingsSource = appSource.slice(
   appSource.indexOf('  function applyVoiceCorrectionSettings('),
   appSource.indexOf('  /** Follow-up settings belong to a backend:')
@@ -304,14 +386,23 @@ function settingsHarness(enabled = true) {
   const state: any = {voiceCorrection: h.correction, voiceStream: null, voiceCorrectionSettingsRequest: 0};
   let serverSettings = {...h.backend.statusInfo.voiceCorrection};
   const requestBackend = vi.fn(async () => ({settings: serverSettings, apiKeyConfigured: false}));
+  const statusSource = appSource.slice(
+    appSource.indexOf('  function applyVoiceStatus('),
+    appSource.indexOf('  // The page is opened')
+  );
+  const sottoSaveSource = appSource.slice(
+    appSource.indexOf('  async function saveSottoSettings('),
+    appSource.indexOf('  function applyVoiceCorrectionSettings(')
+  );
   const api = runInNewContext(
-    `${settingsSource}\n({loadVoiceCorrectionSettings, saveVoiceCorrectionSettings})`,
+    `${statusSource}\n${sottoSaveSource}\n${settingsSource}\n({loadVoiceCorrectionSettings, saveVoiceCorrectionSettings, applyVoiceStatus, saveSottoSettings})`,
     {
       state,
       $: h.$,
       localBackend: () => h.backend,
       backendOf: () => h.backend,
       requestBackend,
+      updateVoiceAvailability: vi.fn(),
       toast: h.toast
     }
   );
@@ -404,6 +495,68 @@ describe('correction settings refreshed when configuration is reopened', () => {
     expect(h.$('voiceCorrectionModel').value).toBe('another-model');
     expect(h.correction.session).toBeNull();
     expect((h.request.mock.calls[0] as any)[2].signal.aborted).toBe(true);
+  });
+
+  it.each([
+    {model: 'new-model'},
+    {baseUrl: 'http://localhost:9000/v1'},
+    {enabled: false},
+    {includeContext: true}
+  ])(
+    'invalidates an existing candidate before a full status refresh replaces correction settings: %j',
+    async patch => {
+      const h = settingsHarness();
+      h.observe('原文');
+      h.correction.end(h.owner, '原文');
+      h.requests[0].resolve({corrected: '旧设置的候选'});
+      await vi.advanceTimersByTimeAsync(0);
+      const settings = {...h.backend.statusInfo.voiceCorrection, ...patch};
+      h.api.applyVoiceStatus(h.backend, {...h.backend.statusInfo, voiceCorrection: settings});
+      expect(h.backend.statusInfo.voiceCorrection).toEqual(settings);
+      expect(h.correction.session).toBeNull();
+      expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
+      h.correction.accept();
+      expect(h.input.value).toBe('已有草稿 原文');
+    }
+  );
+
+  it('preserves an edited candidate when a full status refresh has unchanged correction settings', async () => {
+    const h = settingsHarness();
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    h.requests[0].resolve({corrected: '模型候选'});
+    await vi.advanceTimersByTimeAsync(0);
+    h.$('voiceCorrectionText').value = '手动编辑的候选';
+    const session = h.correction.session;
+    h.api.applyVoiceStatus(h.backend, {
+      ...h.backend.statusInfo,
+      voiceCorrection: {...h.backend.statusInfo.voiceCorrection}
+    });
+    expect(h.correction.session).toBe(session);
+    expect(h.$('voiceCorrectionText').value).toBe('手动编辑的候选');
+    h.correction.clear();
+  });
+
+  it('cancels a pending candidate on the Sotto-save status refresh, even before reopening configuration', async () => {
+    const h = settingsHarness();
+    h.state.sottoBackendId = 'local';
+    h.$('sottoEndpoint').value = 'http://127.0.0.1:8766';
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    const settings = {...h.backend.statusInfo.voiceCorrection, includeContext: true, model: 'new-model'};
+    h.requestBackend
+      .mockResolvedValueOnce({enabled: true, endpoint: 'http://127.0.0.1:8766'} as any)
+      .mockResolvedValueOnce({...h.backend.statusInfo, voiceCorrection: settings} as any);
+    await h.api.saveSottoSettings();
+    expect((h.request.mock.calls[0] as any)[2].signal.aborted).toBe(true);
+    h.requests[0].resolve({corrected: '晚到的旧候选'});
+    await vi.advanceTimersByTimeAsync(0);
+    h.setServerSettings(settings);
+    await h.api.loadVoiceCorrectionSettings();
+    expect(h.backend.statusInfo.voiceCorrection).toEqual(settings);
+    expect(h.correction.session).toBeNull();
+    expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
+    expect(h.input.value).toBe('已有草稿 原文');
   });
 
   it('can attach correction to an existing live recording when refreshed settings enable it', async () => {

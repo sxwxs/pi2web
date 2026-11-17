@@ -68,6 +68,21 @@ describe('bounded message-only correction context', () => {
     ];
     expect(voiceCorrectionContext(entries)).toEqual(expected);
   });
+  it('retains the previous complete answer when the latest reply hit its output limit', () => {
+    const entries = [
+      ...branch(),
+      message('limited', 'assistant', '输出上限导致这段话尚未说完', {stopReason: 'length'})
+    ];
+    expect(voiceCorrectionContext(entries)).toEqual(expected);
+  });
+  it('omits assistant context when the only reply hit its output limit', () => {
+    expect(
+      voiceCorrectionContext([
+        message('u1', 'user', '唯一用户消息'),
+        message('limited', 'assistant', '尚未完成的回答', {stopReason: 'length'})
+      ])
+    ).toEqual({firstUserMessage: '唯一用户消息'});
+  });
   it('omits duplicate first/latest prompts and handles a new or text-free conversation', () => {
     expect(voiceCorrectionContext([message('u1', 'user', '唯一用户消息')])).toEqual({
       firstUserMessage: '唯一用户消息'

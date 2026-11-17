@@ -420,6 +420,7 @@
         statusInfo.sottoStt.endpoint !== backend.statusInfo?.sottoStt?.endpoint)
     )
       finishSottoStream(voice, true);
+    if (statusInfo.voiceCorrection) applyVoiceCorrectionSettings(backend, statusInfo.voiceCorrection);
     backend.statusInfo = statusInfo;
     backend.voiceEnabled = Boolean(statusInfo.voiceCapabilities?.tts ?? statusInfo.voiceEnabled);
     backend.voiceSttEnabled = Boolean(statusInfo.voiceCapabilities?.stt ?? statusInfo.voiceEnabled);
@@ -496,7 +497,6 @@
       token,
       status: 'connected',
       error: '',
-      statusInfo,
       authRequired,
       serverInfo: `v${statusInfo.version} · Pi ${statusInfo.piVersion}`,
       reconnectAttempt: 0
@@ -4405,6 +4405,7 @@
   }
   async function navigateAgent(entryId, agent = state.agent) {
     if (!agent) return;
+    cancelVoiceRecording();
     const result = await postAgent(agent.agentId, '/navigate', {entryId});
     await selectAgent(agent);
     if (result.editorText !== undefined) $('input').value = result.editorText;

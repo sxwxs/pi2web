@@ -93,7 +93,8 @@ function harness({
     ${section('  function updateSottoDraft(', '  async function transcribeVoice(')}
     ${section('  function cancelVoiceRecording(', '  function clearAgentSelection(')}
     ${section('  const handledDrafts = new Set()', '  function handleAgentEvent(')}
-    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability, handleDraftEvent})`,
+    ${section('  async function navigateAgent(', '  const performanceTime =')}
+    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability, handleDraftEvent, navigateAgent})`,
     {
       state,
       location: {origin: backend.base},
@@ -110,6 +111,7 @@ function harness({
       WebSocket,
       toast,
       postAgent: prompt,
+      selectAgent: vi.fn(async () => {}),
       setTimeout,
       clearTimeout
     }
@@ -160,6 +162,22 @@ describe('Web Sotto input', () => {
     expect(h.prompt).not.toHaveBeenCalled();
     h.api.cancelVoiceRecording();
     expect(correction.clear).toHaveBeenCalled();
+  });
+
+  it('stops live capture before navigating within the same Agent and keeps the finalized draft', async () => {
+    const h = harness();
+    await h.start();
+    h.message({type: 'final', segment: 0, text: '导航前的原文'});
+    h.prompt.mockImplementationOnce(async () => {
+      expect(h.state.voiceStream).toBeNull();
+      expect(h.track.stop).toHaveBeenCalledOnce();
+      return {};
+    });
+    await h.api.navigateAgent('other-branch-entry');
+    expect(h.prompt).toHaveBeenCalledWith('a:one', '/navigate', {entryId: 'other-branch-entry'});
+    expect(h.input.value).toBe('draft 导航前的原文');
+    h.message({type: 'final', segment: 1, text: '导航后的晚到结果'});
+    expect(h.input.value).toBe('draft 导航前的原文');
   });
 
   it('keeps live correction updates and finalization after an external append draft arrives', async () => {

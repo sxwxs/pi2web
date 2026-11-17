@@ -40,8 +40,12 @@ describe('recorded audio transcription into the Web UI input', () => {
       source.indexOf('  function cancelVoiceRecording('),
       source.indexOf('  function clearAgentSelection(')
     );
-    const {transcribeVoice, cancelVoiceRecording} = runInNewContext(
-      `${cancellation}\n${transcription}\n({transcribeVoice, cancelVoiceRecording})`,
+    const navigation = source.slice(
+      source.indexOf('  async function navigateAgent('),
+      source.indexOf('  const performanceTime =')
+    );
+    const {transcribeVoice, cancelVoiceRecording, navigateAgent} = runInNewContext(
+      `${cancellation}\n${transcription}\n${navigation}\n({transcribeVoice, cancelVoiceRecording, navigateAgent})`,
       {
         state,
         Blob,
@@ -50,6 +54,8 @@ describe('recorded audio transcription into the Web UI input', () => {
         splitResourceKey: (id: string) => ({backendId: id.split(':')[0]}),
         backendOf: () => backend,
         fetch: fetcher,
+        postAgent: vi.fn(async () => ({})),
+        selectAgent: vi.fn(async () => {}),
         $: (id: string) => (elements[id] ??= {classList: {remove: vi.fn()}}),
         toast
       }
@@ -60,6 +66,7 @@ describe('recorded audio transcription into the Web UI input', () => {
       correction,
       transcribeVoice,
       cancelVoiceRecording,
+      navigateAgent,
       requests,
       toast,
       elements,
@@ -103,6 +110,17 @@ describe('recorded audio transcription into the Web UI input', () => {
     expect(h.input.value).toBe('已有草稿');
     expect(h.correction.begin).not.toHaveBeenCalled();
     expect(h.toast).not.toHaveBeenCalled();
+  });
+  it('cancels a pending transcription when navigating within the same Agent', async () => {
+    const h = harness(),
+      done = h.transcribeVoice();
+    await h.navigateAgent('other-branch-entry');
+    expect(h.fetcher.mock.calls[0][1].signal!.aborted).toBe(true);
+    expect(h.state.pendingTranscription).toBeNull();
+    h.resolve(new Response(JSON.stringify({data: {text: '旧分支的晚到原文'}})));
+    await done;
+    expect(h.input.value).toBe('已有草稿');
+    expect(h.correction.begin).not.toHaveBeenCalled();
   });
   it.each(['local', 'remote'])(
     'cancels a pending transcription when its %s backend is disconnected',
