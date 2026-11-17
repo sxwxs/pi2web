@@ -129,7 +129,7 @@ pi2web \
 
 - 实时 Sotto 听写在识别文字停止变化约 **2 秒** 后自动校对；停止录音并收到最终结果时立即检查最新文字。如果最新文字已经校对或正在校对，不重复调用。普通录音识别完成后、外部听写写入当前输入框后也会校对。一个输入框同一时间只由一个语音来源负责纠错：录音或普通转写尚未结束时，外部草稿照常写入并确认接收，但不抢占纠错预览，也不排队补做纠错。
 - 输入框上方同时展示**原始识别**与**修正候选**。录音中仅预览；停止后可编辑候选，点击「采用修正」仅替换本次听写的文字，不影响其他草稿，也**不会自动发送**。点击「保留原文 / 关闭」可忽略候选，或「重新纠错」再次调用。
-- 如果你已经改动原来的听写位置，操作会改为「追加修正」，不会覆盖现有内容。新识别文字、切换 Agent、关闭候选或修改纠错设置会使旧请求失效，迟到的结果不会覆盖新候选。切换 Agent，或在当前 Agent 内执行 Undo / Session Tree 导航，都会取消录音、待返回的普通转写和纠错预览；已定稿的听写文字保留，回退到用户消息时仍按原有规则恢复该消息。切回原 Agent 不会恢复已取消的结果。
+- 如果你已经改动原来的听写位置，操作会改为「追加修正」，不会覆盖现有内容。新识别文字、切换 Agent、关闭候选或修改纠错设置会使旧请求失效，迟到的结果不会覆盖新候选。切换 Agent，或在当前 Agent 内执行 Undo，都会取消录音、待返回的普通转写和纠错预览；已定稿的听写文字保留，回退到用户消息时仍按原有规则恢复该消息。切回原 Agent 不会恢复已取消的结果。
 - 设置不在页面之间即时推送：其他标签页、设备或 API 修改后，本页需刷新网页或重新打开配置，才能同步最新设置。同步时只有设置确实变化才使旧预览失效；重新打开配置但设置未变，不会丢弃手动编辑的候选。
 - **「结合会话上下文」是独立的隐私开关，默认关闭**；关闭时只把识别文字发给纠错模型，不读取或发送会话上下文。服务端也会按开关过滤，浏览器的旧配置或手动附带的 `context` 不会绕过关闭状态。
 - 开启上下文后，只取所选 Agent **当前会话分支**的首条用户消息、最近用户消息和最近完整 AI 回复的正文，分别最多 **2000 / 2000 / 4000 字符**（合计最多 8000），保留首尾并截断中间；首条与最近用户消息相同时不重复发送。AI 回复因输出上限中断、错误或取消时不作为完整回复，改取上一条完整回复（没有则省略）。**工具调用、工具结果、日志、thinking、系统提示词、压缩/分支摘要、图片与消息元数据均不发送**。上下文只用于消歧、辨认技术名词和指代，不能补写需求或改变原意。
@@ -240,7 +240,7 @@ Terminal 只保存在服务进程内存中，不写入数据库。刷新浏览�
 
 Remote Pi 启动时从 SQLite 恢复 Agent 元数据，恢复后的 Agent 状态为 `unloaded`，不会创建 Pi `AgentSession` 或初始化扩展。读取该 Agent 的消息、Session、能力，或者向其发送命令时才按需启动；并发请求共享同一次启动。“停止 Agent”只释放运行中的 Session 并保留 Agent 元数据，再次使用时会按需启动。
 
-Web UI 的 Agent 列表支持右键 `Archive`。Archive 只设置数据库记录的 `archived_at`，不会移动、重命名或删除 Pi 的任何 Session 文件；归档记录不会在当前 UI 中显示。
+Web UI 的 Agent 列表右键可以 Fork 或 Archive。`Fork…` 列出当前分支的用户消息（默认选中最新一条），`Fork 最新消息` 不弹窗直接用最新一条。新 Session 保留该消息之前的对话，该消息放回输入框可修改后发送；原 Session 保持不变。Archive 只设置数据库记录的 `archived_at`，不会移动、重命名或删除 Pi 的任何 Session 文件；归档记录不会在当前 UI 中显示。
 
 发布包可本地检查：
 
@@ -255,7 +255,8 @@ Web 端能力：
 
 - Workspace 添加、目录浏览、文本文件分页及二进制提示。
 - Workspace 目录右键在交互式 Terminal 中打开；Terminal 与 Agent 显示在同一列表，支持刷新重连、清屏和关闭。
-- 新建 Agent 时始终创建新 Session；已有 Agent 可在刷新或重启后继续使用。通过 Session 文件恢复对话暂仅支持 API，不在新建弹窗中提供；Agent 列表支持停止与 abort，右键 Archive。
+- 新建 Agent 时始终创建新 Session；已有 Agent 可在刷新或重启后继续使用。通过 Session 文件恢复对话暂仅支持 API，不在新建弹窗中提供；Agent 列表支持停止与 abort，右键 Fork 与 Archive。
+- Agent 与 Terminal 列表按最近一次开始运行排序（Terminal 按最近一次输入，新建和 Fork 出的会话排在最前），只在这一刻调整位置；运行中的事件、运行结束、点选、刷新和 Terminal 的输出都不会改变顺序。
 - Prompt、steer、follow-up 和流式对话。HTTP / WebSocket 发送命令在 Pi 校验并接收消息后即确认，不等待整个回合结束；执行进度继续通过 WebSocket 同步。
 - 手机切后台或网络中断导致发送确认丢失时，显示「送达状态未知」并保留原文供核对，不自动重发或放回输入框。提示在同一页面内切换会话、重连后仍保留，可手动关闭；刷新页面不保留。明确被服务端拒绝的消息仍恢复为草稿。
 - 对话区只保留用户输入、Agent 输出、Thinking、Extension 对话框和错误；Tool call、Session bash 输出、Retry、Summarization retry 等过程事件自动折叠成一张"活动"卡片，卡片标题实时显示最新一项的名称和时间，展开后逐条查看，再点击单条查看内容。
@@ -266,7 +267,7 @@ Web 端能力：
 - 输入 `/` 浏览并补全当前目录可用的 prompt template 和 skill（由 Pi session 自行展开）。
 - 输入 `!命令` 在 Agent Session 内执行 Shell 并把输出写入上下文，`!!命令` 只执行不写入上下文。
 - 提示词历史与模板，见下文「提示词历史与模板」。
-- Session 命名、Tree Navigate、Undo/Fork、Compact。
+- Session 命名、Undo、Fork（Agent 列表右键）、Compact。
 - 模型和 Thinking level 切换。
 - 输入 `@` 浏览并引用 Workspace 文件或目录。
 - WebSocket sequence 去重、断线指数退避、增量 replay/snapshot 恢复。
@@ -398,7 +399,7 @@ Web 看板在 `/collab.html`（首页顶部"协作"入口）：会话列表与�
 - `GET/POST /api/v1/terminals`
 - `GET/DELETE /api/v1/terminals/:id`
 - Terminal WebSocket `/api/v1/terminals/:id/ws` 支持输入、窗口 resize、输出快照和退出事件。
-- Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork`、`archive`、`extension-response`、`commands`、`bash` 和 `bash-abort` 接口。`steer` 与 `follow-up` 的响应带 `disposition`（`handled` 表示当前回合已接收，`queued` 表示排队等待）。
+- Agent 的 `state`、`messages`、`capabilities`、`session`、`prompt`、`steer`、`follow-up`、`abort`、`compact`、`model`、`thinking`、`session-name`、`navigate`、`fork-points`、`fork`、`archive`、`extension-response`、`commands`、`bash` 和 `bash-abort` 接口。`steer` 与 `follow-up` 的响应带 `disposition`（`handled` 表示当前回合已接收，`queued` 表示排队等待）。
 - `GET /api/v1/agents/:id/queue` 返回排队中的 steer / follow-up 消息，`DELETE` 清空并返回被清掉的消息，便于客户端放回输入框；队列变化通过 `queue_update` 事件推送。WebSocket 的 `clear-queue` 命令等价。
 - `GET /api/v1/agents/:id/mcp` 返回该 Agent cwd 下的 MCP 服务器配置（全局 `mcp.json` 与受信任项目的 `.pi/mcp.json`），`POST` 用 `{name, enabled}` 启用或停用。只有项目被 Pi 显式信任时才会写入项目级覆盖，否则写全局文件。修改在 Agent 下次加载时生效。
 - `GET /api/v1/agents/:id/commands` 返回该 Agent cwd 下可用的 prompt template 和 skill（`{name, description, argumentHint, source}`）。`prompt` 接口本身会展开 `/命令`、skill 和 prompt template。

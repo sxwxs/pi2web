@@ -161,6 +161,16 @@ describe('HTTP server', () => {
     ).data;
     expect(timeline).toMatchObject({total: 60, start: 35, hasMore: true});
     expect(timeline.items).toHaveLength(25);
+    const forkPoints = (
+      await (await fetch(base + `/api/v1/agents/${agent.agentId}/fork-points`, {headers})).json()
+    ).data;
+    expect(forkPoints).toHaveLength(30);
+    expect(forkPoints[0]).toEqual({
+      entryId: expect.any(String),
+      preview: 'message-29',
+      timestamp: expect.any(Number)
+    });
+    expect(forkPoints.at(-1).preview).toBe('message-0');
     expect(
       (await (await fetch(base + `/api/v1/agents/${agent.agentId}/performance`, {headers})).json()).data
     ).toMatchObject({sessionId: expect.any(String), runs: [], legacyTools: []});

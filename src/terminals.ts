@@ -14,6 +14,7 @@ export type TerminalRecord = {
   title: string;
   status: TerminalStatus;
   createdAt: string;
+  /** Creation or the last input; orders the list. */
   lastActiveAt: string;
   exitCode?: number;
 };
@@ -91,13 +92,11 @@ export class TerminalManager {
     this.terminals.set(terminalId, entry);
     entry.dataSubscription = process.onData(data => {
       entry.buffer = (entry.buffer + data).slice(-this.maxBuffer);
-      entry.record.lastActiveAt = new Date().toISOString();
       entry.emitter.emit('event', {type: 'output', data} satisfies TerminalEvent);
     });
     const exitSubscription = process.onExit(event => {
       entry.record.status = 'exited';
       entry.record.exitCode = event.exitCode;
-      entry.record.lastActiveAt = new Date().toISOString();
       entry.emitter.emit('event', {type: 'exit', exitCode: event.exitCode} satisfies TerminalEvent);
       this.disposeProcessListeners(entry);
       this.pruneExited();
@@ -117,6 +116,7 @@ export class TerminalManager {
     if (typeof data !== 'string' || data.length > 64 * 1024)
       throw Object.assign(new Error('Invalid terminal input'), {code: 'INVALID_REQUEST'});
     entry.process.write(data);
+    // Like an Agent's run start, only typing moves a Terminal up the list; its output does not.
     entry.record.lastActiveAt = new Date().toISOString();
   }
   resize(id: string, cols: number, rows: number) {

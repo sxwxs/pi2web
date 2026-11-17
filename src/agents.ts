@@ -6,7 +6,7 @@ import {createSdkBackend, type BackendOptions} from './sdk-backend.js';
 import type {AgentTemplateSnapshot} from './agent-templates.js';
 import {ActivityTracker, type Activity} from './activity.js';
 import {AgentFeed, type DetailMessage, type TimelineSource} from './agent-feed.js';
-import {buildTimeline, itemBody, pageTimeline, type TimelineEntry} from './timeline.js';
+import {buildTimeline, forkPoints, itemBody, pageTimeline, type TimelineEntry} from './timeline.js';
 import {voiceCorrectionContext} from './voice-correction-context.js';
 import {sessionPerformance} from './session-performance.js';
 export type AgentState = {
@@ -348,6 +348,7 @@ export type AgentRecord = AgentState & {
   /** System prompt snapshot. Editable only before the first conversation message; inherited by forks. */
   template?: AgentTemplateSnapshot;
   createdAt: string;
+  /** Creation or the start of the last run; orders the Agent list. */
   lastActiveAt: string;
 };
 /** An event as server-side consumers and the overview stream receive it. */
@@ -371,7 +372,6 @@ type AgentEntry = {
 const toStringList = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
 const emptyQueue = (): AgentQueue => ({steering: [], followUp: []});
-const LIFECYCLE_ONLY = new Set(['agent_loaded', 'agent_unloaded']);
 /** A pending dialog blocks the run until a human answers it, which is a different wait than streaming. */
 const runStatus = (entry: AgentEntry, streaming: boolean): AgentState['status'] =>
   entry.dialogRequests.size ? 'waiting_for_user' : streaming ? 'streaming' : 'idle';
@@ -482,12 +482,16 @@ export class AgentManager {
   private publishActivity(entry: AgentEntry) {
     this.publish(entry, {type: 'activity_changed', activity: entry.activity.snapshot()});
   }
-  /** Loading or unloading a backend is not activity: it must not reorder the Agent list. */
+  /**
+   * `lastActiveAt` orders the Agent list, and only the start of a run moves an Agent up: nothing
+   * during or after the run, and not loading or viewing it, changes the order.
+   */
   private publish(entry: AgentEntry, event: AgentEvent) {
-    const record = entry.record;
-    if (!LIFECYCLE_ONLY.has(event.type)) record.lastActiveAt = new Date().toISOString();
+    const record = entry.record,
+      timestamp = Date.now();
+    if (event.type === 'agent_start') record.lastActiveAt = new Date(timestamp).toISOString();
     // Every event carries the authoritative status, so clients never have to derive it from event types.
-    const item = {timestamp: Date.now(), status: record.status, event};
+    const item = {timestamp, status: record.status, event};
     for (const listener of this.globalListeners) listener(record.agentId, item);
   }
   private attach(id: string, record: AgentRecord, backend: AgentBackend) {
@@ -508,22 +512,7 @@ export class AgentManager {
         const ws = this.workspaces.get(saved.workspaceId);
         if (!ws) continue;
         const cwd = await this.workspaces.resolve(ws, pathRelative(ws.rootPath, saved.cwd));
-        const sessionModified = saved.sessionFile
-          ? await import('node:fs/promises').then(fs =>
-              fs
-                .stat(saved.sessionFile!)
-                .then(value => value.mtime.toISOString())
-                .catch(() => undefined)
-            )
-          : undefined;
-        const record = {
-          ...saved,
-          profile: saved.profile ?? 'default',
-          cwd,
-          status: 'unloaded' as const,
-          lastActiveAt:
-            sessionModified && sessionModified > saved.lastActiveAt ? sessionModified : saved.lastActiveAt
-        };
+        const record = {...saved, profile: saved.profile ?? 'default', cwd, status: 'unloaded' as const};
         this.agents.set(saved.agentId, {
           record,
           writes: 0,
@@ -777,6 +766,10 @@ export class AgentManager {
   async voiceCorrectionContext(id: string) {
     const source = (await this.ensureLoaded(id)).timeline();
     return {sessionId: source.sessionId, context: voiceCorrectionContext(source.entries())};
+  }
+  /** Where fork() can cut the current branch, with short previews instead of the whole session. */
+  async forkPoints(id: string) {
+    return forkPoints((await this.ensureLoaded(id)).timeline().entries());
   }
   /** All timing records of the current branch; older sessions only have partial tool timings. */
   async performance(id: string) {

@@ -252,3 +252,20 @@ export function pageTimeline(records: ItemRecord[], limit = 50, before?: string)
 export function itemBody(records: ItemRecord[], id: string) {
   return records.find(r => r.item.id === id)?.body();
 }
+
+export type ForkPoint = {entryId: string; preview: string; timestamp?: number};
+/** The branch's user messages, newest first: Pi forks a new session only before one of these. */
+export function forkPoints(entries: readonly TimelineEntry[]): ForkPoint[] {
+  const points: ForkPoint[] = [];
+  for (const entry of entries) {
+    const message = (entry as any).message;
+    if (entry.type !== 'message' || message?.role !== 'user') continue;
+    const text = contentText(message.content).replace(/\s+/g, ' ').trim();
+    points.push({
+      entryId: entry.id,
+      preview: text.length > PREVIEW_LIMIT ? `${text.slice(0, PREVIEW_LIMIT - 1)}…` : text,
+      timestamp: timeOf(message, entry)
+    });
+  }
+  return points.reverse();
+}

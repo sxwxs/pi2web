@@ -12,6 +12,10 @@ const handlerSource = source.slice(
   source.indexOf('  function handleAgentEvent('),
   source.indexOf('  function renderExtensionStatus(')
 );
+const recentTimeSource = source.slice(
+  source.indexOf('  const recentTime ='),
+  source.indexOf('  function renderAgentList(')
+);
 const keyboardSource = source.slice(
   source.indexOf('  const sessionKeyboard ='),
   source.indexOf('  const formatTokens =')
@@ -64,12 +68,13 @@ function setup() {
   // Transcript events of the viewed Agent go through the timeline's queue; it is shown here, so render them.
   const handleDetail = vi.fn(message => message.type === 'agent_event' && api.renderTranscriptEvent(message));
   const sessionKeyboard = {updateAgent: vi.fn(), setActivity: vi.fn()};
+  const renderAgentList = vi.fn();
   const setAgentActivity = vi.fn(),
     setAgentStatus = vi.fn(),
     selectAgent = vi.fn(async () => {}),
     navigateMobile = vi.fn();
   const api = runInNewContext(
-    `${keyboardSource}\n${dialogSource}\n${handlerSource}\n({handleAgentEvent, renderTranscriptEvent, onKey:sessionKeyboard.onKey})`,
+    `${recentTimeSource}\n${keyboardSource}\n${dialogSource}\n${handlerSource}\n({handleAgentEvent, renderTranscriptEvent, onKey:sessionKeyboard.onKey})`,
     {
       state,
       $,
@@ -88,7 +93,7 @@ function setup() {
         }
       },
       updateKeyboardUi: vi.fn(),
-      renderAgentList: vi.fn(),
+      renderAgentList,
       renderKeyboardBindings: vi.fn(),
       selectAgent,
       navigateMobile,
@@ -114,6 +119,7 @@ function setup() {
     onKey: api.onKey,
     setAgentStatus,
     setAgentActivity,
+    renderAgentList,
     sessionKeyboard,
     selectAgent,
     navigateMobile
@@ -293,5 +299,32 @@ describe('extension dialog recovery', () => {
       state: {agentId: 'agent-a', status: 'idle'}
     });
     expect(controls.children.map(button => button.textContent)).toEqual(request.options);
+  });
+});
+
+describe('Agent list order', () => {
+  it('moves an Agent up only when a run starts, never back', () => {
+    const ui = setup(),
+      agent = ui.state.agents[0] as any,
+      event = (type: string, timestamp: number) =>
+        ui.handleAgentEvent({
+          type: 'agent_event',
+          agentId: 'agent-a',
+          status: 'idle',
+          timestamp,
+          event: {type}
+        });
+    agent.lastActiveAt = new Date(1000).toISOString();
+    for (const type of ['turn_start', 'tool_execution_start', 'agent_end', 'agent_settled'])
+      event(type, 5000);
+    expect(agent.lastActiveAt).toBe(new Date(1000).toISOString());
+    expect(ui.renderAgentList).not.toHaveBeenCalled();
+    event('agent_start', 6000);
+    expect(agent.lastActiveAt).toBe(new Date(6000).toISOString());
+    expect(ui.renderAgentList).toHaveBeenCalledOnce();
+    // A replayed older start does not move it back.
+    event('agent_start', 2000);
+    expect(agent.lastActiveAt).toBe(new Date(6000).toISOString());
+    expect(ui.renderAgentList).toHaveBeenCalledOnce();
   });
 });

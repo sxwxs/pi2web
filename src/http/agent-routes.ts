@@ -124,6 +124,8 @@ export async function handleAgentRoutes(
       });
     if (req.method === 'GET' && parts[4] === 'voice-correction-context' && parts.length === 5)
       return send(200, {data: await ctx.agents.voiceCorrectionContext(id)});
+    if (req.method === 'GET' && parts[4] === 'fork-points' && parts.length === 5)
+      return send(200, {data: await ctx.agents.forkPoints(id)});
     if (req.method === 'GET' && parts[4] === 'performance' && parts.length === 5)
       return send(200, {data: await ctx.agents.performance(id)});
     // /agents/:id/sessions/:sessionId/items/:itemId — items never change, and the session is part of the
