@@ -98,33 +98,42 @@
    * client clock skew does not distort elapsed times.
    */
   function createActivityView(serverNow) {
+    const CHIP =
+      '<span class="activity-chip"><span class="activity-text"></span><span class="activity-speed" hidden></span><span class="elapsed"></span></span>';
+    const setText = (node, text) => {
+      if (node.textContent !== text) node.textContent = text;
+    };
+    /** An elapsed time ticks while it has `data-since`. */
+    function setElapsed(span, backendId, since) {
+      span.dataset.since = String(since);
+      span.dataset.backend = backendId || '';
+      setText(span, formatElapsed(serverNow(backendId) - since));
+    }
     function elapsed(backendId, since) {
       const span = document.createElement('span');
       span.className = 'elapsed';
-      span.dataset.since = String(since);
-      span.dataset.backend = backendId || '';
-      span.textContent = formatElapsed(serverNow(backendId) - since);
+      setElapsed(span, backendId, since);
       return span;
     }
     function chip(part, backendId) {
-      const node = document.createElement('span'),
-        text = document.createElement('span');
-      node.className = 'activity-chip';
-      text.className = 'activity-text';
-      text.textContent = `${part.icon} ${part.text}`;
+      const node = document.createElement('span');
+      node.innerHTML = CHIP;
+      fillChip(node.firstElementChild, part, backendId);
+      return node.firstElementChild;
+    }
+    /** Show `part` in an existing chip. Only its text and data change, so a chip can follow an Agent. */
+    function fillChip(node, part, backendId) {
+      const [text, speed, time] = node.children;
+      setText(text, `${part.icon} ${part.text}`);
       text.title = part.text;
-      node.append(text);
+      speed.hidden = !part.speed;
       if (part.speed) {
-        const speed = document.createElement('span');
-        speed.className = 'activity-speed';
         speed.dataset.tokens = String(part.speed.tokens);
         speed.dataset.since = String(part.speed.since);
         speed.dataset.backend = backendId || '';
-        speed.textContent = speedText(part.speed.tokens, serverNow(backendId) - part.speed.since);
-        node.append(speed);
-      }
-      node.append(elapsed(backendId, part.since));
-      return node;
+        setText(speed, speedText(part.speed.tokens, serverNow(backendId) - part.speed.since));
+      } else delete speed.dataset.since;
+      setElapsed(time, backendId, part.since);
     }
     /** The full activity of the selected Agent: every part plus the run's total time. */
     function bar(activity, backendId) {
@@ -137,15 +146,22 @@
       }
       return nodes;
     }
-    /** One compact line for the Agent list: the most important part and how many more there are. */
-    function line(activity, backendId) {
-      const parts = activityParts(activity);
-      if (!parts.length) return null;
-      const node = document.createElement('div');
-      node.className = 'agent-activity';
-      node.append(chip(parts[0], backendId));
-      if (parts.length > 1) node.append(` +${parts.length - 1}`);
-      return node;
+    /**
+     * One compact line in an Agent list card: the most important part and how many more there are.
+     * It is filled in place, so the card keeps the same elements however its Agent's activity changes.
+     */
+    function updateLine(node, activity, backendId) {
+      if (!node.firstElementChild) node.innerHTML = `${CHIP}<span></span>`;
+      const parts = activityParts(activity),
+        [chipNode, more] = node.children;
+      node.hidden = !parts.length;
+      if (!parts.length) {
+        for (const span of chipNode.querySelectorAll('[data-since]')) delete span.dataset.since;
+        return;
+      }
+      fillChip(chipNode, parts[0], backendId);
+      more.hidden = parts.length < 2;
+      setText(more, `+${parts.length - 1}`);
     }
     function speedText(tokens, ms) {
       return ms < 1000 ? ' · 估算中' : ` · 约 ${((tokens * 1000) / ms).toFixed(1)} token/s`;
@@ -159,7 +175,7 @@
           serverNow(el.dataset.backend) - Number(el.dataset.since)
         );
     }
-    return {bar, line, tick};
+    return {bar, updateLine, tick};
   }
 
   window.ActivityView = {isBusy, formatElapsed, activityParts, createActivityView};

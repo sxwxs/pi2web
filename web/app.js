@@ -1436,50 +1436,53 @@
   );
   setInterval(activityView.tick, 1000);
   /**
-   * Each listed Agent or Terminal owns one card, found by its key. A change to one item updates only
-   * its card (renderListItem). renderAgentList decides which cards are listed and in which order; it
-   * reuses and moves cards instead of rebuilding them, so a click or long press on a card survives.
+   * Each Agent or Terminal owns one card, built once with a fixed set of elements. A change to an item
+   * only sets text, classes and visibility on its own card (renderListItem); no element is created or
+   * removed. renderAgentList decides which cards are listed and in which order, and only moves the
+   * cards that are out of place. A card goes away only with its item.
    */
   let listCards = new Map();
   const listKey = (kind, id) => `${kind}:${id}`;
+  const AGENT_CARD =
+    '<div class="agent-top"><b></b><span class="advice-mark" hidden></span><span class="state-badge"></span><span class="key-binding" hidden></span><span class="template-tag" hidden></span><span class="backend-tag" hidden></span></div><small></small><div class="agent-activity" hidden></div><div class="agent-context"><span>Context</span><div class="mini-track"><i></i></div><span class="context-text"></span></div>';
+  const TERMINAL_CARD =
+    '<div class="agent-top"><span class="terminal-kind">&gt;_</span><b></b><span class="state-badge"></span><span class="backend-tag" hidden></span></div><small></small>';
   function createListCard(kind, id) {
-    const el = document.createElement('div'),
-      card = {kind, id, item: null, el, status: '', html: '', activity: null, activityLine: null};
+    const el = document.createElement('div');
     el.className = 'agent';
     el.dataset.itemId = id;
+    el.innerHTML = kind === 'agent' ? AGENT_CARD : TERMINAL_CARD;
+    const part = selector => el.querySelector(selector);
+    const card = {
+      kind,
+      id,
+      el,
+      item: null,
+      status: '',
+      activity: null,
+      name: part('b'),
+      badge: part('.state-badge'),
+      subtitle: part('small'),
+      backend: part('.backend-tag'),
+      advice: part('.advice-mark'),
+      key: part('.key-binding'),
+      template: part('.template-tag'),
+      activityLine: part('.agent-activity'),
+      context: part('.agent-context'),
+      bar: part('.mini-track i'),
+      usage: part('.context-text')
+    };
     const openMenu = event => showItemContextMenu(event, card.kind, card.item);
     el.onclick = () => (kind === 'agent' ? selectAgent(card.item) : selectTerminal(card.item));
     el.oncontextmenu = openMenu;
     enableLongPressMenu(el, openMenu);
     return card;
   }
-  function listCardHtml(kind, item) {
-    const backend =
-      connectedBackends().length > 1
-        ? `<span class="backend-tag" title="${esc(`来自 backend ${item.backendName}`)}">${esc(item.backendName)}</span>`
-        : '';
-    const badge = `<span class="state-badge state-${esc(item.status)}">${esc(item.status)}</span>`;
-    if (kind === 'terminal')
-      return `<div class="agent-top"><span class="terminal-kind">&gt;_</span><b>${esc(item.title || 'Terminal')}</b>${badge}${backend}</div><small>${esc(item.cwd)}</small>`;
-    const usage = state.contexts.get(item.agentId),
-      binding = sessionKeyboard.getBinding(item.agentId),
-      template = item.template,
-      advice = state.advice.get(item.agentId);
-    let tags = '';
-    if (advice) {
-      const [icon, label] = adviceSummary(advice);
-      tags += `<span class="advice-mark advice-${esc(advice.state === 'ready' ? advice.outcome : advice.state)}" title="${esc(`跟进建议：${label}`)}">${esc(icon)}</span>`;
-    }
-    tags += badge;
-    if (binding)
-      tags += `<span class="key-binding" style="--key-color:${esc(binding.color)}" title="${esc(`键盘按键 ${binding.slot + 1} · ${binding.color}`)}">K${binding.slot + 1}</span>`;
-    if (template) {
-      const name = template.name || template.id;
-      tags += `<span class="template-tag" title="${esc(`System Prompt 模板：${name}（${templateModeText(template.mode)}，创建时固定）`)}">${esc(name)}</span>`;
-    }
-    return `<div class="agent-top"><b>${esc(agentLabel(item))}</b>${tags}${backend}</div><small>${esc(agentSubtitle(item))}</small><div class="agent-activity" hidden></div><div class="agent-context ${usageLevel(usage)}"><span>Context</span><div class="mini-track"><i style="width:${Math.min(100, Math.max(0, Number(usage?.percent) || 0))}%"></i></div><span>${esc(usageText(usage))} · ${esc(costText(usage))}</span></div>`;
-  }
-  /** Bring one card in line with its item, touching only what changed. */
+  /** Set a property only when it differs, so an unchanged card is not touched at all. */
+  const setProp = (node, name, value) => {
+    if (node[name] !== value) node[name] = value;
+  };
+  /** Bring one card in line with its item. */
   function updateListCard(card, item) {
     const isAgent = card.kind === 'agent',
       selectedId = isAgent ? state.agent?.agentId : state.terminal?.terminalId;
@@ -1490,21 +1493,54 @@
       card.el.classList.add(item.status);
       card.status = item.status;
     }
-    const html = listCardHtml(card.kind, item);
-    if (card.html !== html) {
-      card.html = html;
-      card.el.innerHTML = html;
-      card.activityLine = card.el.querySelector('.agent-activity');
-      card.activity = null;
-    }
+    setProp(card.name, 'textContent', isAgent ? agentLabel(item) : item.title || 'Terminal');
+    setProp(card.subtitle, 'textContent', (isAgent ? agentSubtitle(item) : item.cwd) || '');
+    setProp(card.badge, 'className', `state-badge state-${item.status}`);
+    setProp(card.badge, 'textContent', item.status);
+    setProp(card.backend, 'hidden', connectedBackends().length < 2);
+    setProp(card.backend, 'textContent', item.backendName || '');
+    setProp(card.backend, 'title', `来自 backend ${item.backendName}`);
     if (!isAgent) return;
-    // The activity changes most often, so it has its own slot; its elapsed times tick in place.
+    const advice = state.advice.get(item.agentId);
+    setProp(card.advice, 'hidden', !advice);
+    if (advice) {
+      const [icon, label] = adviceSummary(advice);
+      setProp(
+        card.advice,
+        'className',
+        `advice-mark advice-${advice.state === 'ready' ? advice.outcome : advice.state}`
+      );
+      setProp(card.advice, 'textContent', icon);
+      setProp(card.advice, 'title', `跟进建议：${label}`);
+    }
+    const binding = sessionKeyboard.getBinding(item.agentId);
+    setProp(card.key, 'hidden', !binding);
+    if (binding) {
+      if (card.key.style.getPropertyValue('--key-color') !== binding.color)
+        card.key.style.setProperty('--key-color', binding.color);
+      setProp(card.key, 'textContent', `K${binding.slot + 1}`);
+      setProp(card.key, 'title', `键盘按键 ${binding.slot + 1} · ${binding.color}`);
+    }
+    const template = item.template,
+      templateName = template?.name || template?.id;
+    setProp(card.template, 'hidden', !template);
+    if (template) {
+      setProp(card.template, 'textContent', templateName);
+      setProp(
+        card.template,
+        'title',
+        `System Prompt 模板：${templateName}（${templateModeText(template.mode)}，创建时固定）`
+      );
+    }
+    const usage = state.contexts.get(item.agentId);
+    setProp(card.context, 'className', `agent-context ${usageLevel(usage)}`.trim());
+    setProp(card.bar.style, 'width', `${Math.min(100, Math.max(0, Number(usage?.percent) || 0))}%`);
+    setProp(card.usage, 'textContent', `${usageText(usage)} · ${costText(usage)}`);
+    // Elapsed times in the activity line tick in place; see ActivityView.
     const activity = state.activities.get(item.agentId);
     if (card.activity !== activity) {
       card.activity = activity;
-      const line = activityView.line(activity, item.backendId);
-      card.activityLine.replaceChildren(...(line ? line.childNodes : []));
-      card.activityLine.hidden = !line;
+      activityView.updateLine(card.activityLine, activity, item.backendId);
     }
   }
   /** One item changed: update its own card, if listed, and leave the list and its order alone. */
@@ -1525,21 +1561,33 @@
     );
     if (state.backendFilter)
       allItems = allItems.filter(entry => entry.item.backendId === state.backendFilter);
-    const items = allItems.slice(0, state.agentVisibleCount),
-      shown = new Map();
+    // Cards live as long as their items, so filtering or paging only hides and shows them.
+    const cards = new Map();
+    for (const [kind, items] of [
+      ['agent', state.agents],
+      ['terminal', state.terminals]
+    ])
+      for (const item of items) {
+        const key = listKey(kind, kind === 'agent' ? item.agentId : item.terminalId);
+        if (listCards.has(key)) cards.set(key, listCards.get(key));
+      }
+    listCards = cards;
+    const items = allItems.slice(0, state.agentVisibleCount);
     const nodes = items.map(({kind, item}) => {
       const id = kind === 'agent' ? item.agentId : item.terminalId,
-        key = listKey(kind, id),
-        card = listCards.get(key) || createListCard(kind, id);
-      shown.set(key, card);
+        key = listKey(kind, id);
+      if (!listCards.has(key)) listCards.set(key, createListCard(kind, id));
+      const card = listCards.get(key);
       updateListCard(card, item);
       return card.el;
     });
-    listCards = shown;
-    const list = $('agents');
-    // Move cards only when the order changed; a moved card is still the same element.
-    if (nodes.length !== list.children.length || nodes.some((node, index) => list.children[index] !== node))
-      list.replaceChildren(...nodes);
+    // Take out cards that are no longer shown and move only the cards that are out of place.
+    const list = $('agents'),
+      shown = new Set(nodes);
+    for (const node of [...list.children]) if (!shown.has(node)) node.remove();
+    nodes.forEach((node, index) => {
+      if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
+    });
     $('agentListCount').textContent = `已显示 ${items.length} / ${allItems.length}`;
     $('loadMoreAgents').hidden = items.length >= allItems.length;
     $('loadMoreAgents').disabled = items.length >= allItems.length;
