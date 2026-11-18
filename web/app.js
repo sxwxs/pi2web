@@ -996,6 +996,16 @@
     state.mentionPrefix = '';
     $('mentionPicker').hidden = true;
   }
+  /**
+   * An open @mention remembers offsets into the composer, so text that code (not typing) rewrites
+   * before it must move them too. Dictated text is never inside a mention: that would have been an edit.
+   */
+  function shiftMentionAfterWrite({start, end, text}) {
+    if (state.mentionStart === null || state.mentionStart < end) return;
+    const delta = text.length - (end - start);
+    state.mentionStart += delta;
+    state.mentionEnd += delta;
+  }
 
   // Slash commands: prompt templates and skills are expanded by the Pi session itself
   // (AgentSession.prompt() expands them by default), so the composer only has to help discover them.
@@ -3904,11 +3914,17 @@
     node.append(...children);
     return node;
   };
-  function modal(title, build, okText = '确定') {
+  /**
+   * `focusOk` opens the dialog on its confirm button so Enter confirms, and on mobile no field is
+   * focused that would raise the soft keyboard. Otherwise the browser focuses the first field.
+   */
+  function modal(title, build, okText = '确定', {focusOk = false} = {}) {
     const dialog = $('modal'),
       body = $('modalBody');
     $('modalTitle').textContent = title;
     $('modalOk').textContent = okText;
+    // `autofocus` decides the initial focus before showModal() could put it on a field.
+    $('modalOk').autofocus = focusOk;
     body.replaceChildren();
     const value = build(body);
     return new Promise(resolve => {
@@ -3994,7 +4010,8 @@
         const color = field(body, '灯光颜色', sessionKeyboard.nextColor(), 'color');
         return () => ({agentId: sessions.value, slot: Number(keys.value), color: color.value});
       },
-      '绑定'
+      '绑定',
+      {focusOk: true}
     );
     if (!result) return;
     sessionKeyboard.bind(result.agentId, result.slot, result.color);
@@ -4009,7 +4026,8 @@
         const input = field(body, `按键 ${binding.slot + 1} 的颜色`, binding.color, 'color');
         return () => input.value;
       },
-      '应用'
+      '应用',
+      {focusOk: true}
     );
     if (color) {
       sessionKeyboard.setColor(agent.agentId, color);
@@ -4125,7 +4143,8 @@
           model: modelSelect.value ? JSON.parse(modelSelect.value) : null
         });
       },
-      '创建'
+      '创建',
+      {focusOk: true}
     );
     if (!result) return;
     try {
@@ -4860,7 +4879,10 @@
     getContext: (agentId, options) => requestAgent(agentId, '/voice-correction-context', options),
     request: requestBackend,
     toast,
-    onAccept: resetHistoryNav
+    onWrite: edit => {
+      resetHistoryNav();
+      shiftMentionAfterWrite(edit);
+    }
   });
   $('openConfig').onclick = openConfig;
   $('configClose').onclick = () => $('configDialog').close();
