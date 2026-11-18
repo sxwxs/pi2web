@@ -1,18 +1,31 @@
 import path from 'node:path';
-import {statSync} from 'node:fs';
+import {realpathSync, statSync} from 'node:fs';
 import {lstat, open, realpath, readdir, stat} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 export type Workspace = {id: string; label: string; rootPath: string; createdAt: string};
+/**
+ * Agent and Terminal cwds come from `realpath`, and clients find a cwd's Workspace by prefix, so
+ * roots must use the same canonical form: on Windows `c:\src` would otherwise never contain
+ * `C:\src\app`. A root that is gone keeps its resolved path so old Workspaces still load.
+ */
+const canonicalRoot = (rootPath: string) => {
+  const resolved = path.resolve(rootPath);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+};
 export class WorkspaceStore {
   constructor(private items: Workspace[] = []) {}
   list() {
     return this.items.map(x => ({...x}));
   }
   replace(items: Workspace[]) {
-    this.items = items.map(item => ({...item, rootPath: path.resolve(item.rootPath)}));
+    this.items = items.map(item => ({...item, rootPath: canonicalRoot(item.rootPath)}));
   }
   add(label: string, rootPath: string) {
-    const root = path.resolve(rootPath);
+    let root = path.resolve(rootPath);
     let rootStat;
     try {
       rootStat = statSync(root);
@@ -28,6 +41,7 @@ export class WorkspaceStore {
       throw Object.assign(new Error('Workspace root is not a directory'), {
         code: 'WORKSPACE_ROOT_NOT_DIRECTORY'
       });
+    root = canonicalRoot(root);
     const key = process.platform === 'win32' ? root.toLowerCase() : root;
     if (
       this.items.some(
