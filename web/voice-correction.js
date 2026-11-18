@@ -1,6 +1,8 @@
 (() => {
   'use strict';
   const PAUSE_MS = 2000;
+  // A textarea stores line breaks as LF, so text compared with its value must too.
+  const textareaLines = text => text.replace(/\r\n?/g, '\n');
   // Past this many edits the two texts share little, so a character diff is slow and unreadable.
   const MAX_DIFF_EDITS = 1000;
 
@@ -101,10 +103,11 @@
    * A single dictation's correction. Once dictation has stopped, a correction replaces the dictated
    * text in the composer, but only while that spot still holds exactly the text put there by
    * dictation or by this panel: whatever the user typed there wins. Nothing is ever sent.
+   * `onWrite({start, end, text})` reports every composer edit, since it fires no input event.
    */
   class VoiceCorrection {
-    constructor({$, getAgent, getBackend, getContext, request, toast, onAccept}) {
-      Object.assign(this, {$, getAgent, getBackend, getContext, request, toast, onAccept});
+    constructor({$, getAgent, getBackend, getContext, request, toast, onWrite}) {
+      Object.assign(this, {$, getAgent, getBackend, getContext, request, toast, onWrite});
       this.session = null;
       $('voiceCorrectionToggle').onclick = () => this.toggle();
       $('voiceCorrectionClose').onclick = () => this.clear();
@@ -144,8 +147,9 @@
     configure(backend) {
       if (this.session?.backendId === backend.id) this.clear();
     }
-    observe(owner, text) {
-      const s = this.session;
+    observe(owner, written) {
+      const s = this.session,
+        text = textareaLines(written);
       if (!s || s.owner !== owner || s.original === text) return;
       clearTimeout(s.timer);
       s.controller?.abort();
@@ -206,7 +210,7 @@
         if (controller.signal.aborted || this.session !== s || s.controller !== controller) return;
         if (typeof result.corrected !== 'string' || !result.corrected.trim())
           throw Error('模型没有返回修正文字');
-        s.corrected = result.corrected;
+        s.corrected = textareaLines(result.corrected);
         s.contextUsed = result.contextUsed === true;
         s.status = 'ready';
         if (!s.recording) this.replace(s, s.corrected);
@@ -239,7 +243,7 @@
       input.setRangeText(text, start, end);
       input.setSelectionRange(selectionStart, selectionEnd);
       s.current = text;
-      this.onAccept();
+      this.onWrite({start, end, text});
       return true;
     }
     /** Switches the dictated spot between the correction and the original. Never focuses the composer. */
@@ -255,11 +259,15 @@
         return;
       // Recheck on click: programmatic edits can bypass the input event.
       if (this.matches(s)) this.replace(s, s.current === s.corrected ? s.original : s.corrected);
-      else if (s.current === s.original) {
-        s.input.value += (s.input.value && !/\s$/.test(s.input.value) ? ' ' : '') + s.corrected;
-        s.input.setSelectionRange(s.input.value.length, s.input.value.length);
+      // An edited correction cannot be restored, but any other correction can still be appended.
+      else if (s.current !== s.corrected) {
+        const input = s.input,
+          end = input.value.length,
+          text = (input.value && !/\s$/.test(input.value) ? ' ' : '') + s.corrected;
+        input.value += text;
+        input.setSelectionRange(input.value.length, input.value.length);
         this.clear();
-        this.onAccept();
+        this.onWrite({start: end, end, text});
         this.toast('修正文字已追加到输入框，尚未发送');
         return;
       }

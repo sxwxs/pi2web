@@ -996,6 +996,16 @@
     state.mentionPrefix = '';
     $('mentionPicker').hidden = true;
   }
+  /**
+   * An open @mention remembers offsets into the composer, so text that code (not typing) rewrites
+   * before it must move them too. Dictated text is never inside a mention: that would have been an edit.
+   */
+  function shiftMentionAfterWrite({start, end, text}) {
+    if (state.mentionStart === null || state.mentionStart < end) return;
+    const delta = text.length - (end - start);
+    state.mentionStart += delta;
+    state.mentionEnd += delta;
+  }
 
   // Slash commands: prompt templates and skills are expanded by the Pi session itself
   // (AgentSession.prompt() expands them by default), so the composer only has to help discover them.
@@ -4869,7 +4879,10 @@
     getContext: (agentId, options) => requestAgent(agentId, '/voice-correction-context', options),
     request: requestBackend,
     toast,
-    onAccept: resetHistoryNav
+    onWrite: edit => {
+      resetHistoryNav();
+      shiftMentionAfterWrite(edit);
+    }
   });
   $('openConfig').onclick = openConfig;
   $('configClose').onclick = () => $('configDialog').close();
