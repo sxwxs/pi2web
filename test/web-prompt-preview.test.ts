@@ -4,9 +4,14 @@ import {runInNewContext} from 'node:vm';
 
 const source = readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
 const createSource = source.slice(
-  source.indexOf('  async function createAgent()'),
+  source.indexOf('  async function createAgent('),
   source.indexOf('  const templateModeText')
 );
+const backendState = (() => {
+  const window: Record<string, any> = {};
+  runInNewContext(readFileSync(new URL('../web/backend-state.js', import.meta.url), 'utf8'), {window});
+  return window.RemotePiBackendState;
+})();
 const previewSource = source.slice(
   source.indexOf('  function promptPreviewBox('),
   source.indexOf('  async function showAgentSystemPrompt()')
@@ -52,13 +57,15 @@ async function setup(
     catalog?: unknown;
     modelRefresh?: Promise<unknown>;
     onModal?: (dialog: Element, input: Element, submit: Element) => Promise<void>;
+    /** Open the dialog from a Session's context menu instead of the New Agent button. */
+    beside?: {item: object; backends: object[]};
   } = {}
 ) {
   const cwd = new Element();
   cwd.value = '.';
   const dialog = new Element();
   const submit = new Element();
-  const requests: string[] = [];
+  const requests: Array<{backend: string; url: string}> = [];
   let modelCalls = 0;
   const pending: Array<{url: string; response: ReturnType<typeof deferred<{systemPrompt: string}>>}> = [];
   let input!: Element, template!: Element;
@@ -76,8 +83,8 @@ async function setup(
     promptSourcesText: () => 'preview',
     toast: vi.fn(),
     URLSearchParams,
-    requestBackend: (_backend: string, url: string) => {
-      requests.push(url);
+    requestBackend: (backend: string, url: string) => {
+      requests.push({backend, url});
       if (url === '/api/v1/agent-templates') return Promise.resolve({templates: []});
       if (url.startsWith('/api/v1/agents/models?'))
         return ++modelCalls === 1
@@ -92,24 +99,70 @@ async function setup(
       await options.onModal?.(dialog, input, submit);
       return options.submit ? selection() : null;
     },
-    postBackend: async (_backend: string, _path: string, body: unknown) => {
-      created = body;
+    postBackend: async (backend: string, _path: string, body: object) => {
+      created = {backend, ...body};
       return {agentId: 'new-agent'};
     },
     localStorage: {getItem: () => null, setItem: () => {}},
     stampNewItem: (_backend: string, agent: unknown) => agent,
     autoBindNewSession: () => null,
     refreshAgents: async () => {},
-    selectAgent: async () => {}
+    selectAgent: async () => {},
+    backendOf: (id: string) => options.beside?.backends.find((backend: any) => backend.id === id),
+    matchWorkspace: backendState.matchWorkspace,
+    clean: backendState.normalizePath,
+    relativeTo: (file: string, dir: string) => (file === dir ? '.' : file.slice(dir.length + 1))
   };
-  const {createAgent} = runInNewContext(`${createSource}\n${previewSource}\n({createAgent})`, context, {
-    filename: 'web/app.js'
-  });
-  await createAgent();
+  const {createAgent, createAgentBeside} = runInNewContext(
+    `${createSource}\n${previewSource}\n({createAgent, createAgentBeside})`,
+    context,
+    {filename: 'web/app.js'}
+  );
+  await (options.beside ? createAgentBeside(options.beside.item) : createAgent());
   const box = dialog.children.find(child => child.className === 'prompt-preview')!;
   const modelSelect = dialog.children.find(child => child.textContent === '模型')?.children[0];
-  return {input, template, box, pending, modelSelect, created, requests, toast: context.toast};
+  return {
+    input,
+    template,
+    box,
+    pending,
+    modelSelect,
+    created,
+    requests: requests.map(request => request.url),
+    backendRequests: requests,
+    toast: context.toast
+  };
 }
+
+describe("new Agent in a Session's directory", () => {
+  const backend = {
+    id: 'other',
+    status: 'connected',
+    workspaces: [
+      {id: 'root', backendId: 'other', rootPath: '/srv'},
+      {id: 'nested', backendId: 'other', rootPath: '/srv/app'}
+    ]
+  };
+
+  it('opens the dialog in the Session cwd on its own Backend, not the browsed Workspace', async () => {
+    const ui = await setup({
+      submit: true,
+      beside: {item: {backendId: 'other', cwd: '/srv/app/pkg'}, backends: [backend]}
+    });
+    expect(ui.input.value).toBe('pkg');
+    expect(ui.backendRequests.every(request => request.backend === 'other')).toBe(true);
+    expect(ui.created).toMatchObject({backend: 'other', workspaceId: 'nested', relativeCwd: 'pkg'});
+  });
+
+  it.each([
+    {cwd: '/elsewhere', backends: [backend]},
+    {cwd: '/srv/app', backends: [{...backend, status: 'disconnected'}]}
+  ])('refuses $cwd without a connected Workspace owning it', async ({cwd, backends}) => {
+    const ui = await setup({submit: true, beside: {item: {backendId: 'other', cwd}, backends}});
+    expect(ui.created).toBeUndefined();
+    expect(ui.toast).toHaveBeenCalledWith('这个目录不在已连接 Backend 的任何 Workspace 中');
+  });
+});
 
 describe('create-Agent model selection', () => {
   it('lists project models and sends the selected model when creating', async () => {

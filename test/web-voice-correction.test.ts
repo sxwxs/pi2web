@@ -395,7 +395,7 @@ function settingsHarness(enabled = true) {
     appSource.indexOf('  function applyVoiceCorrectionSettings(')
   );
   const api = runInNewContext(
-    `${statusSource}\n${sottoSaveSource}\n${settingsSource}\n({loadVoiceCorrectionSettings, saveVoiceCorrectionSettings, applyVoiceStatus, saveSottoSettings})`,
+    `${statusSource}\n${sottoSaveSource}\n${settingsSource}\n({loadVoiceCorrectionSettings, saveVoiceCorrectionSettings, applyVoiceStatus, saveSottoSettings, saveVoiceInputSettings})`,
     {
       state,
       $: h.$,
@@ -571,5 +571,35 @@ describe('correction settings refreshed when configuration is reopened', () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(h.request).toHaveBeenCalledTimes(1);
     h.correction.clear();
+  });
+});
+
+describe('one save button for the voice input section', () => {
+  it.each([true, false])('saves Sotto and correction together (Sotto reachable: %s)', async sottoUp => {
+    const h = settingsHarness();
+    await h.api.loadVoiceCorrectionSettings();
+    h.state.sottoBackendId = 'local';
+    h.$('voiceCorrectionModel').value = 'edited-model';
+    h.requestBackend.mockImplementation(async (_id: string, url: string, init?: any) => {
+      if (url === '/api/v1/sotto-stt') {
+        if (!sottoUp) throw Error('Sotto unreachable');
+        return {enabled: true, endpoint: 'http://127.0.0.1:8766'};
+      }
+      if (url === '/api/v1/voice-correction')
+        return {settings: JSON.parse(init.body), apiKeyConfigured: false};
+      return h.backend.statusInfo;
+    });
+    await h.api.saveVoiceInputSettings();
+    const saved = h.requestBackend.mock.calls.filter(([, , init]: any) => init?.method === 'PUT');
+    expect(saved.map(([, url]: any) => url).sort()).toEqual([
+      '/api/v1/sotto-stt',
+      '/api/v1/voice-correction'
+    ]);
+    expect(h.backend.statusInfo.voiceCorrection.model).toBe('edited-model');
+    expect(h.toast).toHaveBeenCalledTimes(1);
+    expect(h.toast).toHaveBeenCalledWith(
+      sottoUp ? '语音输入设置已保存' : 'Sotto 设置失败：Sotto unreachable'
+    );
+    expect(h.$('saveVoiceInput').disabled).toBe(false);
   });
 });
