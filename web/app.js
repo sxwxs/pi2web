@@ -3676,30 +3676,26 @@
     const backend = sottoConfigBackend();
     const requestId = ++state.sottoSettingsRequest;
     state.sottoBackendId = null;
-    $('saveSotto').disabled = true;
     if (!backend) {
       $('sottoSettingsStatus').textContent = '请先连接提供当前页面的本机 Backend';
       return;
     }
-    $('sottoSettingsStatus').textContent = `正在读取「${backend.name}」的语音输入设置…`;
+    $('sottoSettingsStatus').textContent = `正在读取「${backend.name}」的设置…`;
     try {
       const settings = await requestBackend(backend.id, '/api/v1/sotto-stt');
       if (requestId !== state.sottoSettingsRequest || !$('configDialog').open) return;
       state.sottoBackendId = backend.id;
       $('sottoEnabled').checked = settings.enabled;
       $('sottoEndpoint').value = settings.endpoint;
-      $('saveSotto').disabled = false;
-      $('sottoSettingsStatus').textContent =
-        `语音识别固定使用本机 Backend「${backend.name}」的设置；远端会话共用此配置。`;
+      $('sottoSettingsStatus').textContent = `本机 Backend：${backend.name}`;
     } catch (error) {
       if (requestId === state.sottoSettingsRequest)
         $('sottoSettingsStatus').textContent = `读取失败：${error.message}`;
     }
   }
+  /** Resolves to whether the save succeeded; failures are reported here. */
   async function saveSottoSettings() {
     const backendId = state.sottoBackendId;
-    if (!backendId) return toast('请先连接 Backend 并读取设置');
-    $('saveSotto').disabled = true;
     try {
       const settings = await requestBackend(backendId, '/api/v1/sotto-stt', {
         method: 'PUT',
@@ -3712,13 +3708,13 @@
       if (backend) applyVoiceStatus(backend, statusInfo);
       updateVoiceAvailability();
       $('sottoSettingsStatus').textContent = settings.enabled
-        ? 'Sotto 已连通；输入框旁的麦克风可用，转写使用 Sotto 的同一个 ASR 实例。'
-        : 'Sotto 语音输入已关闭。';
-      toast('语音输入设置已保存');
+        ? 'Sotto 已连通，麦克风可用。'
+        : 'Sotto 已关闭。';
+      return true;
     } catch (error) {
+      $('sottoSettingsStatus').textContent = `Sotto 保存失败：${error.message}`;
       toast(`Sotto 设置失败：${error.message}`);
-    } finally {
-      $('saveSotto').disabled = !backendOf(backendId);
+      return false;
     }
   }
   function applyVoiceCorrectionSettings(backend, settings) {
@@ -3742,7 +3738,6 @@
     const backend = localBackend(),
       requestId = ++state.voiceCorrectionSettingsRequest;
     state.voiceCorrectionBackendId = null;
-    $('saveVoiceCorrection').disabled = true;
     if (!backend) {
       $('voiceCorrectionSettingsStatus').textContent = '请先连接提供当前页面的本机 Backend。';
       return;
@@ -3756,22 +3751,17 @@
       $('voiceCorrectionIncludeContext').checked = !!data.settings.includeContext;
       $('voiceCorrectionBaseUrl').value = data.settings.baseUrl;
       $('voiceCorrectionModel').value = data.settings.model;
-      $('saveVoiceCorrection').disabled = false;
-      $('voiceCorrectionSettingsStatus').textContent =
-        `保存在本机 Backend「${backend.name}」，远端会话也使用此配置。${
-          data.apiKeyConfigured
-            ? '已配置 API key。'
-            : '如需 API key，用 --voice-correction-api-key-env 配置。'
-        }`;
+      $('voiceCorrectionSettingsStatus').textContent = data.apiKeyConfigured
+        ? '已配置 API key。'
+        : '如需 API key，用 --voice-correction-api-key-env 配置。';
     } catch (error) {
       if (requestId === state.voiceCorrectionSettingsRequest)
         $('voiceCorrectionSettingsStatus').textContent = `读取失败：${error.message}`;
     }
   }
+  /** Resolves to whether the save succeeded; failures are reported here. */
   async function saveVoiceCorrectionSettings() {
     const backendId = state.voiceCorrectionBackendId;
-    if (!backendId || localBackend()?.id !== backendId) return toast('请先连接本机 Backend 并读取设置');
-    $('saveVoiceCorrection').disabled = true;
     try {
       const data = await requestBackend(backendId, '/api/v1/voice-correction', {
         method: 'PUT',
@@ -3784,11 +3774,24 @@
       });
       const backend = backendOf(backendId);
       if (backend) applyVoiceCorrectionSettings(backend, data.settings);
-      toast(data.settings.enabled ? '语音纠错已启用' : '语音纠错已关闭');
+      return true;
     } catch (error) {
       toast(`保存语音纠错设置失败：${error.message}`);
+      return false;
+    }
+  }
+  /** Sotto and model correction are separate Backend settings, saved together from one section. */
+  async function saveVoiceInputSettings() {
+    const backendId = state.sottoBackendId;
+    if (!backendId || backendId !== state.voiceCorrectionBackendId || localBackend()?.id !== backendId)
+      return toast('请先连接本机 Backend 并读取设置');
+    $('saveVoiceInput').disabled = true;
+    try {
+      // Not in parallel: the full status refresh after the Sotto save would carry the old correction settings.
+      const sottoSaved = await saveSottoSettings();
+      if ((await saveVoiceCorrectionSettings()) && sottoSaved) toast('语音输入设置已保存');
     } finally {
-      $('saveVoiceCorrection').disabled = localBackend()?.id !== backendId;
+      $('saveVoiceInput').disabled = false;
     }
   }
   /** Follow-up settings belong to a backend: the selected Agent's, otherwise the primary one. */
@@ -4013,10 +4016,8 @@
       toast(`按键 ${binding.slot + 1} 颜色已更新`);
     }
   }
-  async function createAgent() {
-    const workspace = state.workspace;
+  async function createAgent({workspace = state.workspace, cwd = $('agentCwd').value.trim() || '.'} = {}) {
     if (!workspace) return toast('请先选择 Workspace');
-    const cwd = $('agentCwd').value.trim() || '.';
     const preferenceKey = `rpLastTemplate:${workspace.backendId}`;
     let templates = [],
       modelCatalog;
@@ -4143,6 +4144,13 @@
     } catch (error) {
       toast(error.message);
     }
+  }
+  /** The item may live on another Backend than the browsed Workspace, so resolve its own Workspace. */
+  function createAgentBeside(item) {
+    const backend = backendOf(item.backendId);
+    const workspace = backend?.status === 'connected' && matchWorkspace(backend.workspaces, item.cwd);
+    if (!workspace) return toast('这个目录不在已连接 Backend 的任何 Workspace 中');
+    return createAgent({workspace, cwd: relativeTo(clean(item.cwd), clean(workspace.rootPath))});
   }
   const templateModeText = mode => (mode === 'replace' ? '替换 Pi 基础 Prompt' : '追加到 Pi Prompt 之后');
   /** Template picker for the create-Agent dialog. The choice is copied onto the Agent and cannot change later. */
@@ -4857,8 +4865,7 @@
   $('openConfig').onclick = openConfig;
   $('configClose').onclick = () => $('configDialog').close();
   $('configSave').onclick = saveMailSettings;
-  $('saveSotto').onclick = saveSottoSettings;
-  $('saveVoiceCorrection').onclick = () => void saveVoiceCorrectionSettings();
+  $('saveVoiceInput').onclick = () => void saveVoiceInputSettings();
   $('saveFollowUp').onclick = () => void saveFollowUpSettings();
   $('connect').onclick = () => openPair();
   $('keyboardConnect').onclick = async () => {
@@ -4958,6 +4965,11 @@
     $('agentContextMenu').hidden = true;
     if (agent) void forkLatest(agent).catch(error => toast(error.message));
   };
+  $('menuNewAgentHere').onclick = () => {
+    const item = agentContextTarget?.item;
+    $('agentContextMenu').hidden = true;
+    if (item) void createAgentBeside(item);
+  };
   $('menuBindKeyboard').onclick = () => {
     const agent = agentContextTarget?.kind === 'agent' ? agentContextTarget.item : null;
     $('agentContextMenu').hidden = true;
@@ -4996,7 +5008,7 @@
     if (!$('contextMenu').contains(e.target)) $('contextMenu').hidden = true;
     if (!$('agentContextMenu').contains(e.target)) $('agentContextMenu').hidden = true;
   });
-  $('newAgent').onclick = createAgent;
+  $('newAgent').onclick = () => createAgent();
   $('newTerminal').onclick = () => openTerminal($('agentCwd').value.trim() || '.');
   $('abort').onclick = () => {
     if (!state.agent) return;
