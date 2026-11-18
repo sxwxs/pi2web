@@ -69,7 +69,7 @@ async function setup(
   let modelCalls = 0;
   const pending: Array<{url: string; response: ReturnType<typeof deferred<{systemPrompt: string}>>}> = [];
   let input!: Element, template!: Element;
-  let created: unknown;
+  let created: unknown, modalOptions: unknown;
   const context = {
     state: {workspace: {id: 'ws', backendId: 'backend'}},
     $: (id: string) => (id === 'modalOk' ? submit : id === 'modal' ? dialog : cwd),
@@ -94,7 +94,13 @@ async function setup(
       pending.push({url, response});
       return response.promise;
     },
-    modal: async (_title: string, build: (body: Element) => () => unknown) => {
+    modal: async (
+      _title: string,
+      build: (body: Element) => () => unknown,
+      _okText?: string,
+      dialogOptions?: unknown
+    ) => {
+      modalOptions = dialogOptions;
       const selection = build(dialog);
       await options.onModal?.(dialog, input, submit);
       return options.submit ? selection() : null;
@@ -128,6 +134,7 @@ async function setup(
     pending,
     modelSelect,
     created,
+    modalOptions,
     requests: requests.map(request => request.url),
     backendRequests: requests,
     toast: context.toast
@@ -174,6 +181,11 @@ describe('create-Agent model selection', () => {
     expect(ui.created).toMatchObject({model: {provider: 'p', modelId: 'm'}});
     expect(ui.created).not.toHaveProperty('sessionFile');
     expect(ui.requests.some(url => url.startsWith('/api/v1/sessions?'))).toBe(false);
+  });
+
+  it('opens on the create button, so mobile keeps the keyboard down and Enter creates', async () => {
+    const ui = await setup();
+    expect(ui.modalOptions).toEqual({focusOk: true});
   });
 
   it('waits for the new directory catalog and preserves a still-available model', async () => {

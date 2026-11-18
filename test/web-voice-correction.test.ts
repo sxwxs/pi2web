@@ -11,16 +11,47 @@ const deferred = () => {
   });
   return {promise, resolve, reject};
 };
+const document = {createElement: (tagName: string) => ({tagName, textContent: ''})};
+const loadModule = () => {
+  const window: any = {};
+  runInNewContext(source, {window, document, setTimeout, clearTimeout, AbortController, AbortSignal});
+  return window.RemotePiVoiceCorrection;
+};
+/** The diff box as text: [-removed] and {+added}. */
+const shown = (children: any[]) =>
+  children
+    .map(child =>
+      typeof child === 'string'
+        ? child
+        : child.tagName === 'del'
+          ? `[-${child.textContent}]`
+          : `{+${child.textContent}}`
+    )
+    .join('');
 function harness({enabled = true, remote = false, includeContext = false} = {}) {
   const elements: Record<string, any> = {};
   const $ = (id: string) =>
-    (elements[id] ??= {value: '', hidden: true, disabled: false, textContent: '', readOnly: false});
+    (elements[id] ??= {
+      value: '',
+      hidden: true,
+      disabled: false,
+      textContent: '',
+      children: [],
+      replaceChildren(...children: unknown[]) {
+        this.children = children;
+      }
+    });
   const input = {
     value: '已有草稿 ',
+    selectionStart: 0,
+    selectionEnd: 0,
     setRangeText(text: string, start: number, end: number) {
       this.value = this.value.slice(0, start) + text + this.value.slice(end);
     },
-    setSelectionRange: vi.fn(),
+    setSelectionRange: vi.fn(function (this: any, start: number, end: number) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+    }),
     focus: vi.fn()
   };
   const backend = {
@@ -44,10 +75,8 @@ function harness({enabled = true, remote = false, includeContext = false} = {}) 
   });
   const getContext = vi.fn(async (_agentId: string, _options: RequestInit): Promise<any> => ({context: {}}));
   const toast = vi.fn(),
-    onAccept = vi.fn(),
-    window: any = {};
-  runInNewContext(source, {window, setTimeout, clearTimeout, AbortController, AbortSignal});
-  const correction = new window.RemotePiVoiceCorrection.VoiceCorrection({
+    onAccept = vi.fn();
+  const correction = new (loadModule().VoiceCorrection)({
     $,
     getAgent: () => agent,
     getBackend: () => backend,
@@ -74,6 +103,8 @@ function harness({enabled = true, remote = false, includeContext = false} = {}) 
     onAccept,
     backend,
     observe,
+    diff: () => shown($('voiceCorrectionDiff').children),
+    toggle: () => $('voiceCorrectionToggle'),
     switchAgent: () => {
       agent = {agentId: 'other:agent', backendId: 'other'};
     }
@@ -119,7 +150,7 @@ describe('voice correction preview and acceptance', () => {
     h.requests[0].resolve({corrected: '修正', contextUsed: false});
     await vi.advanceTimersByTimeAsync(0);
     expect(h.$('voiceCorrectionStatus').textContent).toContain('上下文读取失败');
-    expect(h.input.value).toBe('已有草稿 原文');
+    expect(h.input.value).toBe('已有草稿 修正');
     h.correction.clear();
   });
 
@@ -171,7 +202,7 @@ describe('voice correction preview and acceptance', () => {
     expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
   });
 
-  it('debounces pauses, previews during recording, and reuses the latest correction on stop', async () => {
+  it('debounces pauses, previews during recording, and writes the correction once stopped', async () => {
     const h = harness({remote: true});
     h.observe('第一句');
     await vi.advanceTimersByTimeAsync(1500);
@@ -186,21 +217,63 @@ describe('voice correction preview and acceptance', () => {
     ]);
     h.requests[0].resolve({corrected: '第一句，第二句。'});
     await vi.advanceTimersByTimeAsync(0);
-    expect(h.$('voiceCorrectionOriginal').value).toBe('第一句 第二句');
-    expect(h.$('voiceCorrectionText').value).toBe('第一句，第二句。');
+    expect(h.diff()).toBe('第一句[- ]{+，}第二句{+。}');
+    // Dictation still owns the composer while recording.
     expect(h.input.value).toBe('已有草稿 第一句 第二句');
-    expect(h.$('voiceCorrectionAccept').disabled).toBe(true);
-    h.correction.accept();
+    expect(h.toggle().disabled).toBe(true);
+    h.correction.toggle();
     expect(h.onAccept).not.toHaveBeenCalled();
     h.correction.end(h.owner, '第一句 第二句');
     expect(h.request).toHaveBeenCalledTimes(1);
-    expect(h.$('voiceCorrectionAccept').disabled).toBe(false);
-    h.$('voiceCorrectionText').value = '第一句，手动修改的第二句。';
-    h.input.value += ' 后续手写';
-    h.correction.accept();
-    expect(h.input.value).toBe('已有草稿 第一句，手动修改的第二句。 后续手写');
-    expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
+    expect(h.input.value).toBe('已有草稿 第一句，第二句。');
     expect(h.onAccept).toHaveBeenCalledTimes(1);
+    expect(h.$('voiceCorrectionPanel').hidden).toBe(false);
+    expect(h.toggle()).toMatchObject({textContent: '恢复原文', disabled: false});
+    h.input.value += ' 后续手写';
+    h.correction.toggle();
+    expect(h.input.value).toBe('已有草稿 第一句 第二句 后续手写');
+    expect(h.toggle().textContent).toBe('采用修正');
+    expect(h.$('voiceCorrectionStatus').textContent).toContain('输入框中仍是原文');
+    h.correction.toggle();
+    expect(h.input.value).toBe('已有草稿 第一句，第二句。 后续手写');
+    expect(h.input.focus).not.toHaveBeenCalled();
+  });
+
+  it('keeps the caret where the user left it and cannot restore an edited correction', async () => {
+    const h = harness();
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    h.input.value += '，继续写';
+    h.input.selectionStart = h.input.selectionEnd = h.input.value.length;
+    h.requests[0].resolve({corrected: '修正后的'});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.input.value).toBe('已有草稿 修正后的，继续写');
+    expect(h.input.selectionStart).toBe(h.input.value.length);
+    h.input.value = '已有草稿 修正后来的，继续写';
+    h.correction.render();
+    expect(h.toggle()).toMatchObject({textContent: '恢复原文', disabled: true});
+    h.correction.toggle();
+    expect(h.input.value).toBe('已有草稿 修正后来的，继续写');
+  });
+
+  it('writes each retried correction, including one that keeps the original', async () => {
+    const h = harness();
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    h.requests[0].resolve({corrected: '第一次修正'});
+    await vi.advanceTimersByTimeAsync(0);
+    void h.correction.correct(true);
+    expect(h.toggle().disabled).toBe(true);
+    h.requests[1].resolve({corrected: '第二次修正'});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.input.value).toBe('已有草稿 第二次修正');
+    void h.correction.correct(true);
+    h.requests[2].resolve({corrected: '原文'});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.input.value).toBe('已有草稿 原文');
+    expect(h.diff()).toBe('原文');
+    expect(h.toggle().disabled).toBe(true);
+    expect(h.$('voiceCorrectionStatus').textContent).toContain('无需修正');
   });
 
   it('corrects the final result immediately and ignores out-of-order replies for an older pause', async () => {
@@ -216,8 +289,8 @@ describe('voice correction preview and acceptance', () => {
     await vi.advanceTimersByTimeAsync(0);
     h.requests[0].resolve({corrected: '过时修正'});
     await vi.advanceTimersByTimeAsync(0);
-    expect(h.$('voiceCorrectionText').value).toBe('最新修正');
-    expect(h.input.value).toBe('已有草稿 最新最终原文');
+    expect(h.diff()).toBe('最新[-最终原文]{+修正}');
+    expect(h.input.value).toBe('已有草稿 最新修正');
   });
 
   it('reuses a pending identical request at stop and never accepts before it returns', async () => {
@@ -226,28 +299,30 @@ describe('voice correction preview and acceptance', () => {
     await vi.advanceTimersByTimeAsync(2000);
     h.correction.end(h.owner, '原文');
     expect(h.request).toHaveBeenCalledTimes(1);
-    expect(h.$('voiceCorrectionText').readOnly).toBe(true);
-    h.correction.accept();
+    expect(h.toggle().disabled).toBe(true);
+    h.correction.toggle();
     expect(h.onAccept).not.toHaveBeenCalled();
     h.requests[0].resolve({corrected: '修正'});
     await vi.advanceTimersByTimeAsync(0);
-    expect(h.$('voiceCorrectionText').readOnly).toBe(false);
+    expect(h.input.value).toBe('已有草稿 修正');
   });
 
   it('never overwrites manual edits and offers explicit append instead', async () => {
     const h = harness();
     h.observe('原文');
     h.correction.end(h.owner, '原文');
+    h.input.value = '完全不同的手写草稿';
     h.requests[0].resolve({corrected: '修正'});
     await vi.advanceTimersByTimeAsync(0);
-    h.input.value = '完全不同的手写草稿';
-    h.correction.render();
-    expect(h.$('voiceCorrectionAccept').textContent).toBe('追加修正');
-    h.correction.accept();
+    expect(h.input.value).toBe('完全不同的手写草稿');
+    expect(h.onAccept).not.toHaveBeenCalled();
+    expect(h.toggle().textContent).toBe('追加修正');
+    h.correction.toggle();
     expect(h.input.value).toBe('完全不同的手写草稿 修正');
+    expect(h.correction.session).toBeNull();
   });
 
-  it('preserves the original on failure, supports editing and retry, and never sends a prompt', async () => {
+  it('keeps the original on failure and writes a successful retry', async () => {
     const h = harness();
     h.observe('原文');
     h.correction.end(h.owner, '原文');
@@ -255,13 +330,14 @@ describe('voice correction preview and acceptance', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(h.$('voiceCorrectionStatus').textContent).toContain('原文已保留');
     expect(h.input.value).toBe('已有草稿 原文');
-    void h.correction.correct(true);
+    expect(h.onAccept).not.toHaveBeenCalled();
+    h.$('voiceCorrectionRetry').onclick();
     h.requests[1].resolve({corrected: '修正'});
     await vi.advanceTimersByTimeAsync(0);
-    expect(h.$('voiceCorrectionText').value).toBe('修正');
-    h.$('voiceCorrectionKeep').onclick();
-    expect(h.input.value).toBe('已有草稿 原文');
-    expect(h.onAccept).not.toHaveBeenCalled();
+    expect(h.input.value).toBe('已有草稿 修正');
+    h.$('voiceCorrectionClose').onclick();
+    expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
+    expect(h.input.value).toBe('已有草稿 修正');
   });
 
   it('cancels a dismissed preview, a changed backend configuration, and a switched Agent', async () => {
@@ -351,11 +427,12 @@ describe('same-Agent branch navigation invalidates voice correction', () => {
       await vi.advanceTimersByTimeAsync(0);
       navigation.resolve({});
       await done;
-      h.correction.accept();
+      h.correction.toggle();
       expect(h.correction.session).toBeNull();
       expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
-      expect(h.input.value).toBe('已有草稿 原分支的原文');
-      expect(h.onAccept).not.toHaveBeenCalled();
+      // A correction written before navigating stays, like any other text in the composer.
+      expect(h.input.value).toBe(phase === 'ready' ? '已有草稿 原分支的候选' : '已有草稿 原分支的原文');
+      expect(h.onAccept).toHaveBeenCalledTimes(phase === 'ready' ? 1 : 0);
       expect(selectAgent).toHaveBeenCalledWith({agentId: h.owner.agentId});
       if (phase === 'context') expect(h.request).not.toHaveBeenCalled();
     }
@@ -454,17 +531,17 @@ describe('correction settings refreshed when configuration is reopened', () => {
     h.correction.clear();
   });
 
-  it('leaves an edited candidate intact when fetched settings have not changed', async () => {
+  it('keeps the correction and its undo when fetched settings have not changed', async () => {
     const h = settingsHarness();
     h.observe('原文');
     h.correction.end(h.owner, '原文');
     h.requests[0].resolve({corrected: '修正'});
     await vi.advanceTimersByTimeAsync(0);
-    h.$('voiceCorrectionText').value = '用户编辑后的候选';
     const session = h.correction.session;
     await h.api.loadVoiceCorrectionSettings();
     expect(h.correction.session).toBe(session);
-    expect(h.$('voiceCorrectionText').value).toBe('用户编辑后的候选');
+    expect(h.input.value).toBe('已有草稿 修正');
+    expect(h.toggle()).toMatchObject({textContent: '恢复原文', disabled: false});
     h.correction.clear();
   });
 
@@ -515,25 +592,25 @@ describe('correction settings refreshed when configuration is reopened', () => {
       expect(h.backend.statusInfo.voiceCorrection).toEqual(settings);
       expect(h.correction.session).toBeNull();
       expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
-      h.correction.accept();
-      expect(h.input.value).toBe('已有草稿 原文');
+      // The written correction is ordinary composer text now; the panel can no longer swap it.
+      h.correction.toggle();
+      expect(h.input.value).toBe('已有草稿 旧设置的候选');
     }
   );
 
-  it('preserves an edited candidate when a full status refresh has unchanged correction settings', async () => {
+  it('keeps the session when a full status refresh has unchanged correction settings', async () => {
     const h = settingsHarness();
     h.observe('原文');
     h.correction.end(h.owner, '原文');
     h.requests[0].resolve({corrected: '模型候选'});
     await vi.advanceTimersByTimeAsync(0);
-    h.$('voiceCorrectionText').value = '手动编辑的候选';
     const session = h.correction.session;
     h.api.applyVoiceStatus(h.backend, {
       ...h.backend.statusInfo,
       voiceCorrection: {...h.backend.statusInfo.voiceCorrection}
     });
     expect(h.correction.session).toBe(session);
-    expect(h.$('voiceCorrectionText').value).toBe('手动编辑的候选');
+    expect(h.input.value).toBe('已有草稿 模型候选');
     h.correction.clear();
   });
 
@@ -567,7 +644,7 @@ describe('correction settings refreshed when configuration is reopened', () => {
     await h.api.loadVoiceCorrectionSettings();
     expect(h.correction.session.owner).toBe(voice);
     expect(h.correction.session.original).toBe('录音原文');
-    expect(h.$('voiceCorrectionAccept').disabled).toBe(true);
+    expect(h.toggle().disabled).toBe(true);
     await vi.advanceTimersByTimeAsync(2000);
     expect(h.request).toHaveBeenCalledTimes(1);
     h.correction.clear();
@@ -601,5 +678,66 @@ describe('one save button for the voice input section', () => {
       sottoUp ? '语音输入设置已保存' : 'Sotto 设置失败：Sotto unreachable'
     );
     expect(h.$('saveVoiceInput').disabled).toBe(false);
+  });
+});
+
+describe('character diff between the transcript and its correction', () => {
+  const {diffChars} = loadModule();
+  const show = (runs: [string, string][]) =>
+    runs.map(([op, text]) => (op === '=' ? text : op === '-' ? `[-${text}]` : `{+${text}}`)).join('');
+
+  it('marks inserted punctuation and rewritten words character by character', () => {
+    expect(show(diffChars('今天天气很好我们去公园', '今天天气很好，我们去公园。'))).toBe(
+      '今天天气很好{+，}我们去公园{+。}'
+    );
+    expect(show(diffChars('用派森写个脚本', '用 Python 写个脚本'))).toBe('用[-派森]{+ Python }写个脚本');
+    expect(diffChars('相同', '相同')).toEqual([['=', '相同']]);
+  });
+
+  it('keeps characters outside the basic plane whole', () => {
+    expect(show(diffChars('a😀b', 'a😁b'))).toBe('a[-😀]{+😁}b');
+  });
+
+  it('rebuilds both texts from a minimal number of edits', () => {
+    let seed = 7;
+    const random = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2147483648), seed % n);
+    const text = () => Array.from({length: random(14)}, () => 'ab，。字'[random(5)]).join('');
+    const lcs = (a: string[], b: string[]) => {
+      const row = new Array(b.length + 1).fill(0);
+      for (const x of a) {
+        let diagonal = 0;
+        for (let j = 1; j <= b.length; j++) {
+          const above = row[j];
+          row[j] = x === b[j - 1] ? diagonal + 1 : Math.max(row[j], row[j - 1]);
+          diagonal = above;
+        }
+      }
+      return row[b.length];
+    };
+    for (let i = 0; i < 500; i++) {
+      const before = text(),
+        after = text(),
+        runs: [string, string][] = diffChars(before, after);
+      const join = (skip: string) =>
+        runs
+          .filter(([op]) => op !== skip)
+          .map(([, value]) => value)
+          .join('');
+      expect(join('+')).toBe(before);
+      expect(join('-')).toBe(after);
+      const edits = runs.filter(([op]) => op !== '=').reduce((sum, [, value]) => sum + value.length, 0);
+      expect(edits).toBe(before.length + after.length - 2 * lcs([...before], [...after]));
+    }
+  });
+
+  it('shows a whole replacement when the texts differ too much for a readable diff', () => {
+    // A minimal diff would keep all 600 “a”s, but needs 1200 edits.
+    const before = 'xa'.repeat(600),
+      after = 'ya'.repeat(600);
+    expect(diffChars(before, after)).toEqual([
+      ['-', before.slice(0, -1)],
+      ['+', after.slice(0, -1)],
+      ['=', 'a']
+    ]);
   });
 });
