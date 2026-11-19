@@ -48,6 +48,7 @@ describe('recorded audio transcription into the Web UI input', () => {
       `${cancellation}\n${transcription}\n${navigation}\n({transcribeVoice, cancelVoiceRecording, navigateAgent})`,
       {
         state,
+        shortcuts: {inNormalMode: () => false},
         Blob,
         AbortController,
         clearTimeout,
@@ -63,6 +64,7 @@ describe('recorded audio transcription into the Web UI input', () => {
     return {
       input,
       state,
+      shortcuts: {inNormalMode: () => false},
       correction,
       transcribeVoice,
       cancelVoiceRecording,
@@ -192,6 +194,7 @@ describe('draft into the current Web UI input', () => {
       };
       const {handleDraftEvent} = runInNewContext(`${draft}\n({handleDraftEvent})`, {
         state,
+        shortcuts: {inNormalMode: () => false},
         backendOf: () => backend,
         localBackend: () => backend,
         WebSocket: {OPEN: 1},
@@ -216,6 +219,7 @@ describe('draft into the current Web UI input', () => {
     };
     const {handleDraftEvent} = runInNewContext(`${draft}\n({handleDraftEvent})`, {
       state,
+      shortcuts: {inNormalMode: () => false},
       backendOf: () => backend,
       localBackend: () => backend,
       WebSocket: {OPEN: 1},
@@ -235,6 +239,7 @@ describe('draft into the current Web UI input', () => {
     const selectAgent = vi.fn();
     const {handleDraftEvent} = runInNewContext(`${draft}\n({handleDraftEvent})`, {
       state,
+      shortcuts: {inNormalMode: () => false},
       backendOf: () => backend,
       WebSocket: {OPEN: 1},
       $: () => input,
@@ -262,6 +267,7 @@ describe('draft into the current Web UI input', () => {
     const state: any = {selectedKind: 'agent', agent: null};
     const {handleDraftEvent} = runInNewContext(`${draft}\n({handleDraftEvent})`, {
       state,
+      shortcuts: {inNormalMode: () => false},
       backendOf: () => backend,
       WebSocket: {OPEN: 1},
       $: () => input,
