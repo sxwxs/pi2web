@@ -26,7 +26,6 @@ class FakeElement {
   value = '';
   textContent = '';
   className = '';
-  focusVisible = false;
   isContentEditable = false;
   parent: FakeElement | null = null;
   children: FakeElement[] = [];
@@ -69,10 +68,6 @@ class FakeElement {
   contains(other: FakeElement | null) {
     for (let el = other; el; el = el.parent) if (el === this) return true;
     return false;
-  }
-  matches(selector: string) {
-    if (selector !== ':focus-visible') throw Error(selector);
-    return this.focusVisible;
   }
   all(): FakeElement[] {
     return this.children.flatMap(child => [child, ...child.all()]);
@@ -207,12 +202,16 @@ function setup({storage = {} as Record<string, string>} = {}) {
     for (const handler of doc.handlers.keydown) handler(event);
     return event;
   };
+  const pointer = () => {
+    for (const handler of doc.handlers.pointerdown) handler({});
+  };
   const cursor = () => sessions.find(entry => shortcuts.isCursor(entry.key))?.key ?? null;
   return {
     doc,
     host,
     shortcuts,
     press,
+    pointer,
     cursor,
     selected,
     sessions,
@@ -288,10 +287,12 @@ describe('keymap', () => {
     expect(isTypingTarget({tagName: 'SELECT'})).toBe(true);
     expect(isTypingTarget({tagName: 'DIV', isContentEditable: true})).toBe(true);
     expect(isTypingTarget({tagName: 'BUTTON'})).toBe(false);
-    const button = (focusVisible: boolean) => ({tagName: 'BUTTON', matches: () => focusVisible});
-    expect(isNativeActivation(button(true), 'Space')).toBe(true);
-    expect(isNativeActivation(button(false), 'Space')).toBe(false);
-    expect(isNativeActivation(button(true), 'j')).toBe(false);
+    const button = {tagName: 'BUTTON'};
+    expect(isNativeActivation(button, 'Space', true)).toBe(true);
+    expect(isNativeActivation(button, 'Enter', true)).toBe(true);
+    expect(isNativeActivation(button, 'Space', false)).toBe(false);
+    expect(isNativeActivation(button, 'j', true)).toBe(false);
+    expect(isNativeActivation({tagName: 'DIV'}, 'Space', true)).toBe(false);
   });
 });
 
@@ -373,6 +374,8 @@ describe('shortcuts on the page', () => {
 
   it('Space toggles dictation and takes the focus from a clicked button, but not from one reached with Tab', () => {
     const h = setup();
+    // Chrome makes a clicked button :focus-visible at the first key, so only how the focus came counts.
+    h.pointer();
     h.buttons.abort.focus();
     h.press(' ');
     expect(h.host.toggleVoice).toHaveBeenCalledTimes(1);
@@ -380,14 +383,19 @@ describe('shortcuts on the page', () => {
     // Held keys do not toggle again.
     h.press(' ', {repeat: true});
     expect(h.host.toggleVoice).toHaveBeenCalledTimes(1);
-    h.buttons.abort.focusVisible = true;
+    h.press('Tab');
     h.buttons.abort.focus();
     expect(h.press(' ').defaultPrevented).toBe(false);
+    expect(h.press('Enter').defaultPrevented).toBe(false);
     expect(h.host.toggleVoice).toHaveBeenCalledTimes(1);
-    h.voiceInput.disabled = true;
-    h.doc.activeElement = h.doc.body;
+    // Clicking again, e.g. a dialog's button whose closing returns the focus here, hands keys back.
+    h.pointer();
+    h.buttons.abort.focus();
     h.press(' ');
-    expect(h.host.toggleVoice).toHaveBeenCalledTimes(1);
+    expect(h.host.toggleVoice).toHaveBeenCalledTimes(2);
+    h.voiceInput.disabled = true;
+    h.press(' ');
+    expect(h.host.toggleVoice).toHaveBeenCalledTimes(2);
     expect(h.host.toast).toHaveBeenLastCalledWith('语音输入正在处理，请稍候');
   });
 
@@ -434,15 +442,26 @@ describe('shortcuts on the page', () => {
     expect(h.buttons.abort.clicks).toBe(1);
   });
 
+  it('does not carry an armed Abort over to another session', () => {
+    const h = setup();
+    h.press('Q');
+    h.shortcuts.noteSelection('agent:b');
+    h.press('Q');
+    expect(h.buttons.abort.clicks).toBe(0);
+    expect(h.host.toast).toHaveBeenLastCalledWith('再按一次 Q 中止当前运行');
+    h.press('Q');
+    expect(h.buttons.abort.clicks).toBe(1);
+  });
+
   it('copies the latest finished output and says when newer text is still streaming', async () => {
     const h = setup();
     h.press('y');
     await vi.waitFor(() => expect(h.host.toast).toHaveBeenCalled());
-    expect(h.host.latestOutput).toHaveBeenCalledWith('last');
     expect(h.host.navigator.clipboard.writeText).toHaveBeenCalledWith('最终答案');
     expect(h.host.toast).toHaveBeenLastCalledWith('已复制最新一段输出（4 字）；正在生成的内容不包含在内');
-    h.press('Y');
-    await vi.waitFor(() => expect(h.host.latestOutput).toHaveBeenLastCalledWith('turn'));
+    h.host.latestOutput.mockResolvedValueOnce(null);
+    h.press('y');
+    await vi.waitFor(() => expect(h.host.toast).toHaveBeenLastCalledWith('已加载的消息里没有 Agent 输出'));
   });
 
   it('in a dialog only moves through its message list', () => {

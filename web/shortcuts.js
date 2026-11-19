@@ -49,7 +49,6 @@
     {group: '输入', keys: ['t'], action: 'library', text: '打开提示词模板 / 历史'},
     {group: 'Agent', keys: ['r'], action: 'undo', text: 'Undo：已预选最近一条你的消息，再按 Enter 即回退'},
     {group: 'Agent', keys: ['y'], action: 'copy', text: '复制最新一段 Agent 输出（Markdown 原文）'},
-    {group: 'Agent', keys: ['Y'], action: 'copyTurn', text: '复制最近一轮的全部 Agent 输出'},
     {group: 'Agent', keys: ['p'], action: 'pause', text: '安全暂停 / 取消暂停'},
     {group: 'Agent', keys: ['Q'], action: 'abort', text: 'Abort 当前运行（1.5 秒内连按两次）'},
     {group: 'Agent', keys: ['m'], action: 'model', text: '模型设置'},
@@ -120,16 +119,16 @@
   }
   /**
    * Space and Enter activate a focused button. A button reached with Tab keeps that; one focused by a
-   * mouse click (not :focus-visible) does not, or Space right after clicking Abort would abort again.
+   * mouse click does not, or Space right after clicking Abort would abort again. `tabbed` says how the
+   * focus last moved. (Not :focus-visible: Chrome turns that on for a clicked button at the first key.)
    */
-  function isNativeActivation(el, name) {
-    if ((name !== 'Space' && name !== 'Enter') || !el || !['BUTTON', 'A', 'SUMMARY'].includes(el.tagName))
-      return false;
-    try {
-      return el.matches(':focus-visible');
-    } catch {
-      return false;
-    }
+  function isNativeActivation(el, name, tabbed) {
+    return (
+      tabbed &&
+      (name === 'Space' || name === 'Enter') &&
+      !!el &&
+      ['BUTTON', 'A', 'SUMMARY'].includes(el.tagName)
+    );
   }
 
   /** The key `delta` steps from `from` in `keys`, stopping at either end; from nothing it is the first. */
@@ -183,7 +182,7 @@
    *   openSlot(slot)        open the session bound to keyboard key `slot` (0-5)
    *   bind(entry), unbind(entry)   keyboard key binding of a session
    *   toggleVoice()         start / stop dictation
-   *   latestOutput(scope)   'last' | 'turn' → {text, streaming} | null
+   *   latestOutput()        newest finished Agent text in the loaded transcript → {text, streaming} | null
    *   focusTerminal()       focus the open Terminal
    *   toast(text)
    */
@@ -202,6 +201,7 @@
       current = null,
       previous = null,
       abortArmedUntil = 0,
+      tabbed = false,
       help = null;
     const now = host.now || (() => Date.now());
 
@@ -315,14 +315,14 @@
       if (!box || box.hidden) return;
       box.scrollBy({top: (direction * box.clientHeight) / 2});
     }
-    async function copy(scope) {
+    async function copy() {
       if (!requireAgentView('复制')) return;
-      const output = await host.latestOutput(scope);
-      if (!output?.text) return host.toast('还没有可复制的 Agent 输出');
+      const output = await host.latestOutput();
+      if (!output?.text) return host.toast('已加载的消息里没有 Agent 输出');
       const copied = await copyText(output.text, doc, nav);
       if (!copied) return host.toast('复制失败：浏览器不允许写入剪贴板');
       host.toast(
-        `已复制${scope === 'turn' ? '最近一轮' : '最新一段'}输出（${output.text.length} 字）` +
+        `已复制最新一段输出（${output.text.length} 字）` +
           (output.streaming ? '；正在生成的内容不包含在内' : '')
       );
     }
@@ -427,8 +427,7 @@
       },
       library: () => requireAgentView('模板') && $('libraryToggle').click(),
       undo: () => press('undo', 'Undo'),
-      copy: () => copy('last'),
-      copyTurn: () => copy('turn'),
+      copy,
       pause: () => press('safePause', '安全暂停'),
       abort: () => {
         const button = $('abort');
@@ -506,7 +505,7 @@
         return;
       }
       const name = keyName(event);
-      if (!name || isNativeActivation(active, name)) return;
+      if (!name || isNativeActivation(active, name, tabbed)) return;
       const result = resolveKey(compiled, pending, name);
       setPending(result?.pending || '');
       if (result) {
@@ -533,6 +532,9 @@
 
     doc.addEventListener('keydown', onKeyDown);
     win.addEventListener('keydown', onTerminalEscape, true);
+    // How the focus last moved, for isNativeActivation. Captured, so no handler can hide it.
+    doc.addEventListener('keydown', event => event.key === 'Tab' && (tabbed = true), true);
+    doc.addEventListener('pointerdown', () => (tabbed = false), true);
     doc.addEventListener('focusin', scheduleMode);
     doc.addEventListener('focusout', scheduleMode);
     // `close` does not bubble, but a capturing listener still sees every dialog close.
@@ -557,6 +559,8 @@
       isCursor: key => cursorVisible && key === cursor,
       /** The app opened a session (any way): it becomes the cursor's place and the `\`` target's successor. */
       noteSelection(key) {
+        // An Abort armed in one session must not carry over to the next.
+        abortArmedUntil = 0;
         if (key && key !== current) {
           if (current) previous = current;
           current = key;

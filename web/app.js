@@ -5411,23 +5411,15 @@
     return advice?.state === 'ready' && ['needs_user', 'continue'].includes(advice.outcome);
   }
   /**
-   * The open Agent's newest recorded text output ('last'), or all of it since the user message before it
-   * ('turn'). Text still being streamed is not recorded yet, so it is never included: a copy is always
-   * of finished text.
+   * The open Agent's newest recorded text output in the loaded transcript. Text still being streamed is
+   * not recorded yet, so it is never included: a copy is always of finished text.
    */
-  async function latestOutput(scope) {
-    const timeline = state.selectedKind === 'agent' ? state.timeline : null;
-    if (!timeline) return null;
-    const items = timeline.items,
-      last = items.findLastIndex(item => item.kind === 'assistant');
-    if (last < 0) return null;
-    const first =
-      scope === 'turn'
-        ? items.findLastIndex((item, index) => index < last && item.kind === 'user') + 1
-        : last;
-    const outputs = items.slice(first, last + 1).filter(item => item.kind === 'assistant'),
-      texts = await Promise.all(outputs.map(item => item.body ?? loadItemBody(item)));
-    return {text: texts.join('\n\n').trim(), streaming: state.agent?.status === 'streaming'};
+  async function latestOutput() {
+    const items = (state.selectedKind === 'agent' && state.timeline?.items) || [],
+      item = items.findLast(item => item.kind === 'assistant');
+    if (!item) return null;
+    const text = item.body ?? (await loadItemBody(item));
+    return {text: text.trim(), streaming: state.agent?.status === 'streaming'};
   }
   const shortcuts = window.RemotePiShortcuts.create({
     sessions: () =>
