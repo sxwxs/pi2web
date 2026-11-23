@@ -4722,8 +4722,7 @@
     // (and puts that message back into the composer). Entries of abandoned branches are newer in the file.
     const parents = new Map((session.entries || []).map(e => [e.id, e.parentId])),
       branch = new Set();
-    for (let id = session.leafId ?? session.entries?.at(-1)?.id; id && !branch.has(id); id = parents.get(id))
-      branch.add(id);
+    for (let id = session.leafId; id && !branch.has(id); id = parents.get(id)) branch.add(id);
     const lastUser = [...messages].reverse().find(e => e.message.role === 'user' && branch.has(e.id));
     const selected = await modal(
       'Undo（Session Tree）',
