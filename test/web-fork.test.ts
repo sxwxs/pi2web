@@ -11,6 +11,10 @@ const navigateSource = source.slice(
   source.indexOf('  async function navigateAgent('),
   source.indexOf('  const performanceTime =')
 );
+const revertSource = source.slice(
+  source.indexOf('  async function revert('),
+  source.indexOf('  async function modelControls(')
+);
 /** Opening a Session finishes after its summary request; the user may select another one meanwhile. */
 const opening = (order: string[]) =>
   vi.fn(async () => {
@@ -140,5 +144,50 @@ describe('Undo', () => {
     );
     await navigateAgent('entry');
     expect(order).toEqual(['select', 'input edit me', 'loaded']);
+  });
+
+  /**
+   * Current branch m → u1 → a1 → u2 → a2; u3 → a3 were abandoned from a1, so they are newer in the file.
+   * Confirming the dialog right away returns what it preselected.
+   */
+  function undo(focused: string | null, leafId: string | null = 'a2') {
+    const entry = (id: string, parentId: string | null, role?: string) =>
+      role
+        ? {type: 'message', id, parentId, message: {role, content: id}}
+        : {type: 'model_change', id, parentId};
+    const session = {
+      leafId,
+      entries: [
+        entry('m', null),
+        entry('u1', 'm', 'user'),
+        entry('a1', 'u1', 'assistant'),
+        entry('u2', 'a1', 'user'),
+        entry('a2', 'u2', 'assistant'),
+        entry('u3', 'a1', 'user'),
+        entry('a3', 'u3', 'assistant')
+      ]
+    };
+    const navigateAgent = vi.fn(async () => {});
+    const {revert} = runInNewContext(`${revertSource}\n({revert})`, {
+      state: {agent: {agentId: 'bk:a'}},
+      requestAgent: vi.fn(async () => session),
+      shortcuts: {undoTarget: () => focused},
+      modal: vi.fn(async (_title: string, build: (body: any) => () => unknown) => build(node())()),
+      document: {createElement: node},
+      textContent: (content: string) => content,
+      esc: (text: string) => text,
+      navigateAgent,
+      toast: vi.fn()
+    });
+    return revert().then(() => navigateAgent);
+  }
+
+  it('preselects your message of the focused round, else the last round of the current branch', async () => {
+    expect(await undo(null)).toHaveBeenCalledWith('u2');
+    expect(await undo('u1')).toHaveBeenCalledWith('u1');
+    // Never a message of an abandoned branch, even though it is newer in the file.
+    expect(await undo('u3')).toHaveBeenCalledWith('u2');
+    // An empty current branch (Pi's resetLeaf) has nothing to take back.
+    expect(await undo(null, null)).not.toHaveBeenCalled();
   });
 });

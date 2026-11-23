@@ -136,6 +136,7 @@
 .advice-error{display:block;margin-top:6px;color:var(--red)}
 .advice-mark{flex:0 0 auto;font-size:13px;line-height:1}.advice-mark.advice-analyzing{opacity:.7}
 .agent.cursor{outline:2px dashed var(--yellow);outline-offset:2px}aside{padding-bottom:40px}
+.msg.block-cursor{outline:2px dashed var(--yellow);outline-offset:-2px}
 .shortcut-mode{position:fixed;left:12px;bottom:10px;z-index:40;padding:3px 8px;font:11px ui-monospace,monospace;color:var(--muted);background:#2b303bdd;border:1px solid var(--line);border-radius:5px;pointer-events:none}.shortcut-mode[hidden]{display:none}.shortcut-mode[data-mode="insert"]{color:var(--green)}.shortcut-mode[data-mode="terminal"]{color:var(--blue)}
 .shortcut-help{max-width:min(760px,94vw)}.shortcut-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:4px 24px}.shortcut-help h3{margin:14px 0 6px;font-size:13px;color:var(--blue)}.shortcut-help dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 12px;margin:0}.shortcut-help dt{white-space:nowrap}.shortcut-help dd{margin:0}.shortcut-help kbd{display:inline-block;min-width:1.7em;margin-right:3px;padding:1px 5px;text-align:center;font:12px ui-monospace,monospace;background:var(--input);border:1px solid #586174;border-bottom-width:2px;border-radius:4px}
-@media(max-width:700px){.shortcut-mode{display:none}aside{padding-bottom:10px}}
+@media(max-width:700px){.shortcut-mode{display:none}.msg.block-cursor{outline:none}aside{padding-bottom:10px}}
