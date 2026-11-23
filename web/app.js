@@ -2357,14 +2357,23 @@
     if (state.timeline?.agentId !== agentId) return;
     for (const card of state.timeline.toolCards.values()) if (!card.result) updateToolCard(card);
   }
-  function renderToolBody(card) {
+  /** What an expanded tool card shows: the call's arguments, then its result or the output so far. */
+  function toolBodyText(card) {
     const head = card.args ?? '加载中…',
       tail = card.result
         ? `— 结果 —\n${card.resultText ?? '加载中…'}`
         : card.output !== undefined
           ? `— 输出 —\n${card.output}`
           : '';
-    renderCardBody(card.body, [head, tail].filter(Boolean).join('\n\n'));
+    return [head, tail].filter(Boolean).join('\n\n');
+  }
+  function renderToolBody(card) {
+    renderCardBody(card.body, toolBodyText(card));
+  }
+  async function loadToolBodies(card) {
+    if (card.args === undefined) card.args = card.call.body ?? (await loadItemBody(card.call));
+    if (card.result && card.resultText === undefined)
+      card.resultText = card.result.body ?? (await loadItemBody(card.result));
   }
   /** Expanding loads the call's and result's bodies; expanding a running call also watches its output. */
   async function expandTool(card) {
@@ -2376,9 +2385,7 @@
     if (!card.details.open) return;
     renderToolBody(card);
     try {
-      if (card.args === undefined) card.args = card.call.body ?? (await loadItemBody(card.call));
-      if (card.result && card.resultText === undefined)
-        card.resultText = card.result.body ?? (await loadItemBody(card.result));
+      await loadToolBodies(card);
     } catch (error) {
       renderCardBody(card.body, `加载失败：${error.message}`);
       return;
@@ -2527,7 +2534,13 @@
     older.id = 'loadOlderMessages';
     older.type = 'button';
     older.textContent = `加载更早的对话（还有 ${timeline.start} 项）`;
-    older.onclick = () => loadOlderItems().catch(error => toast(error.message));
+    // Disabled while its page loads: a second request before the first answers would prepend it twice.
+    older.onclick = () => {
+      older.disabled = true;
+      loadOlderItems()
+        .catch(error => toast(error.message))
+        .finally(() => (older.disabled = false));
+    };
     const all = document.createElement('button');
     all.id = 'loadAllMessages';
     all.type = 'button';
@@ -4718,12 +4731,21 @@
       e => e.type === 'message' && ['user', 'assistant'].includes(e.message?.role)
     );
     if (!messages.length) return toast('当前 Session 没有可回退的消息');
-    // Preselect the newest user message of the current branch, so Undo + Enter takes back the last round
-    // (and puts that message back into the composer). Entries of abandoned branches are newer in the file.
+    // Preselect your message that starts the round of the focused transcript block, found up the session
+    // tree from the block's entry (its message may not be loaded); without a focused block, the newest of
+    // the current branch. Undo + Enter takes back that round, or the last one, and puts the message back
+    // into the composer. Entries of abandoned branches are newer in the file.
     const parents = new Map((session.entries || []).map(e => [e.id, e.parentId])),
       branch = new Set();
     for (let id = session.leafId; id && !branch.has(id); id = parents.get(id)) branch.add(id);
-    const lastUser = [...messages].reverse().find(e => e.message.role === 'user' && branch.has(e.id));
+    const users = new Map(
+      messages.filter(e => e.message.role === 'user' && branch.has(e.id)).map(e => [e.id, e])
+    );
+    // A block's item id is its entry's id, or `<entry id>.<part>` for a part of an Agent message.
+    let round = shortcuts.focusedItemId();
+    if (round && !parents.has(round)) round = entryOf(round);
+    while (round && branch.has(round) && !users.has(round)) round = parents.get(round);
+    const preselected = users.get(round) || [...users.values()].at(-1);
     const selected = await modal(
       'Undo（Session Tree）',
       body => {
@@ -4734,13 +4756,13 @@
         body.append(note);
         const list = document.createElement('div');
         list.className = 'modal-list';
-        let value = lastUser?.id ?? null;
+        let value = preselected?.id ?? null;
         for (const e of [...messages].reverse()) {
           const role = e.message.role === 'user' ? 'You' : 'Agent',
             text = textContent(e.message.content) || '(空消息)';
           const b = document.createElement('button');
           b.type = 'button';
-          b.className = e === lastUser ? 'choice selected' : 'choice';
+          b.className = e === preselected ? 'choice selected' : 'choice';
           b.innerHTML = `<b>${role}</b> ${esc(text.slice(0, 160))}<small>${esc(e.id)}${e.id === session.leafId ? ' · 当前' : ''}</small>`;
           b.onclick = () => {
             value = e.id;
@@ -5420,6 +5442,22 @@
     const text = item.body ?? (await loadItemBody(item));
     return {text: text.trim(), streaming: state.agent?.status === 'streaming'};
   }
+  /** Transcript blocks for j/k: its cards, and inside an expanded activity group, the group's cards. */
+  const TRANSCRIPT_BLOCKS =
+    ':scope > details.msg, :scope > details.activity-group[open] > .activity-items > details.msg';
+  /** The text `y` copies from a block: a message's Markdown, or what an expanded tool card shows. */
+  async function blockText(el) {
+    const card = el.dataset.itemId ? state.timeline?.cards.get(el.dataset.itemId) : null;
+    if (!card)
+      throw Error(
+        el.classList.contains('activity-group')
+          ? '活动组不能整体复制：展开后选中其中一项'
+          : '这一块还没有记录到会话里（可能还在生成），不能复制'
+      );
+    if (!card.call) return card.item.body ?? (await loadItemBody(card.item));
+    await loadToolBodies(card);
+    return toolBodyText(card);
+  }
   const shortcuts = window.RemotePiShortcuts.create({
     sessions: () =>
       sessionEntries().map(entry => ({...entry, key: entryKey(entry), attention: needsAttention(entry)})),
@@ -5467,8 +5505,22 @@
     },
     toggleVoice: toggleVoiceInput,
     latestOutput,
+    blocks: () => [...$('messages').querySelectorAll(TRANSCRIPT_BLOCKS)],
+    following: () => state.followOutput,
+    blockText,
     focusTerminal: () => state.terminalEmulator?.focus(),
     toast
+  });
+  // The focused block follows the transcript: new output, re-rendered cards, activity groups opened.
+  new MutationObserver(() => shortcuts.transcriptChanged()).observe($('messages'), {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['open']
+  });
+  $('messages').addEventListener('click', event => {
+    const el = event.target.closest?.('details.msg');
+    if (el) shortcuts.focusBlock(el);
   });
   function currentKey() {
     const item = state.selectedKind === 'agent' ? state.agent : state.terminal;

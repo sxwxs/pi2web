@@ -6,7 +6,9 @@
    *
    * Shortcuts work in Normal mode, i.e. while the focus is not in something you type into: the
    * composer, any other field or select, or the Terminal. Esc leaves a field, `i` enters the composer.
-   * The session list has a highlight (the cursor) of its own: j/k move it, Enter opens what it is on.
+   * Normal mode has two sides, each with a highlight of its own: the session list (j/k move the cursor,
+   * Enter opens its session) and the open Agent's transcript (j/k move between blocks, Enter folds or
+   * unfolds one). Opening a session goes to its transcript; h and l switch sides.
    *
    * KEYMAP is the single source of truth: dispatch and the `?` help both read it. The app is reached
    * only through the `host` passed to create(); actions that already have a button press that button,
@@ -14,17 +16,26 @@
    */
 
   // `keys`: KeyboardEvent.key names as produced by keyName(); a space separates the keys of a sequence.
+  // `pane`: the side the key works on ('list' or 'transcript'); without it, both.
   // `repeat`: whether holding the key repeats the action.
   const KEYMAP = [
     {
       group: 'Session',
+      pane: 'list',
       keys: ['j'],
       action: 'down',
       repeat: true,
       text: '高亮下一个 Session（到底自动加载更多）'
     },
-    {group: 'Session', keys: ['k'], action: 'up', repeat: true, text: '高亮上一个 Session'},
-    {group: 'Session', keys: ['Enter', 'o'], action: 'open', text: '打开高亮的 Session'},
+    {group: 'Session', pane: 'list', keys: ['k'], action: 'up', repeat: true, text: '高亮上一个 Session'},
+    {
+      group: 'Session',
+      pane: 'list',
+      keys: ['Enter', 'o'],
+      action: 'open',
+      text: '打开高亮的 Session，焦点进入它的对话（最新的 block）'
+    },
+    {group: 'Session', keys: ['h'], action: 'left', text: '焦点回到 Session 列表，高亮当前 Session'},
     {group: 'Session', keys: ['n'], action: 'nextAttention', text: '高亮下一个等你处理的 Session'},
     {group: 'Session', keys: ['N'], action: 'previousAttention', text: '高亮上一个等你处理的 Session'},
     {group: 'Session', keys: ['`'], action: 'previous', text: '切回上一个打开的 Session'},
@@ -36,6 +47,42 @@
     },
     {group: 'Session', keys: ['b'], action: 'bind', text: '把高亮（没有高亮时为当前）Session 绑定到键盘按键'},
     {group: 'Session', keys: ['x'], action: 'unbind', text: '清除高亮（没有高亮时为当前）Session 的键盘按键'},
+    {group: '对话', keys: ['l'], action: 'right', text: '焦点进入右侧对话，回到上次的 block'},
+    {group: '对话', pane: 'transcript', keys: ['j'], action: 'blockDown', repeat: true, text: '下一个 block'},
+    {
+      group: '对话',
+      pane: 'transcript',
+      keys: ['k'],
+      action: 'blockUp',
+      repeat: true,
+      text: '上一个 block（到顶自动加载更早的对话）'
+    },
+    {
+      group: '对话',
+      pane: 'transcript',
+      keys: ['Enter', 'o'],
+      action: 'toggleBlock',
+      text: '展开 / 折叠焦点 block'
+    },
+    {
+      group: '对话',
+      keys: ['e'],
+      action: 'toggleBlock',
+      text: '展开 / 折叠焦点 block，在列表里也能用（默认最新的）'
+    },
+    {
+      group: '对话',
+      pane: 'transcript',
+      keys: ['y'],
+      action: 'copyBlock',
+      text: '复制焦点 block（消息为 Markdown 原文，工具为参数和结果）'
+    },
+    {
+      group: '对话',
+      keys: ['r'],
+      action: 'undo',
+      text: 'Undo：预选焦点所在这一轮你的消息（在列表里为最近一轮），Enter 即撤回'
+    },
     {group: '输入', keys: ['Space'], action: 'voice', text: '开始 / 停止语音输入'},
     {
       group: '输入',
@@ -47,15 +94,20 @@
     {group: '输入', keys: ['/'], action: 'command', text: '输入框为空时输入 /，打开命令列表'},
     {group: '输入', keys: ['@'], action: 'mention', text: '在输入框末尾输入 @，引用文件'},
     {group: '输入', keys: ['t'], action: 'library', text: '打开提示词模板 / 历史'},
-    {group: 'Agent', keys: ['r'], action: 'undo', text: 'Undo：已预选最近一条你的消息，再按 Enter 即回退'},
-    {group: 'Agent', keys: ['y'], action: 'copy', text: '复制最新一段 Agent 输出（Markdown 原文）'},
+    {
+      group: 'Agent',
+      pane: 'list',
+      keys: ['y'],
+      action: 'copy',
+      text: '复制最新一段 Agent 输出（Markdown 原文）'
+    },
     {group: 'Agent', keys: ['p'], action: 'pause', text: '安全暂停 / 取消暂停'},
     {group: 'Agent', keys: ['Q'], action: 'abort', text: 'Abort 当前运行（1.5 秒内连按两次）'},
     {group: 'Agent', keys: ['m'], action: 'model', text: '模型设置'},
     {group: '消息', keys: ['d'], action: 'pageDown', repeat: true, text: '向下滚动半页'},
     {group: '消息', keys: ['u'], action: 'pageUp', repeat: true, text: '向上滚动半页'},
-    {group: '消息', keys: ['G'], action: 'bottom', text: '跳到最新输出并继续跟随'},
-    {group: '消息', keys: ['g g'], action: 'top', text: '跳到已加载消息的顶部'},
+    {group: '消息', keys: ['G'], action: 'bottom', text: '跳到最新输出并继续跟随，焦点移到最新的 block'},
+    {group: '消息', keys: ['g g'], action: 'top', text: '跳到已加载消息的顶部，焦点移到第一个 block'},
     {group: '其他', keys: ['?'], action: 'help', text: '显示 / 关闭快捷键说明'},
     {group: '其他', keys: [','], action: 'config', text: '打开配置'},
     {group: '其他', keys: ['Escape'], action: 'escape', text: '取消高亮、关闭菜单和未完成的按键序列'}
@@ -75,6 +127,7 @@
     {group: '输入框、Terminal 与对话框', keys: ['j', 'k'], text: 'Undo / Fork 对话框：选择消息，Enter 确认'}
   ];
   const KEY_LABELS = {Space: 'Space', Escape: 'Esc', 'Ctrl+Enter': 'Ctrl/⌘+Enter', 'g g': 'gg'};
+  const PANE_LABELS = {list: '列表', transcript: '对话'};
   const keyLabel = key => KEY_LABELS[key] || key;
   const MODIFIERS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'AltGraph', 'Fn', 'OS']);
   const SEQUENCE_TIMEOUT = 1000;
@@ -89,12 +142,14 @@
     return key === ' ' ? 'Space' : key;
   }
 
+  /** `bindings`: keys → the entries bound to them, at most one per side. */
   function compile(keymap) {
     const bindings = new Map(),
       prefixes = new Set();
     for (const entry of keymap)
       for (const keys of entry.keys) {
-        bindings.set(keys, entry);
+        if (!bindings.has(keys)) bindings.set(keys, []);
+        bindings.get(keys).push(entry);
         const parts = keys.split(' ');
         for (let i = 1; i < parts.length; i++) prefixes.add(parts.slice(0, i).join(' '));
       }
@@ -103,13 +158,14 @@
   /**
    * One key, possibly continuing a sequence: `{entry, key}` once a binding is complete, `{pending}`
    * while a sequence goes on, null for an unbound key. A key that breaks a sequence counts on its own.
+   * `pane` is the side with the focus: 'list' or 'transcript'.
    */
-  function resolveKey(compiled, pending, name) {
+  function resolveKey(compiled, pending, name, pane = 'list') {
     const sequence = pending ? `${pending} ${name}` : name,
-      entry = compiled.bindings.get(sequence);
+      entry = compiled.bindings.get(sequence)?.find(item => !item.pane || item.pane === pane);
     if (entry) return {entry, key: name};
     if (compiled.prefixes.has(sequence)) return {pending: sequence};
-    return pending ? resolveKey(compiled, '', name) : null;
+    return pending ? resolveKey(compiled, '', name, pane) : null;
   }
 
   /** Whether keys typed with this element focused are text (or Terminal input), not shortcuts. */
@@ -183,8 +239,12 @@
    *   bind(entry), unbind(entry)   keyboard key binding of a session
    *   toggleVoice()         start / stop dictation
    *   latestOutput()        newest finished Agent text in the loaded transcript → {text, streaming} | null
+   *   blocks()              the transcript's blocks in page order: its cards, and those of open activity groups
+   *   following()           whether the transcript follows new output
+   *   blockText(block)      the text `y` copies from a block; rejects with the reason it has none
    *   focusTerminal()       focus the open Terminal
    *   toast(text)
+   * The app calls transcriptChanged() whenever the transcript changes, and focusBlock() on a click in it.
    */
   function create(host) {
     const doc = host.document || document,
@@ -202,7 +262,12 @@
       previous = null,
       abortArmedUntil = 0,
       tabbed = false,
-      help = null;
+      help = null,
+      // The side with the focus, and the transcript's focused block. `blockFollow`: the block was the newest
+      // when the user put the focus there, so it moves on to newer blocks while the transcript follows output.
+      pane = 'list',
+      block = null,
+      blockFollow = true;
     const now = host.now || (() => Date.now());
 
     const chip = doc.createElement('div');
@@ -216,6 +281,8 @@
     const agentView = () => !!$('prompt') && !$('prompt').hidden;
     const terminalView = () => !!$('terminalView') && !$('terminalView').hidden;
     const openDialog = () => doc.querySelector('dialog[open]');
+    /** The transcript side exists only while an Agent is shown; otherwise keys go to the list. */
+    const activePane = () => (pane === 'transcript' && agentView() ? 'transcript' : 'list');
 
     function updateMode() {
       let text = '',
@@ -226,9 +293,14 @@
           [mode, text] = inTerminal(active)
             ? ['terminal', 'TERMINAL · Ctrl+] 离开']
             : ['insert', 'INSERT · Esc 离开'];
-        else [mode, text] = ['normal', pending ? `NORMAL · ${pending}…` : 'NORMAL · ? 快捷键'];
+        else
+          [mode, text] = [
+            'normal',
+            `NORMAL · ${PANE_LABELS[activePane()]} · ${pending ? `${pending}…` : '? 快捷键'}`
+          ];
       }
-      chip.textContent = text;
+      // Runs on every change of the transcript, i.e. per frame while text streams in.
+      if (chip.textContent !== text) chip.textContent = text;
       chip.dataset.mode = mode;
       chip.hidden = !text;
     }
@@ -244,10 +316,15 @@
         }, SEQUENCE_TIMEOUT);
     }
 
+    /** A visible list cursor means the focus is on the list. */
     function setCursor(key, visible = true) {
       const before = cursorVisible ? cursor : null;
       cursor = key;
       cursorVisible = visible && !!key;
+      if (cursorVisible && pane !== 'list') {
+        pane = 'list';
+        paintBlock();
+      }
       const after = cursorVisible ? cursor : null,
         changed = [...new Set([before, after].filter(Boolean))];
       if (changed.length) host.renderCursor(changed);
@@ -286,6 +363,91 @@
       const entry = previous && host.sessions().find(item => item.key === previous);
       if (!entry) return host.toast(previous ? '上一个 Session 已不在列表中' : '还没有上一个 Session');
       return host.open(entry);
+    }
+    function focusList() {
+      pane = 'list';
+      paintBlock();
+      const keys = host.sessions().map(entry => entry.key);
+      setCursor(keys.includes(cursor) ? cursor : host.selectedKey(), true);
+    }
+    function focusTranscript() {
+      if (!agentView())
+        return host.toast(
+          terminalView() ? 'Terminal 没有对话；按 i 进入 Terminal' : '右侧还没有打开的 Agent'
+        );
+      pane = 'transcript';
+      setCursor(cursor, false);
+      syncBlock();
+    }
+
+    // ---- The transcript's focused block.
+    const blocks = () => host.blocks?.() || [];
+    function paintBlock() {
+      if (!block) return;
+      if (enabled && activePane() === 'transcript') block.classList.add('block-cursor');
+      else block.classList.remove('block-cursor');
+    }
+    function setBlock(el, follow = blockFollow) {
+      if (el !== block) {
+        block?.classList.remove('block-cursor');
+        block = el;
+      }
+      blockFollow = follow;
+      paintBlock();
+    }
+    /**
+     * The focused block in the transcript as it is now: the newest while it follows the output, else the
+     * same card or one re-rendered for the same item, else (it is gone) the newest. Null without blocks.
+     */
+    function syncBlock() {
+      const list = blocks(),
+        newest = list.at(-1) || null,
+        id = block?.dataset?.itemId,
+        same = list.includes(block) ? block : (id && list.find(el => el.dataset.itemId === id)) || null;
+      if (!same) setBlock(newest, true);
+      else setBlock(blockFollow && host.following?.() ? newest : same);
+      return block;
+    }
+    /** Keep a block in view; one taller than the transcript shows its start. */
+    function revealBlock(el) {
+      const box = $('messages'),
+        tall = !!box && el.offsetHeight > box.clientHeight;
+      el.scrollIntoView?.({block: tall ? 'start' : 'nearest'});
+    }
+    function moveBlock(delta) {
+      const list = blocks(),
+        index = list.indexOf(syncBlock());
+      if (!list.length) return host.toast('对话里还没有内容');
+      if (index === 0 && delta < 0) {
+        // At the top of what is loaded: load older items above; the focus stays and k goes on into them.
+        const older = $('loadOlderMessages');
+        if (older && !older.disabled) {
+          older.click();
+          host.toast('正在加载更早的对话…');
+        }
+        return;
+      }
+      const next = list[Math.max(0, Math.min(list.length - 1, index + delta))];
+      setBlock(next, next === list.at(-1));
+      revealBlock(next);
+    }
+    function toggleBlock() {
+      if (!requireAgentView('展开')) return;
+      const el = syncBlock();
+      if (!el) return host.toast('对话里还没有内容');
+      // The focus stays on a block you fold or unfold, e.g. not moving into an activity group just opened.
+      setBlock(el, false);
+      el.open = !el.open;
+      // Expanded, a long block shows its start; collapsed, the reader is not left past its end.
+      el.scrollIntoView?.({block: 'nearest'});
+    }
+    async function copyBlock() {
+      const el = syncBlock();
+      if (!el) return host.toast('对话里还没有内容');
+      const text = await host.blockText(el);
+      if (!text) return host.toast('焦点 block 没有文字');
+      if (!(await copyText(text, doc, nav))) return host.toast('复制失败：浏览器不允许写入剪贴板');
+      host.toast(`已复制焦点 block（${text.length} 字）`);
     }
 
     /** Press an existing button, if the current view has it. */
@@ -342,7 +504,8 @@
       const note = doc.createElement('p');
       note.className = 'muted';
       note.textContent =
-        '焦点不在输入框、Terminal 或对话框里时生效（左下角显示 NORMAL）。可在「配置 → 输入」中关闭。';
+        '焦点不在输入框、Terminal 或对话框里时生效（左下角显示 NORMAL）。左侧 Session 列表和右侧对话各有焦点，' +
+        'h / l 切换；标「列表」「对话」的键只在焦点所在的一侧生效。可在「配置 → 输入」中关闭。';
       const groups = doc.createElement('div');
       groups.className = 'shortcut-groups';
       const byGroup = new Map();
@@ -362,6 +525,12 @@
             const kbd = doc.createElement('kbd');
             kbd.textContent = keyLabel(key);
             keys.append(kbd);
+          }
+          if (entry.pane) {
+            const side = doc.createElement('small');
+            side.className = 'muted';
+            side.textContent = PANE_LABELS[entry.pane];
+            keys.append(side);
           }
           text.textContent = entry.text;
           list.append(keys, text);
@@ -384,6 +553,12 @@
       down: () => move(1),
       up: () => move(-1),
       open: openCursor,
+      left: focusList,
+      right: focusTranscript,
+      blockDown: () => moveBlock(1),
+      blockUp: () => moveBlock(-1),
+      toggleBlock,
+      copyBlock,
       nextAttention: () => moveToAttention(1),
       previousAttention: () => moveToAttention(-1),
       previous: openPrevious,
@@ -443,11 +618,16 @@
       pageDown: () => scrollMessages(1),
       pageUp: () => scrollMessages(-1),
       bottom: () => {
-        if (!$('messages')?.hidden) $('jumpToLatest')?.click();
+        if ($('messages')?.hidden) return;
+        $('jumpToLatest')?.click();
+        setBlock(blocks().at(-1) || null, true);
       },
       top: () => {
         const box = $('messages');
-        if (box && !box.hidden) box.scrollTop = 0;
+        if (!box || box.hidden) return;
+        box.scrollTop = 0;
+        const list = blocks();
+        setBlock(list[0] || null, list.length <= 1);
       },
       help: toggleHelp,
       config: () => $('openConfig')?.click(),
@@ -506,7 +686,7 @@
       }
       const name = keyName(event);
       if (!name || isNativeActivation(active, name, tabbed)) return;
-      const result = resolveKey(compiled, pending, name);
+      const result = resolveKey(compiled, pending, name, activePane());
       setPending(result?.pending || '');
       if (result) {
         event.preventDefault();
@@ -549,6 +729,7 @@
           setPending('');
           setCursor(cursor, false);
         }
+        syncBlock();
         updateMode();
       };
     }
@@ -557,7 +738,10 @@
     return {
       /** Whether the list card of `key` shows the highlight. */
       isCursor: key => cursorVisible && key === cursor,
-      /** The app opened a session (any way): it becomes the cursor's place and the `\`` target's successor. */
+      /**
+       * The app opened a session (any way): it becomes the cursor's place and the `\`` target's successor,
+       * and the focus goes to its transcript, on the newest block.
+       */
       noteSelection(key) {
         // An Abort armed in one session must not carry over to the next.
         abortArmedUntil = 0;
@@ -566,6 +750,40 @@
           current = key;
         }
         setCursor(key, false);
+        pane = 'transcript';
+        setBlock(null, true);
+        syncBlock();
+        updateMode();
+      },
+      /** The transcript changed: keep the focused block on it (and on the newest while following). */
+      transcriptChanged() {
+        if (!enabled) return;
+        syncBlock();
+        updateMode();
+      },
+      /**
+       * A click in the transcript moves the focus there and keeps it on the clicked block, like folding with
+       * a key: a click on the newest group's summary opens it, which must not carry the focus to its last tool.
+       */
+      focusBlock(el) {
+        const list = blocks();
+        if (!enabled || !list.includes(el)) return;
+        pane = 'transcript';
+        setCursor(cursor, false);
+        setBlock(el, false);
+        updateMode();
+      },
+      /**
+       * For Undo, while the focus is on the transcript: the item id of the focused block, or of the nearest
+       * block above it with one. An activity group has none of its own; its first card, collapsed or not, is
+       * of the same round (your message ends a group). Null otherwise.
+       */
+      focusedItemId() {
+        if (!enabled || activePane() !== 'transcript') return null;
+        const list = blocks(),
+          idOf = el => el.dataset.itemId || el.querySelector?.('[data-item-id]')?.dataset.itemId;
+        for (let i = list.indexOf(syncBlock()); i >= 0; i--) if (idOf(list[i])) return idOf(list[i]);
+        return null;
       },
       /** True while keys are shortcuts; nothing should then move the focus into the composer by itself. */
       inNormalMode: () => enabled && !openDialog() && !isTypingTarget(doc.activeElement),

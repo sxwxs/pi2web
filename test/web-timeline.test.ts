@@ -381,7 +381,9 @@ describe('timeline rendering', () => {
     ui.open([user], {page: {items: [user], total: 2, start: 1, hasMore: true}});
     const button = ui.messages.querySelector('#loadOlderMessages')!;
     expect(button.textContent).toBe('加载更早的对话（还有 1 项）');
-    await (button as any).onclick();
+    (button as any).onclick();
+    // Disabled until the page arrives, so a double click or k held at the top asks for it only once.
+    expect((button as any).disabled).toBe(true);
     await vi.waitFor(() => expect(ui.ids()).toEqual(['e0', 'e1']));
     expect(ui.requestAgent).toHaveBeenLastCalledWith('bk:agent-a', '/timeline?limit=50&before=e1');
   });

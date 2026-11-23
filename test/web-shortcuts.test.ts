@@ -73,6 +73,7 @@ class FakeElement {
     return this.children.flatMap(child => [child, ...child.all()]);
   }
   querySelectorAll(selector: string) {
+    if (selector === '[data-item-id]') return this.all().filter(el => el.dataset.itemId);
     return this.all().filter(el => el.classList.contains(selector.slice(1)));
   }
   querySelector(selector: string) {
@@ -182,9 +183,37 @@ function setup({storage = {} as Record<string, string>} = {}) {
     unbind: vi.fn(),
     toggleVoice: vi.fn(),
     latestOutput: vi.fn(async () => ({text: '最终答案', streaming: true})),
+    // Like the app's selector: the cards, and those of an expanded activity group.
+    blocks: () =>
+      messages.children
+        .filter(el => el.tagName === 'DETAILS')
+        .flatMap(el => [el, ...(el.open && el.classList.contains('activity-group') ? el.children : [])]),
+    following: vi.fn(() => false),
+    blockText: vi.fn(async (el: FakeElement) => `text of ${el.dataset.itemId}`),
     focusTerminal: vi.fn(),
     toast: vi.fn()
   };
+  /** A transcript card: `id` its item id, `kind` user / assistant / … */
+  const card = (id: string, kind = 'assistant') => {
+    const el = doc.createElement('details');
+    el.className = `msg ${kind}`;
+    el.dataset.itemId = id;
+    return el;
+  };
+  /** An activity group, which has no item id, holding tool cards. */
+  const addGroup = (...ids: string[]) => {
+    const el = doc.createElement('details');
+    el.className = 'msg activity-group';
+    el.append(...ids.map(id => card(id, 'tool')));
+    messages.append(el);
+    return el;
+  };
+  const addCards = (...specs: string[]) =>
+    specs.map(spec => {
+      const el = card(...(spec.split(':') as [string, string]));
+      messages.append(el);
+      return el;
+    });
   const shortcuts = create(host);
   /** Dispatch a keydown the way the browser would reach the document; returns the event. */
   const press = (key: string, extra: Record<string, unknown> = {}) => {
@@ -206,6 +235,9 @@ function setup({storage = {} as Record<string, string>} = {}) {
     for (const handler of doc.handlers.pointerdown) handler({});
   };
   const cursor = () => sessions.find(entry => shortcuts.isCursor(entry.key))?.key ?? null;
+  /** The highlighted transcript block, and the side the mode chip names. */
+  const focused = () => messages.children.find(el => el.classList.contains('block-cursor')) ?? null;
+  const side = () => doc.getElementById('shortcutMode')!.textContent.split(' · ')[1];
   return {
     doc,
     host,
@@ -213,6 +245,11 @@ function setup({storage = {} as Record<string, string>} = {}) {
     press,
     pointer,
     cursor,
+    focused,
+    side,
+    card,
+    addCards,
+    addGroup,
     selected,
     sessions,
     input,
@@ -245,9 +282,13 @@ describe('keymap', () => {
     expect(keyName({key: 'Process'})).toBeNull();
   });
 
-  it('binds every key once', () => {
-    const keys = KEYMAP.flatMap((entry: any) => entry.keys);
-    expect(new Set(keys).size).toBe(keys.length);
+  it('binds every key once on each side', () => {
+    for (const pane of ['list', 'transcript']) {
+      const keys = KEYMAP.filter((entry: any) => !entry.pane || entry.pane === pane).flatMap(
+        (entry: any) => entry.keys
+      );
+      expect(new Set(keys).size).toBe(keys.length);
+    }
   });
 
   it('resolves sequences, and a key that breaks one counts on its own', () => {
@@ -259,6 +300,14 @@ describe('keymap', () => {
     expect(resolveKey(compiled, '', '3')).toMatchObject({key: '3', entry: {action: 'slot'}});
     expect(resolveKey(compiled, '', 'z')).toBeNull();
     expect(resolveKey(compiled, 'g', 'z')).toBeNull();
+    // The same key does something else on the transcript side; keys without a side work on both.
+    expect(resolveKey(compiled, '', 'j', 'transcript').entry.action).toBe('blockDown');
+    expect(resolveKey(compiled, 'g', 'j', 'transcript').entry.action).toBe('blockDown');
+    expect(resolveKey(compiled, '', 'Enter', 'transcript').entry.action).toBe('toggleBlock');
+    expect(resolveKey(compiled, '', 'y', 'transcript').entry.action).toBe('copyBlock');
+    expect(resolveKey(compiled, '', 'y').entry.action).toBe('copy');
+    expect(resolveKey(compiled, '', 'e').entry.action).toBe('toggleBlock');
+    expect(resolveKey(compiled, '', 'n', 'transcript').entry.action).toBe('nextAttention');
   });
 
   it('moves the cursor within the list and finds sessions waiting for the user, wrapping', () => {
@@ -503,6 +552,226 @@ describe('shortcuts on the page', () => {
     expect((h.messages as any).scrollTop).toBe(0);
     h.press('G');
     expect(h.jumpToLatest.clicks).toBe(1);
+  });
+
+  it('opening a session focuses its newest block; j/k move between blocks, Enter/o/e fold them', () => {
+    const h = setup();
+    const cards = h.addCards('u1:user', 'a1', 'u2:user', 'a2');
+    expect(h.side()).toBe('列表');
+    h.shortcuts.noteSelection('agent:a');
+    expect(h.focused()).toBe(cards[3]);
+    expect(h.side()).toBe('对话');
+    h.press('k');
+    expect(h.focused()).toBe(cards[2]);
+    h.press('Enter');
+    expect(cards[2].open).toBe(true);
+    h.press('o');
+    expect(cards[2].open).toBe(false);
+    h.press('e');
+    expect(cards[2].open).toBe(true);
+    h.press('j');
+    h.press('j');
+    expect(h.focused()).toBe(cards[3]);
+    // The list keeps its place, unhighlighted, and Enter opened no session.
+    expect(h.cursor()).toBeNull();
+    expect(h.host.open).not.toHaveBeenCalled();
+  });
+
+  it('h and l switch between the list and the transcript, each keeping its place', () => {
+    const h = setup();
+    const cards = h.addCards('u1:user', 'a1', 'u2:user', 'a2');
+    h.shortcuts.noteSelection('agent:a');
+    h.press('k');
+    h.press('h');
+    expect(h.cursor()).toBe('agent:a');
+    expect(h.focused()).toBeNull();
+    expect(h.side()).toBe('列表');
+    h.press('j');
+    expect(h.cursor()).toBe('agent:b');
+    // e works on the transcript's block from the list, which keeps the focus.
+    h.press('e');
+    expect(cards[2].open).toBe(true);
+    expect(h.cursor()).toBe('agent:b');
+    h.press('l');
+    expect(h.focused()).toBe(cards[2]);
+    expect(h.cursor()).toBeNull();
+    h.press('h');
+    expect(h.cursor()).toBe('agent:b');
+    h.press('Enter');
+    expect(h.host.open).toHaveBeenCalledWith(h.sessions[1]);
+  });
+
+  it('n and N go to the list from the transcript', () => {
+    const h = setup();
+    h.addCards('u1:user', 'a1');
+    h.shortcuts.noteSelection('agent:a');
+    h.sessions[2].attention = true;
+    h.press('n');
+    expect(h.cursor()).toBe('agent:c');
+    expect(h.focused()).toBeNull();
+    h.press('j');
+    expect(h.cursor()).toBe('agent:d');
+  });
+
+  it('without an Agent shown, keys stay on the list and l says why', () => {
+    const h = setup();
+    h.addCards('u1:user', 'a1');
+    h.form.hidden = true;
+    h.shortcuts.noteSelection('agent:a');
+    expect(h.focused()).toBeNull();
+    h.press('j');
+    expect(h.cursor()).toBe('agent:b');
+    h.press('l');
+    expect(h.host.toast).toHaveBeenLastCalledWith('右侧还没有打开的 Agent');
+    h.terminalView.hidden = false;
+    h.press('l');
+    expect(h.host.toast).toHaveBeenLastCalledWith('Terminal 没有对话；按 i 进入 Terminal');
+  });
+
+  it('the focus moves on to new output only from the newest block, while the transcript follows', () => {
+    const h = setup();
+    const cards = h.addCards('u1:user', 'a1');
+    h.host.following.mockReturnValue(true);
+    h.shortcuts.noteSelection('agent:a');
+    const [newer] = h.addCards('t1:tool');
+    h.shortcuts.transcriptChanged();
+    expect(h.focused()).toBe(newer);
+    // Moved up by the user, it stays.
+    h.press('k');
+    h.addCards('t2:tool');
+    h.shortcuts.transcriptChanged();
+    expect(h.focused()).toBe(cards[1]);
+    // G takes it to the newest again; scrolled up (not following), it stays there.
+    h.press('G');
+    expect(h.jumpToLatest.clicks).toBe(1);
+    const newest = h.messages.children.at(-1);
+    expect(h.focused()).toBe(newest);
+    h.host.following.mockReturnValue(false);
+    h.addCards('a2');
+    h.shortcuts.transcriptChanged();
+    expect(h.focused()).toBe(newest);
+  });
+
+  it('keeps the focus on a re-rendered card of the same item, and gives a vanished one to the newest', () => {
+    const h = setup();
+    const cards = h.addCards('u1:user', 'a1', 'u2:user', 'a2');
+    h.shortcuts.noteSelection('agent:a');
+    h.shortcuts.focusBlock(cards[1]);
+    const again = h.card('a1');
+    cards[1].remove();
+    h.messages.children.splice(1, 0, again);
+    again.parent = h.messages;
+    h.shortcuts.transcriptChanged();
+    expect(h.focused()).toBe(again);
+    again.remove();
+    h.shortcuts.transcriptChanged();
+    expect(h.focused()).toBe(cards[3]);
+  });
+
+  it('k at the top loads older items; gg goes to the first block', () => {
+    const h = setup();
+    const older = h.add('button', 'loadOlderMessages'),
+      cards = h.addCards('a0', 'u1:user', 'a1');
+    h.shortcuts.noteSelection('agent:a');
+    h.press('g');
+    h.press('g');
+    expect(h.focused()).toBe(cards[0]);
+    h.press('k');
+    expect(older.clicks).toBe(1);
+    expect(h.focused()).toBe(cards[0]);
+    older.disabled = true;
+    h.press('k');
+    expect(older.clicks).toBe(1);
+  });
+
+  it('folding or unfolding a block keeps the focus on it, so a second Enter undoes the first', () => {
+    const h = setup();
+    h.addCards('u1:user');
+    const group = h.addGroup('t1', 't2');
+    h.host.following.mockReturnValue(true);
+    h.shortcuts.noteSelection('agent:a');
+    expect(h.focused()).toBe(group);
+    // Opened, the newest group's cards become the newest blocks; the focus stays on the group.
+    h.press('Enter');
+    h.shortcuts.transcriptChanged();
+    expect(group.open).toBe(true);
+    expect(h.focused()).toBe(group);
+    h.press('Enter');
+    expect(group.open).toBe(false);
+    // New output does not take it away until j reaches the newest block, or G.
+    const [reply] = h.addCards('a1');
+    h.shortcuts.transcriptChanged();
+    expect(h.focused()).toBe(group);
+    h.press('G');
+    expect(h.focused()).toBe(reply);
+  });
+
+  it('a click keeps the focus on the clicked block, also on the newest group it opens', () => {
+    const h = setup();
+    h.addCards('u1:user', 'a1');
+    const group = h.addGroup('t1', 't2');
+    h.host.following.mockReturnValue(true);
+    h.shortcuts.noteSelection('agent:a');
+    h.press('h');
+    // A click on the group's summary: the app moves the focus, then the browser opens the group.
+    h.shortcuts.focusBlock(group);
+    group.open = true;
+    h.shortcuts.transcriptChanged();
+    expect(h.focused()).toBe(group);
+    h.press('Enter');
+    expect(group.open).toBe(false);
+  });
+
+  it('a click focuses a block; y copies it and Undo gets the item id it starts from', async () => {
+    const h = setup();
+    const cards = h.addCards('a0', 'u1:user', 'a1'),
+      group = h.addGroup('t1');
+    h.addCards('u2:user', 'a2');
+    h.shortcuts.noteSelection('agent:a');
+    // Opened, the focus is on the newest block.
+    expect(h.shortcuts.focusedItemId()).toBe('a2');
+    h.press('h');
+    h.shortcuts.focusBlock(cards[2]);
+    expect(h.focused()).toBe(cards[2]);
+    expect(h.cursor()).toBeNull();
+    expect(h.shortcuts.focusedItemId()).toBe('a1');
+    // An activity group has no item id of its own; its first card is of the same round.
+    h.shortcuts.focusBlock(group);
+    expect(h.shortcuts.focusedItemId()).toBe('t1');
+    // A card not recorded yet (streaming) gives the nearest block above it with one.
+    const live = h.doc.createElement('details');
+    live.className = 'msg assistant';
+    h.messages.append(live);
+    h.shortcuts.focusBlock(live);
+    expect(h.shortcuts.focusedItemId()).toBe('a2');
+    live.remove();
+    h.shortcuts.focusBlock(cards[0]);
+    expect(h.shortcuts.focusedItemId()).toBe('a0');
+    // A page that starts with a group (the rest of an older round): its first card tells the round.
+    const first = h.doc.createElement('details');
+    first.className = 'msg activity-group';
+    first.append(h.card('t0', 'tool'));
+    h.messages.children.unshift(first);
+    first.parent = h.messages;
+    h.shortcuts.focusBlock(first);
+    expect(first.open).toBe(false);
+    expect(h.shortcuts.focusedItemId()).toBe('t0');
+    h.shortcuts.focusBlock(cards[2]);
+    h.press('y');
+    await vi.waitFor(() => expect(h.host.toast).toHaveBeenLastCalledWith('已复制焦点 block（10 字）'));
+    expect(h.host.blockText).toHaveBeenCalledWith(cards[2]);
+    expect(h.host.navigator.clipboard.writeText).toHaveBeenCalledWith('text of a1');
+    expect(h.host.latestOutput).not.toHaveBeenCalled();
+    h.host.blockText.mockRejectedValueOnce(Error('活动组不能整体复制：展开后选中其中一项'));
+    h.press('y');
+    await vi.waitFor(() =>
+      expect(h.host.toast).toHaveBeenLastCalledWith('活动组不能整体复制：展开后选中其中一项')
+    );
+    // On the list, Undo has no focused block and y copies the latest output.
+    h.press('h');
+    expect(h.shortcuts.focusedItemId()).toBeNull();
+    h.press('y');
+    await vi.waitFor(() => expect(h.host.latestOutput).toHaveBeenCalled());
   });
 
   it('can be switched off in the settings', () => {
