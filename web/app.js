@@ -308,7 +308,7 @@
       pending.controller.abort();
       $('voiceInput').textContent = '🎙';
       $('voiceInput').disabled = false;
-      $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+      $('voiceInput').title = '开始语音输入（Space；输入框内 Alt+Shift+V）';
     }
     if (!state.mediaAgentId) return;
     if (
@@ -457,7 +457,7 @@
     state.voiceSttEnabled = Boolean(transcriptionBackend());
     $('voicePlayback').hidden = !state.voiceEnabled;
     $('voiceInput').hidden = !state.voiceSttEnabled && !state.voiceStream;
-    $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+    $('voiceInput').title = '开始语音输入（Space；输入框内 Alt+Shift+V）';
     if (!state.voiceEnabled) stopVoiceAudio();
     updateVoiceButton();
   }
@@ -1403,13 +1403,7 @@
     if (focusedId) $(focusedId)?.focus();
   }
   const sessionKeyboard = new window.SessionKeyboardController({
-    onKey: binding => {
-      const agent = state.agents.find(item => item.agentId === binding.agentId);
-      if (!agent) return toast(`按键 ${binding.slot + 1} 绑定的 Session 当前不可用`);
-      if (state.selectedKind === 'agent' && state.agent?.agentId === agent.agentId)
-        return navigateMobile('agent');
-      selectAgent(agent).catch(error => toast(error.message));
-    },
+    onKey: openBoundSession,
     onStateChange: updateKeyboardUi,
     onBindingsChange: () => {
       renderAgentList();
@@ -1420,6 +1414,14 @@
       toast(`键盘：${error.message}`);
     }
   });
+  /** A key of the six-key keyboard, or digit 1-6 on the computer keyboard, opens its bound session. */
+  function openBoundSession(binding) {
+    const agent = state.agents.find(item => item.agentId === binding.agentId);
+    if (!agent) return toast(`按键 ${binding.slot + 1} 绑定的 Session 当前不可用`);
+    if (state.selectedKind === 'agent' && state.agent?.agentId === agent.agentId)
+      return navigateMobile('agent');
+    selectAgent(agent).catch(error => toast(error.message));
+  }
   const formatTokens = value => {
     const n = Number(value);
     if (!Number.isFinite(n) || n <= 0) return '0';
@@ -1465,6 +1467,7 @@
     const card = {
       kind,
       id,
+      listKey: listKey(kind, id),
       el,
       item: null,
       status: '',
@@ -1497,6 +1500,7 @@
       selectedId = isAgent ? state.agent?.agentId : state.terminal?.terminalId;
     card.item = item;
     card.el.classList.toggle('selected', state.selectedKind === card.kind && selectedId === card.id);
+    card.el.classList.toggle('cursor', shortcuts.isCursor(card.listKey));
     if (card.status !== item.status) {
       if (card.status) card.el.classList.remove(card.status);
       card.el.classList.add(item.status);
@@ -1562,19 +1566,24 @@
     return Number.isFinite(time) ? time : 0;
   };
   /**
-   * Newest first by `lastActiveAt`: an Agent's last run start, a Terminal's last input, or creation.
-   * Nothing else changes it, so no other update reorders the list.
+   * The listed Agents and Terminals, before paging: newest first by `lastActiveAt` (an Agent's last run
+   * start, a Terminal's last input, or creation). Nothing else changes it, so no other update reorders
+   * the list.
    */
-  function renderAgentList() {
-    let allItems = [
+  function sessionEntries() {
+    const entries = [
       ...state.agents.map(item => ({kind: 'agent', item})),
       ...state.terminals.map(item => ({kind: 'terminal', item}))
     ].sort(
       (a, b) =>
         recentTime(b.item.lastActiveAt, b.item.createdAt) - recentTime(a.item.lastActiveAt, a.item.createdAt)
     );
-    if (state.backendFilter)
-      allItems = allItems.filter(entry => entry.item.backendId === state.backendFilter);
+    return state.backendFilter
+      ? entries.filter(entry => entry.item.backendId === state.backendFilter)
+      : entries;
+  }
+  function renderAgentList() {
+    const allItems = sessionEntries();
     // Cards live as long as their items, so filtering or paging only hides and shows them.
     const cards = new Map();
     for (const [kind, items] of [
@@ -1824,7 +1833,7 @@
     state.fitAddon = fit;
     return term;
   }
-  async function connectTerminalSocket(terminal) {
+  async function connectTerminalSocket(terminal, focus = true) {
     state.terminalWs?.close();
     state.terminalWs = null;
     const terminalId = terminal.terminalId,
@@ -1856,7 +1865,7 @@
           try {
             state.fitAddon.fit();
             ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
-            term.focus();
+            if (focus) term.focus();
           } catch {}
         });
       };
@@ -1930,9 +1939,11 @@
     if (state.workspace && workspaceKey(state.workspace) === workspaceKey(match)) return;
     await selectWorkspace(workspaceKey(match));
   }
-  async function selectTerminal(terminal, openView = true) {
+  /** `focus`: false when opened from the keyboard, so the Terminal does not swallow the next shortcut. */
+  async function selectTerminal(terminal, openView = true, focus = true) {
     state.selectedKind = 'terminal';
     state.terminal = terminal;
+    shortcuts.noteSelection(listKey('terminal', terminal.terminalId));
     localStorage.rpTerminalId = terminal.terminalId;
     localStorage.rpSelectedKind = 'terminal';
     $('agentToolbar').hidden = true;
@@ -1946,7 +1957,7 @@
     sendFocus();
     if (openView) navigateMobile('agent');
     void syncWorkspaceForSelection(terminal);
-    void connectTerminalSocket(terminal);
+    void connectTerminalSocket(terminal, focus);
   }
   const autoBindNewSession = agent => sessionKeyboard.autoBind(agent.agentId);
   async function startAgent(relativePath) {
@@ -1993,6 +2004,7 @@
     state.terminalWs?.close();
     state.terminalWs = null;
     state.agent = agent;
+    shortcuts.noteSelection(listKey('agent', agent.agentId));
     updateVoiceAvailability();
     const failed = state.failedSends.get(agent.agentId);
     if (failed !== undefined) {
@@ -2980,7 +2992,7 @@
     $('voiceInput').disabled = false;
     $('voiceInput').classList.remove('recording');
     $('voiceInput').textContent = '🎙';
-    $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+    $('voiceInput').title = '开始语音输入（Space；输入框内 Alt+Shift+V）';
     if (
       abort &&
       voice.partial &&
@@ -3266,7 +3278,8 @@
         const owner = {agentId, transcribeBackendId: speechBackendId, input, at};
         state.voiceCorrection?.begin(owner);
         state.voiceCorrection?.end(owner, text);
-        input.focus();
+        // From the keyboard the next key (e.g. `s` to send) must stay a shortcut, not text.
+        if (!shortcuts.inNormalMode()) input.focus();
         toast('语音已转换为文字');
       } else toast('没有识别到语音');
     } catch (error) {
@@ -3276,7 +3289,7 @@
         state.pendingTranscription = null;
         $('voiceInput').textContent = '🎙';
         $('voiceInput').disabled = false;
-        $('voiceInput').title = '开始语音输入（输入框内 Alt+Shift+V）';
+        $('voiceInput').title = '开始语音输入（Space；输入框内 Alt+Shift+V）';
       }
     }
   }
@@ -3314,7 +3327,7 @@
         state.voiceCorrection.begin(owner);
         state.voiceCorrection.end(owner, draft.text);
       }
-      input.focus();
+      if (!shortcuts.inNormalMode()) input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
       input.scrollTop = input.scrollHeight;
       toast('语音输入已写入输入框');
@@ -4693,7 +4706,8 @@
         body.append(list);
         return () => value;
       },
-      'Fork'
+      'Fork',
+      {focusOk: true}
     );
     if (entryId) await forkAgent(agent, entryId);
   }
@@ -4704,6 +4718,12 @@
       e => e.type === 'message' && ['user', 'assistant'].includes(e.message?.role)
     );
     if (!messages.length) return toast('当前 Session 没有可回退的消息');
+    // Preselect the newest user message of the current branch, so Undo + Enter takes back the last round
+    // (and puts that message back into the composer). Entries of abandoned branches are newer in the file.
+    const parents = new Map((session.entries || []).map(e => [e.id, e.parentId])),
+      branch = new Set();
+    for (let id = session.leafId; id && !branch.has(id); id = parents.get(id)) branch.add(id);
+    const lastUser = [...messages].reverse().find(e => e.message.role === 'user' && branch.has(e.id));
     const selected = await modal(
       'Undo（Session Tree）',
       body => {
@@ -4714,13 +4734,13 @@
         body.append(note);
         const list = document.createElement('div');
         list.className = 'modal-list';
-        let value = null;
+        let value = lastUser?.id ?? null;
         for (const e of [...messages].reverse()) {
           const role = e.message.role === 'user' ? 'You' : 'Agent',
             text = textContent(e.message.content) || '(空消息)';
           const b = document.createElement('button');
           b.type = 'button';
-          b.className = 'choice';
+          b.className = e === lastUser ? 'choice selected' : 'choice';
           b.innerHTML = `<b>${role}</b> ${esc(text.slice(0, 160))}<small>${esc(e.id)}${e.id === session.leafId ? ' · 当前' : ''}</small>`;
           b.onclick = () => {
             value = e.id;
@@ -4732,7 +4752,8 @@
         body.append(list);
         return () => value;
       },
-      '回退'
+      '回退',
+      {focusOk: true}
     );
     if (selected) await navigateAgent(selected);
   }
@@ -5378,6 +5399,81 @@
   window.addEventListener('focus', () => {
     if (state.historyNav.index < 0) void loadPromptHistory();
   });
+  // ---- Keyboard shortcuts (web/shortcuts.js). This adapter is all the shortcuts see of the app.
+  const entryKey = ({kind, item}) => listKey(kind, kind === 'agent' ? item.agentId : item.terminalId);
+  /** Waiting for the user: a question or dialog, or follow-up advice that a reply or "continue" is due. */
+  function needsAttention({kind, item}) {
+    if (kind !== 'agent') return false;
+    if (item.status === 'waiting_for_user' || state.activities.get(item.agentId)?.dialogs?.length)
+      return true;
+    const advice = state.advice.get(item.agentId);
+    return advice?.state === 'ready' && ['needs_user', 'continue'].includes(advice.outcome);
+  }
+  /**
+   * The open Agent's newest recorded text output in the loaded transcript. Text still being streamed is
+   * not recorded yet, so it is never included: a copy is always of finished text.
+   */
+  async function latestOutput() {
+    const items = (state.selectedKind === 'agent' && state.timeline?.items) || [],
+      item = items.findLast(item => item.kind === 'assistant');
+    if (!item) return null;
+    const text = item.body ?? (await loadItemBody(item));
+    return {text: text.trim(), streaming: state.agent?.status === 'streaming'};
+  }
+  const shortcuts = window.RemotePiShortcuts.create({
+    sessions: () =>
+      sessionEntries().map(entry => ({...entry, key: entryKey(entry), attention: needsAttention(entry)})),
+    reveal: index => {
+      if (index < state.agentVisibleCount) return;
+      state.agentVisibleCount = Math.ceil((index + 1) / state.agentPageSize) * state.agentPageSize;
+      renderAgentList();
+    },
+    selectedKey: currentKey,
+    open: entry => {
+      // Opening the open session again would reload it; on a phone it only has to come into view.
+      if (entry.key === currentKey()) {
+        shortcuts.noteSelection(entry.key);
+        return navigateMobile('agent');
+      }
+      return entry.kind === 'terminal' ? selectTerminal(entry.item, true, false) : selectAgent(entry.item);
+    },
+    renderCursor: keys => {
+      for (const key of keys) {
+        const card = listCards.get(key);
+        if (card?.item) updateListCard(card, card.item);
+      }
+    },
+    scrollToCursor: key => listCards.get(key)?.el.scrollIntoView({block: 'nearest'}),
+    openSlot: slot => {
+      const binding = sessionKeyboard.getSlot(slot);
+      if (!binding) return toast(`按键 ${slot + 1} 还没有绑定 Session`);
+      openBoundSession(binding);
+      // An already open session is not selected again; the highlight still comes to rest on it.
+      const key = listKey('agent', binding.agentId);
+      if (currentKey() === key) shortcuts.noteSelection(key);
+    },
+    bind: ({kind, item}) => {
+      if (kind !== 'agent') return toast('Terminal 不能绑定键盘按键');
+      const binding = sessionKeyboard.getBinding(item.agentId);
+      if (binding) return toast(`「${agentLabel(item)}」已绑定按键 ${binding.slot + 1}；按 x 清除`);
+      return bindKeyboard({agentId: item.agentId});
+    },
+    unbind: ({kind, item}) => {
+      const binding = kind === 'agent' && sessionKeyboard.getBinding(item.agentId),
+        label = kind === 'agent' ? agentLabel(item) : item.title || 'Terminal';
+      if (!binding) return toast(`「${label}」没有绑定键盘按键`);
+      sessionKeyboard.unbind(item.agentId);
+      toast(`已清除「${label}」的按键 ${binding.slot + 1} 绑定`);
+    },
+    toggleVoice: toggleVoiceInput,
+    latestOutput,
+    focusTerminal: () => state.terminalEmulator?.focus(),
+    toast
+  });
+  function currentKey() {
+    const item = state.selectedKind === 'agent' ? state.agent : state.terminal;
+    return item ? entryKey({kind: state.selectedKind, item}) : null;
+  }
   setMobileView('home', {replace: true});
   updateConfigUi();
   updateKeyboardUi();

@@ -106,6 +106,7 @@ function harness({
       updateVoiceButton: vi.fn(),
       splitResourceKey: (id: string) => ({remoteId: id.split(':')[1], backendId: id.split(':')[0]}),
       navigator: {mediaDevices: {getUserMedia}},
+      shortcuts: {inNormalMode: () => false},
       window: {AudioContext, AudioWorkletNode},
       AudioWorkletNode,
       WebSocket,
@@ -469,7 +470,9 @@ describe('Web Sotto input', () => {
           updateTerminalHeader: vi.fn(),
           renderAgentList: vi.fn(),
           syncWorkspaceForSelection: vi.fn(),
-          connectTerminalSocket: vi.fn()
+          connectTerminalSocket: vi.fn(),
+          shortcuts: {noteSelection: vi.fn()},
+          listKey: (kind: string, id: string) => `${kind}:${id}`
         }
       );
       if (scenario === 'terminal') {

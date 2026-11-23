@@ -135,8 +135,10 @@ function setup() {
   };
   const bindings = new Map<string, {slot: number; color: string}>();
   const selectAgent = vi.fn();
-  const api = runInNewContext(`${listSource}\n({renderAgentList, renderListItem})`, {
+  const highlight = {key: ''};
+  const api = runInNewContext(`${listSource}\n({renderAgentList, renderListItem, sessionEntries})`, {
     state,
+    shortcuts: {isCursor: (key: string) => key === highlight.key},
     $: (id: string) => elements[id],
     document,
     connectedBackends: () => [{}],
@@ -161,7 +163,7 @@ function setup() {
     const before = {...dom};
     return () => ({created: dom.created - before.created, moves: dom.moves - before.moves});
   };
-  return {api, state, list, card, ids, bindings, selectAgent, settled};
+  return {api, state, list, card, ids, bindings, selectAgent, settled, highlight};
 }
 
 describe('Agent list cards', () => {
@@ -269,5 +271,36 @@ describe('Agent list cards', () => {
     h.state.agent = h.state.agents[0];
     h.api.renderAgentList();
     expect(el.className.split(' ')).toContain('selected');
+  });
+  it('lists sessions for the shortcuts in display order, before paging, and marks the highlighted card', () => {
+    const h = setup();
+    h.state.agentVisibleCount = 2;
+    h.state.terminals = [
+      {
+        terminalId: 't',
+        backendId: 'other',
+        status: 'running',
+        cwd: '/w',
+        lastActiveAt: new Date(2500).toISOString()
+      }
+    ];
+    expect(h.api.sessionEntries().map((entry: any) => entry.item.agentId ?? entry.item.terminalId)).toEqual([
+      'a',
+      't',
+      'b',
+      'c'
+    ]);
+    h.state.backendFilter = 'bk';
+    expect(h.api.sessionEntries().map((entry: any) => entry.item.agentId)).toEqual(['a', 'b', 'c']);
+    h.api.renderAgentList();
+    const b = h.card('b'),
+      changes = h.settled();
+    h.highlight.key = 'agent:b';
+    h.api.renderListItem('agent', 'b');
+    expect(b.className.split(' ')).toContain('cursor');
+    h.highlight.key = '';
+    h.api.renderListItem('agent', 'b');
+    expect(b.className.split(' ')).not.toContain('cursor');
+    expect(changes()).toEqual({created: 0, moves: 0});
   });
 });
