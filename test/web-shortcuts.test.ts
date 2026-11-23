@@ -73,6 +73,7 @@ class FakeElement {
     return this.children.flatMap(child => [child, ...child.all()]);
   }
   querySelectorAll(selector: string) {
+    if (selector === '[data-item-id]') return this.all().filter(el => el.dataset.itemId);
     return this.all().filter(el => el.classList.contains(selector.slice(1)));
   }
   querySelector(selector: string) {
@@ -705,6 +706,22 @@ describe('shortcuts on the page', () => {
     expect(h.focused()).toBe(reply);
   });
 
+  it('a click keeps the focus on the clicked block, also on the newest group it opens', () => {
+    const h = setup();
+    h.addCards('u1:user', 'a1');
+    const group = h.addGroup('t1', 't2');
+    h.host.following.mockReturnValue(true);
+    h.shortcuts.noteSelection('agent:a');
+    h.press('h');
+    // A click on the group's summary: the app moves the focus, then the browser opens the group.
+    h.shortcuts.focusBlock(group);
+    group.open = true;
+    h.shortcuts.transcriptChanged();
+    expect(h.focused()).toBe(group);
+    h.press('Enter');
+    expect(group.open).toBe(false);
+  });
+
   it('a click focuses a block; y copies it and Undo gets the item id it starts from', async () => {
     const h = setup();
     const cards = h.addCards('a0', 'u1:user', 'a1'),
@@ -718,11 +735,27 @@ describe('shortcuts on the page', () => {
     expect(h.focused()).toBe(cards[2]);
     expect(h.cursor()).toBeNull();
     expect(h.shortcuts.focusedItemId()).toBe('a1');
-    // A block without an item id (an activity group) gives the nearest one above it.
+    // An activity group has no item id of its own; its first card is of the same round.
     h.shortcuts.focusBlock(group);
-    expect(h.shortcuts.focusedItemId()).toBe('a1');
+    expect(h.shortcuts.focusedItemId()).toBe('t1');
+    // A card not recorded yet (streaming) gives the nearest block above it with one.
+    const live = h.doc.createElement('details');
+    live.className = 'msg assistant';
+    h.messages.append(live);
+    h.shortcuts.focusBlock(live);
+    expect(h.shortcuts.focusedItemId()).toBe('a2');
+    live.remove();
     h.shortcuts.focusBlock(cards[0]);
     expect(h.shortcuts.focusedItemId()).toBe('a0');
+    // A page that starts with a group (the rest of an older round): its first card tells the round.
+    const first = h.doc.createElement('details');
+    first.className = 'msg activity-group';
+    first.append(h.card('t0', 'tool'));
+    h.messages.children.unshift(first);
+    first.parent = h.messages;
+    h.shortcuts.focusBlock(first);
+    expect(first.open).toBe(false);
+    expect(h.shortcuts.focusedItemId()).toBe('t0');
     h.shortcuts.focusBlock(cards[2]);
     h.press('y');
     await vi.waitFor(() => expect(h.host.toast).toHaveBeenLastCalledWith('已复制焦点 block（10 字）'));

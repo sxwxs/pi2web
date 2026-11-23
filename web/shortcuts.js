@@ -761,24 +761,28 @@
         syncBlock();
         updateMode();
       },
-      /** A click in the transcript moves the focus there, onto the clicked block. */
+      /**
+       * A click in the transcript moves the focus there and keeps it on the clicked block, like folding with
+       * a key: a click on the newest group's summary opens it, which must not carry the focus to its last tool.
+       */
       focusBlock(el) {
         const list = blocks();
         if (!enabled || !list.includes(el)) return;
         pane = 'transcript';
         setCursor(cursor, false);
-        setBlock(el, el === list.at(-1));
+        setBlock(el, false);
         updateMode();
       },
       /**
        * For Undo, while the focus is on the transcript: the item id of the focused block, or of the nearest
-       * block above it with one (an activity group has none). Null otherwise.
+       * block above it with one. An activity group has none of its own; its first card, collapsed or not, is
+       * of the same round (your message ends a group). Null otherwise.
        */
       focusedItemId() {
         if (!enabled || activePane() !== 'transcript') return null;
-        const list = blocks();
-        for (let i = list.indexOf(syncBlock()); i >= 0; i--)
-          if (list[i].dataset.itemId) return list[i].dataset.itemId;
+        const list = blocks(),
+          idOf = el => el.dataset.itemId || el.querySelector?.('[data-item-id]')?.dataset.itemId;
+        for (let i = list.indexOf(syncBlock()); i >= 0; i--) if (idOf(list[i])) return idOf(list[i]);
         return null;
       },
       /** True while keys are shortcuts; nothing should then move the focus into the composer by itself. */
