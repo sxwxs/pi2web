@@ -2534,7 +2534,13 @@
     older.id = 'loadOlderMessages';
     older.type = 'button';
     older.textContent = `加载更早的对话（还有 ${timeline.start} 项）`;
-    older.onclick = () => loadOlderItems().catch(error => toast(error.message));
+    // Disabled while its page loads: a second request before the first answers would prepend it twice.
+    older.onclick = () => {
+      older.disabled = true;
+      loadOlderItems()
+        .catch(error => toast(error.message))
+        .finally(() => (older.disabled = false));
+    };
     const all = document.createElement('button');
     all.id = 'loadAllMessages';
     all.type = 'button';
@@ -4725,16 +4731,21 @@
       e => e.type === 'message' && ['user', 'assistant'].includes(e.message?.role)
     );
     if (!messages.length) return toast('当前 Session 没有可回退的消息');
-    // Preselect your message that starts the round of the focused transcript block, without one the newest
-    // of the current branch: Undo + Enter takes back that round, or the last one, and puts the message back
+    // Preselect your message that starts the round of the focused transcript block, found up the session
+    // tree from the block's entry (its message may not be loaded); without a focused block, the newest of
+    // the current branch. Undo + Enter takes back that round, or the last one, and puts the message back
     // into the composer. Entries of abandoned branches are newer in the file.
     const parents = new Map((session.entries || []).map(e => [e.id, e.parentId])),
       branch = new Set();
     for (let id = session.leafId; id && !branch.has(id); id = parents.get(id)) branch.add(id);
-    const onBranch = e => e.message.role === 'user' && branch.has(e.id),
-      focused = shortcuts.undoTarget(),
-      preselected =
-        messages.find(e => e.id === focused && onBranch(e)) || [...messages].reverse().find(onBranch);
+    const users = new Map(
+      messages.filter(e => e.message.role === 'user' && branch.has(e.id)).map(e => [e.id, e])
+    );
+    // A block's item id is its entry's id, or `<entry id>.<part>` for a part of an Agent message.
+    let round = shortcuts.focusedItemId();
+    if (round && !parents.has(round)) round = entryOf(round);
+    while (round && branch.has(round) && !users.has(round)) round = parents.get(round);
+    const preselected = users.get(round) || [...users.values()].at(-1);
     const selected = await modal(
       'Undo（Session Tree）',
       body => {

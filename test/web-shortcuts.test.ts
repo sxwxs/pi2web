@@ -182,7 +182,11 @@ function setup({storage = {} as Record<string, string>} = {}) {
     unbind: vi.fn(),
     toggleVoice: vi.fn(),
     latestOutput: vi.fn(async () => ({text: '最终答案', streaming: true})),
-    blocks: () => messages.children.filter(el => el.tagName === 'DETAILS'),
+    // Like the app's selector: the cards, and those of an expanded activity group.
+    blocks: () =>
+      messages.children
+        .filter(el => el.tagName === 'DETAILS')
+        .flatMap(el => [el, ...(el.open && el.classList.contains('activity-group') ? el.children : [])]),
     following: vi.fn(() => false),
     blockText: vi.fn(async (el: FakeElement) => `text of ${el.dataset.itemId}`),
     focusTerminal: vi.fn(),
@@ -193,6 +197,14 @@ function setup({storage = {} as Record<string, string>} = {}) {
     const el = doc.createElement('details');
     el.className = `msg ${kind}`;
     el.dataset.itemId = id;
+    return el;
+  };
+  /** An activity group, which has no item id, holding tool cards. */
+  const addGroup = (...ids: string[]) => {
+    const el = doc.createElement('details');
+    el.className = 'msg activity-group';
+    el.append(...ids.map(id => card(id, 'tool')));
+    messages.append(el);
     return el;
   };
   const addCards = (...specs: string[]) =>
@@ -236,6 +248,7 @@ function setup({storage = {} as Record<string, string>} = {}) {
     side,
     card,
     addCards,
+    addGroup,
     selected,
     sessions,
     input,
@@ -670,22 +683,46 @@ describe('shortcuts on the page', () => {
     expect(older.clicks).toBe(1);
   });
 
-  it('a click focuses a block; y copies it and Undo preselects your message of its round', async () => {
+  it('folding or unfolding a block keeps the focus on it, so a second Enter undoes the first', () => {
     const h = setup();
-    const cards = h.addCards('a0', 'u1:user', 'a1', 'u2:user', 'a2');
+    h.addCards('u1:user');
+    const group = h.addGroup('t1', 't2');
+    h.host.following.mockReturnValue(true);
     h.shortcuts.noteSelection('agent:a');
-    // Opened, the focus is on the newest block: Undo takes back the last round.
-    expect(h.shortcuts.undoTarget()).toBe('u2');
+    expect(h.focused()).toBe(group);
+    // Opened, the newest group's cards become the newest blocks; the focus stays on the group.
+    h.press('Enter');
+    h.shortcuts.transcriptChanged();
+    expect(group.open).toBe(true);
+    expect(h.focused()).toBe(group);
+    h.press('Enter');
+    expect(group.open).toBe(false);
+    // New output does not take it away until j reaches the newest block, or G.
+    const [reply] = h.addCards('a1');
+    h.shortcuts.transcriptChanged();
+    expect(h.focused()).toBe(group);
+    h.press('G');
+    expect(h.focused()).toBe(reply);
+  });
+
+  it('a click focuses a block; y copies it and Undo gets the item id it starts from', async () => {
+    const h = setup();
+    const cards = h.addCards('a0', 'u1:user', 'a1'),
+      group = h.addGroup('t1');
+    h.addCards('u2:user', 'a2');
+    h.shortcuts.noteSelection('agent:a');
+    // Opened, the focus is on the newest block.
+    expect(h.shortcuts.focusedItemId()).toBe('a2');
     h.press('h');
     h.shortcuts.focusBlock(cards[2]);
     expect(h.focused()).toBe(cards[2]);
     expect(h.cursor()).toBeNull();
-    expect(h.shortcuts.undoTarget()).toBe('u1');
-    h.shortcuts.focusBlock(cards[3]);
-    expect(h.shortcuts.undoTarget()).toBe('u2');
-    // Above the first loaded message of yours there is no round to take back.
+    expect(h.shortcuts.focusedItemId()).toBe('a1');
+    // A block without an item id (an activity group) gives the nearest one above it.
+    h.shortcuts.focusBlock(group);
+    expect(h.shortcuts.focusedItemId()).toBe('a1');
     h.shortcuts.focusBlock(cards[0]);
-    expect(h.shortcuts.undoTarget()).toBeNull();
+    expect(h.shortcuts.focusedItemId()).toBe('a0');
     h.shortcuts.focusBlock(cards[2]);
     h.press('y');
     await vi.waitFor(() => expect(h.host.toast).toHaveBeenLastCalledWith('已复制焦点 block（10 字）'));
@@ -697,9 +734,9 @@ describe('shortcuts on the page', () => {
     await vi.waitFor(() =>
       expect(h.host.toast).toHaveBeenLastCalledWith('活动组不能整体复制：展开后选中其中一项')
     );
-    // On the list, Undo has no focused round and y copies the latest output.
+    // On the list, Undo has no focused block and y copies the latest output.
     h.press('h');
-    expect(h.shortcuts.undoTarget()).toBeNull();
+    expect(h.shortcuts.focusedItemId()).toBeNull();
     h.press('y');
     await vi.waitFor(() => expect(h.host.latestOutput).toHaveBeenCalled());
   });

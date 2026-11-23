@@ -435,6 +435,8 @@
       if (!requireAgentView('展开')) return;
       const el = syncBlock();
       if (!el) return host.toast('对话里还没有内容');
+      // The focus stays on a block you fold or unfold, e.g. not moving into an activity group just opened.
+      setBlock(el, false);
       el.open = !el.open;
       // Expanded, a long block shows its start; collapsed, the reader is not left past its end.
       el.scrollIntoView?.({block: 'nearest'});
@@ -769,14 +771,14 @@
         updateMode();
       },
       /**
-       * For Undo: the item id of your message that starts the round the focused block is in, while the focus
-       * is on the transcript; else null.
+       * For Undo, while the focus is on the transcript: the item id of the focused block, or of the nearest
+       * block above it with one (an activity group has none). Null otherwise.
        */
-      undoTarget() {
+      focusedItemId() {
         if (!enabled || activePane() !== 'transcript') return null;
         const list = blocks();
         for (let i = list.indexOf(syncBlock()); i >= 0; i--)
-          if (list[i].classList.contains('user') && list[i].dataset.itemId) return list[i].dataset.itemId;
+          if (list[i].dataset.itemId) return list[i].dataset.itemId;
         return null;
       },
       /** True while keys are shortcuts; nothing should then move the focus into the composer by itself. */

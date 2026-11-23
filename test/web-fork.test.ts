@@ -171,7 +171,8 @@ describe('Undo', () => {
     const {revert} = runInNewContext(`${revertSource}\n({revert})`, {
       state: {agent: {agentId: 'bk:a'}},
       requestAgent: vi.fn(async () => session),
-      shortcuts: {undoTarget: () => focused},
+      shortcuts: {focusedItemId: () => focused},
+      entryOf: (itemId: string) => itemId.slice(0, itemId.lastIndexOf('.')),
       modal: vi.fn(async (_title: string, build: (body: any) => () => unknown) => build(node())()),
       document: {createElement: node},
       textContent: (content: string) => content,
@@ -185,8 +186,13 @@ describe('Undo', () => {
   it('preselects your message of the focused round, else the last round of the current branch', async () => {
     expect(await undo(null)).toHaveBeenCalledWith('u2');
     expect(await undo('u1')).toHaveBeenCalledWith('u1');
+    // Found up the session tree from the focused block's entry, also when that message is not loaded;
+    // `a1.0` is a part (text, thinking, a tool call) of the Agent message a1.
+    expect(await undo('a1.0')).toHaveBeenCalledWith('u1');
+    expect(await undo('a2')).toHaveBeenCalledWith('u2');
     // Never a message of an abandoned branch, even though it is newer in the file.
     expect(await undo('u3')).toHaveBeenCalledWith('u2');
+    expect(await undo('a3.1')).toHaveBeenCalledWith('u2');
     // An empty current branch (Pi's resetLeaf) has nothing to take back.
     expect(await undo(null, null)).not.toHaveBeenCalled();
   });
