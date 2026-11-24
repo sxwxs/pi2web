@@ -36,6 +36,7 @@
       text: '打开高亮的 Session，焦点进入它的对话（最新的 block）'
     },
     {group: 'Session', keys: ['h'], action: 'left', text: '焦点回到 Session 列表，高亮当前 Session'},
+    {group: 'Session', keys: ['f'], action: 'filter', text: '筛选 Session 列表（Enter / ↓ 切到结果列表）'},
     {group: 'Session', keys: ['n'], action: 'nextAttention', text: '高亮下一个等你处理的 Session'},
     {group: 'Session', keys: ['N'], action: 'previousAttention', text: '高亮上一个等你处理的 Session'},
     {group: 'Session', keys: ['`'], action: 'previous', text: '切回上一个打开的 Session'},
@@ -124,7 +125,12 @@
       keys: ['Ctrl+]'],
       text: '离开 Terminal（Esc 留给 Terminal 里的程序）'
     },
-    {group: '输入框、Terminal 与对话框', keys: ['j', 'k'], text: 'Undo / Fork 对话框：选择消息，Enter 确认'}
+    {group: '输入框、Terminal 与对话框', keys: ['j', 'k'], text: 'Undo / Fork 对话框：选择消息，Enter 确认'},
+    {
+      group: '输入框、Terminal 与对话框',
+      keys: ['Enter', '↓'],
+      text: 'Session 筛选框：离开筛选框并高亮匹配列表'
+    }
   ];
   const KEY_LABELS = {Space: 'Space', Escape: 'Esc', 'Ctrl+Enter': 'Ctrl/⌘+Enter', 'g g': 'gg'};
   const PANE_LABELS = {list: '列表', transcript: '对话'};
@@ -230,7 +236,8 @@
 
   /**
    * Install the shortcuts. `host` is the app side:
-   *   sessions()            listed sessions in list order: [{key, kind, item, attention}]
+   *   sessions()            listed sessions in list order (after filtering): [{key, kind, item, attention}]
+   *   allSessions()         optional unfiltered sessions for ` (defaults to sessions())
    *   reveal(index)         make sure the list shows the entry at `index` (load more)
    *   selectedKey()         key of the open session, or null
    *   open(entry)           open a session (the app then calls noteSelection)
@@ -333,7 +340,8 @@
     /** The session list-level actions (bind, unbind) apply to: the highlight, else the open session. */
     function targetEntry() {
       const key = cursorVisible ? cursor : host.selectedKey();
-      return key ? host.sessions().find(entry => entry.key === key) || null : null;
+      const entries = cursorVisible ? host.sessions() : (host.allSessions || host.sessions)();
+      return key ? entries.find(entry => entry.key === key) || null : null;
     }
     function move(delta) {
       const keys = host.sessions().map(entry => entry.key);
@@ -360,15 +368,39 @@
       return host.open(entry);
     }
     function openPrevious() {
-      const entry = previous && host.sessions().find(item => item.key === previous);
+      const entries = (host.allSessions || host.sessions)();
+      const entry = previous && entries.find(item => item.key === previous);
       if (!entry) return host.toast(previous ? '上一个 Session 已不在列表中' : '还没有上一个 Session');
       return host.open(entry);
     }
-    function focusList() {
+    function focusList({preferFirst = false} = {}) {
       pane = 'list';
       paintBlock();
       const keys = host.sessions().map(entry => entry.key);
-      setCursor(keys.includes(cursor) ? cursor : host.selectedKey(), true);
+      if (!keys.length) {
+        setCursor(null, false);
+        updateMode();
+        return false;
+      }
+      const selected = host.selectedKey();
+      const target = preferFirst
+        ? keys[0]
+        : keys.includes(cursor)
+          ? cursor
+          : keys.includes(selected)
+            ? selected
+            : keys[0];
+      host.reveal(keys.indexOf(target));
+      setCursor(target, true);
+      updateMode();
+      return true;
+    }
+    function focusFilter() {
+      const input = $('sessionFilter');
+      if (!input || input.closest('[hidden]')) return;
+      input.focus();
+      input.select?.();
+      updateMode();
     }
     function focusTranscript() {
       if (!agentView())
@@ -553,7 +585,8 @@
       down: () => move(1),
       up: () => move(-1),
       open: openCursor,
-      left: focusList,
+      left: () => focusList(),
+      filter: focusFilter,
       right: focusTranscript,
       blockDown: () => moveBlock(1),
       blockUp: () => moveBlock(-1),
@@ -784,6 +817,11 @@
           idOf = el => el.dataset.itemId || el.querySelector?.('[data-item-id]')?.dataset.itemId;
         for (let i = list.indexOf(syncBlock()); i >= 0; i--) if (idOf(list[i])) return idOf(list[i]);
         return null;
+      },
+      /** Focus the session list and highlight its first (or current) matching session. */
+      focusList(options) {
+        if (!enabled) return false;
+        return focusList(options);
       },
       /** True while keys are shortcuts; nothing should then move the focus into the composer by itself. */
       inNormalMode: () => enabled && !openDialog() && !isTypingTarget(doc.activeElement),
