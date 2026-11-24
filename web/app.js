@@ -16,6 +16,7 @@
   const state = {
     backends: backendRegistry.items,
     backendFilter: localStorage.rpBackendFilter || '',
+    sessionFilter: '',
     workspace: null,
     treePath: '.',
     filePath: null,
@@ -735,7 +736,6 @@
       $('workspaces').value = selectedKey;
     localStorage.rpWorkspaceId = selectedKey;
     state.treePath = '.';
-    $('agentCwd').value = '.';
     $('filePanel').hidden = true;
     $('workspaceHeading').textContent =
       isMobile() && state.mobileView !== 'home' ? workspaceLabel(state.workspace) : 'Workspace';
@@ -809,7 +809,6 @@
     state.contextTarget = target;
     const isDirectory = target.type === 'directory';
     $('menuStartAgent').hidden = !isDirectory;
-    $('menuSetCwd').hidden = !isDirectory;
     $('menuOpenTerminal').hidden = !isDirectory;
     const menu = $('contextMenu');
     menu.hidden = false;
@@ -880,7 +879,7 @@
   }
   function mentionValue(relativePath, directory = false) {
     const target = absolutePath(relativePath),
-      cwd = clean(state.agent?.cwd || absolutePath($('agentCwd').value.trim() || '.'));
+      cwd = clean(state.agent?.cwd || absolutePath(state.treePath || '.'));
     let value = isInside(target, cwd) ? relativeTo(target, cwd) : target;
     if (directory && value !== '.') value += '/';
     return value;
@@ -1565,12 +1564,24 @@
     const time = Date.parse(value || fallback || '');
     return Number.isFinite(time) ? time : 0;
   };
+  const normalizeFilterText = value =>
+    String(value || '')
+      .replace(/\\/g, '/')
+      .toLocaleLowerCase();
+  /** Every space-separated token must appear in either the session's title or its path. */
+  function matchesSessionFilter({kind, item}, query) {
+    const tokens = normalizeFilterText(query).trim().split(/\s+/).filter(Boolean);
+    if (!tokens.length) return true;
+    const title = normalizeFilterText(kind === 'agent' ? agentLabel(item) : item.title || 'Terminal');
+    const cwd = normalizeFilterText(item.cwd);
+    return tokens.every(token => title.includes(token) || cwd.includes(token));
+  }
   /**
    * The listed Agents and Terminals, before paging: newest first by `lastActiveAt` (an Agent's last run
    * start, a Terminal's last input, or creation). Nothing else changes it, so no other update reorders
    * the list.
    */
-  function sessionEntries() {
+  function sessionEntries({applyFilter = true} = {}) {
     const entries = [
       ...state.agents.map(item => ({kind: 'agent', item})),
       ...state.terminals.map(item => ({kind: 'terminal', item}))
@@ -1578,12 +1589,16 @@
       (a, b) =>
         recentTime(b.item.lastActiveAt, b.item.createdAt) - recentTime(a.item.lastActiveAt, a.item.createdAt)
     );
-    return state.backendFilter
+    const byBackend = state.backendFilter
       ? entries.filter(entry => entry.item.backendId === state.backendFilter)
       : entries;
+    const query = applyFilter ? String(state.sessionFilter || '').trim() : '';
+    return query ? byBackend.filter(entry => matchesSessionFilter(entry, query)) : byBackend;
   }
   function renderAgentList() {
-    const allItems = sessionEntries();
+    const query = String(state.sessionFilter || '').trim();
+    const totalItems = sessionEntries({applyFilter: false});
+    const allItems = query ? totalItems.filter(entry => matchesSessionFilter(entry, query)) : totalItems;
     // Cards live as long as their items, so filtering or paging only hides and shows them.
     const cards = new Map();
     for (const [kind, items] of [
@@ -1611,7 +1626,17 @@
     nodes.forEach((node, index) => {
       if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
     });
-    $('agentListCount').textContent = `已显示 ${items.length} / ${allItems.length}`;
+    if (query && !nodes.length) {
+      const empty = document.createElement('div');
+      empty.className = 'agent-empty';
+      empty.textContent = '没有匹配的 Session';
+      list.append(empty);
+    }
+    const clearButton = $('clearSessionFilter');
+    if (clearButton) clearButton.hidden = !state.sessionFilter;
+    $('agentListCount').textContent = query
+      ? `匹配 ${items.length} / ${allItems.length}（共 ${totalItems.length}）`
+      : `已显示 ${items.length} / ${allItems.length}`;
     $('loadMoreAgents').hidden = items.length >= allItems.length;
     $('loadMoreAgents').disabled = items.length >= allItems.length;
   }
@@ -1962,8 +1987,7 @@
   const autoBindNewSession = agent => sessionKeyboard.autoBind(agent.agentId);
   async function startAgent(relativePath) {
     $('contextMenu').hidden = true;
-    $('agentCwd').value = relativePath;
-    await createAgent();
+    await createAgent({cwd: relativePath});
   }
   async function openTerminal(relativePath) {
     if (!state.workspace) return toast('请先选择 Workspace');
@@ -2020,8 +2044,6 @@
       agent.status === 'streaming' || agent.status === 'waiting_for_user' ? 'follow-up' : 'prompt';
     if (openView) navigateMobile('agent');
     void syncWorkspaceForSelection(agent);
-    if (ownsPath(state.workspace, agent))
-      $('agentCwd').value = relativeTo(clean(agent.cwd), clean(state.workspace.rootPath));
     $('messages').replaceChildren();
     closeCommandPicker();
     closeLibrary();
@@ -3435,7 +3457,8 @@
     } else if (ev.type === 'session_info_changed') {
       if (eventAgent) eventAgent.sessionName = ev.name || undefined;
       if (selected) state.agent.sessionName = ev.name || undefined;
-      renderListItem('agent', message.agentId);
+      if (String(state.sessionFilter || '').trim()) renderAgentList();
+      else renderListItem('agent', message.agentId);
       if (selected) updateAgentHeader();
     }
     if (selected) handleDetail(message);
@@ -4060,7 +4083,7 @@
       toast(`按键 ${binding.slot + 1} 颜色已更新`);
     }
   }
-  async function createAgent({workspace = state.workspace, cwd = $('agentCwd').value.trim() || '.'} = {}) {
+  async function createAgent({workspace = state.workspace, cwd = state.treePath || '.'} = {}) {
     if (!workspace) return toast('请先选择 Workspace');
     const preferenceKey = `rpLastTemplate:${workspace.backendId}`;
     let templates = [],
@@ -4349,7 +4372,7 @@
     if (!backendId) return toast('没有已连接的 Backend');
     const backend = backendOf(backendId),
       workspace = state.workspace?.backendId === backendId ? state.workspace : null,
-      relativeCwd = () => $('agentCwd').value.trim() || '.';
+      relativeCwd = () => state.treePath || '.';
     const send = (url, method = 'GET', body) =>
       requestBackend(backendId, url, {method, ...(body ? {body: JSON.stringify(body)} : {})});
     let files, catalog;
@@ -4988,6 +5011,25 @@
     localStorage.rpEnterSendMode = state.enterSendMode;
     applyEnterSendMode();
   };
+  $('sessionFilter').oninput = () => {
+    state.sessionFilter = $('sessionFilter').value;
+    state.agentVisibleCount = state.agentPageSize;
+    renderAgentList();
+  };
+  $('sessionFilter').onkeydown = event => {
+    if (event.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key !== 'Enter' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    $('sessionFilter').blur();
+    if (!shortcuts.focusList({preferFirst: true}) && !sessionEntries().length) toast('没有匹配的 Session');
+  };
+  $('clearSessionFilter').onclick = () => {
+    $('sessionFilter').value = '';
+    state.sessionFilter = '';
+    state.agentVisibleCount = state.agentPageSize;
+    renderAgentList();
+    $('sessionFilter').focus();
+  };
   $('agentPageSize').value = String(state.agentPageSize);
   $('agentPageSize').onchange = () => {
     state.agentPageSize = Number($('agentPageSize').value) || 10;
@@ -5012,10 +5054,6 @@
   $('fileNext').onclick = () => openFile(state.filePath, state.fileOffset + state.fileLimit, false);
   $('menuStartAgent').onclick = () => startAgent(state.contextTarget.relativePath);
   $('menuOpenTerminal').onclick = () => openTerminal(state.contextTarget.relativePath);
-  $('menuSetCwd').onclick = () => {
-    $('agentCwd').value = state.contextTarget.relativePath;
-    $('contextMenu').hidden = true;
-  };
   $('menuMention').onclick = () => {
     insertMention(state.contextTarget.relativePath);
     $('contextMenu').hidden = true;
@@ -5074,7 +5112,7 @@
     if (!$('agentContextMenu').contains(e.target)) $('agentContextMenu').hidden = true;
   });
   $('newAgent').onclick = () => createAgent();
-  $('newTerminal').onclick = () => openTerminal($('agentCwd').value.trim() || '.');
+  $('newTerminal').onclick = () => openTerminal(state.treePath || '.');
   $('abort').onclick = () => {
     if (!state.agent) return;
     const id = state.agent.agentId;
@@ -5458,9 +5496,10 @@
     await loadToolBodies(card);
     return toolBodyText(card);
   }
+  const shortcutSession = entry => ({...entry, key: entryKey(entry), attention: needsAttention(entry)});
   const shortcuts = window.RemotePiShortcuts.create({
-    sessions: () =>
-      sessionEntries().map(entry => ({...entry, key: entryKey(entry), attention: needsAttention(entry)})),
+    sessions: () => sessionEntries().map(shortcutSession),
+    allSessions: () => sessionEntries({applyFilter: false}).map(shortcutSession),
     reveal: index => {
       if (index < state.agentVisibleCount) return;
       state.agentVisibleCount = Math.ceil((index + 1) / state.agentPageSize) * state.agentPageSize;

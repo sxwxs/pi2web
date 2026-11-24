@@ -61,8 +61,6 @@ async function setup(
     beside?: {item: object; backends: object[]};
   } = {}
 ) {
-  const cwd = new Element();
-  cwd.value = '.';
   const dialog = new Element();
   const submit = new Element();
   const requests: Array<{backend: string; url: string}> = [];
@@ -71,8 +69,8 @@ async function setup(
   let input!: Element, template!: Element;
   let created: unknown, modalOptions: unknown;
   const context = {
-    state: {workspace: {id: 'ws', backendId: 'backend'}},
-    $: (id: string) => (id === 'modalOk' ? submit : id === 'modal' ? dialog : cwd),
+    state: {workspace: {id: 'ws', backendId: 'backend'}, treePath: '.'},
+    $: (id: string) => (id === 'modalOk' ? submit : dialog),
     document: {createElement: () => new Element()},
     field: (_body: Element, _label: string, value: string) => {
       input = new Element();

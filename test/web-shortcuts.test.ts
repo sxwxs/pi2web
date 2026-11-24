@@ -148,13 +148,15 @@ function setup({storage = {} as Record<string, string>} = {}) {
   terminalView.hidden = true;
   const messages = add('div', 'messages'),
     jumpToLatest = add('button', 'jumpToLatest'),
-    openConfig = add('button', 'openConfig');
+    openConfig = add('button', 'openConfig'),
+    sessionFilter = add('input', 'sessionFilter');
   const sessions = ['a', 'b', 'c', 'd'].map(id => ({
       key: `agent:${id}`,
       kind: 'agent',
       item: {agentId: id},
       attention: false
     })),
+    listed = {items: sessions},
     selected = {key: 'agent:a' as string | null},
     visible = {count: 3};
   const host = {
@@ -170,7 +172,8 @@ function setup({storage = {} as Record<string, string>} = {}) {
     navigator: {clipboard: {writeText: vi.fn(async () => {})}},
     storage,
     now: vi.fn(() => 0),
-    sessions: () => sessions,
+    sessions: () => listed.items,
+    allSessions: () => sessions,
     reveal: vi.fn((index: number) => {
       if (index >= visible.count) visible.count = index + 1;
     }),
@@ -252,6 +255,8 @@ function setup({storage = {} as Record<string, string>} = {}) {
     addGroup,
     selected,
     sessions,
+    listed,
+    sessionFilter,
     input,
     xterm,
     terminalView,
@@ -772,6 +777,42 @@ describe('shortcuts on the page', () => {
     expect(h.shortcuts.focusedItemId()).toBeNull();
     h.press('y');
     await vi.waitFor(() => expect(h.host.latestOutput).toHaveBeenCalled());
+  });
+
+  it('focuses the session filter with f, moves focus to the filtered list, and keeps ` working across filters', () => {
+    const h = setup();
+    h.shortcuts.noteSelection('agent:a');
+    h.shortcuts.noteSelection('agent:d');
+    h.selected.key = 'agent:d';
+    // Narrow the list to only b and c; neither current (d) nor previous (a) is in it.
+    h.listed.items = [h.sessions[1], h.sessions[2]];
+
+    expect(h.press('f').defaultPrevented).toBe(true);
+    expect(h.doc.activeElement).toBe(h.sessionFilter);
+    // Esc leaves the filter back into Normal mode.
+    h.press('Escape');
+    expect(h.doc.activeElement).toBe(h.doc.body);
+
+    // focusList({preferFirst: true}) highlights the first match without opening it.
+    expect(h.shortcuts.focusList({preferFirst: true})).toBe(true);
+    expect(h.cursor()).toBe('agent:b');
+    expect(h.side()).toBe('列表');
+    expect(h.host.open).not.toHaveBeenCalled();
+
+    // j/k stay within the filtered results.
+    h.press('j');
+    expect(h.cursor()).toBe('agent:c');
+    h.press('j');
+    expect(h.cursor()).toBe('agent:c');
+
+    // ` still switches back to the previous session even when filtered out.
+    h.press('`');
+    expect(h.host.open).toHaveBeenCalledWith(h.sessions[0]);
+
+    // When the filter matches nothing, focusList clears the highlight and returns false.
+    h.listed.items = [];
+    expect(h.shortcuts.focusList({preferFirst: true})).toBe(false);
+    expect(h.cursor()).toBeNull();
   });
 
   it('can be switched off in the settings', () => {

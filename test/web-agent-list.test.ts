@@ -119,12 +119,14 @@ function setup() {
   const elements: Record<string, Element> = {
     agents: new Element(),
     agentListCount: new Element(),
-    loadMoreAgents: new Element()
+    loadMoreAgents: new Element(),
+    clearSessionFilter: new Element()
   };
   const state: any = {
     agents: [agent('a', 3000), agent('b', 2000), agent('c', 1000)],
     terminals: [],
     backendFilter: '',
+    sessionFilter: '',
     agentVisibleCount: 10,
     contexts: new Map(),
     advice: new Map(),
@@ -163,7 +165,7 @@ function setup() {
     const before = {...dom};
     return () => ({created: dom.created - before.created, moves: dom.moves - before.moves});
   };
-  return {api, state, list, card, ids, bindings, selectAgent, settled, highlight};
+  return {api, state, elements, list, card, ids, bindings, selectAgent, settled, highlight};
 }
 
 describe('Agent list cards', () => {
@@ -302,5 +304,52 @@ describe('Agent list cards', () => {
     h.api.renderListItem('agent', 'b');
     expect(b.className.split(' ')).not.toContain('cursor');
     expect(changes()).toEqual({created: 0, moves: 0});
+  });
+
+  it('filters all loaded sessions by title and path before paging, reusing cards and showing counts', () => {
+    const h = setup();
+    h.state.agentVisibleCount = 1;
+    h.state.agents[2].cwd = 'C:\\src\\pi2web\\voice';
+    h.state.agents[2].sessionName = 'Voice Debug';
+    h.state.terminals = [
+      {
+        terminalId: 't1',
+        backendId: 'bk',
+        status: 'running',
+        title: 'Build Shell',
+        cwd: '/srv/pi2web/tools',
+        lastActiveAt: new Date(500).toISOString()
+      }
+    ];
+    h.api.renderAgentList();
+    expect(h.ids()).toEqual(['a']);
+    expect(h.elements.clearSessionFilter.hidden).toBe(true);
+
+    // Matches past the first page, case-insensitive, slash-normalized, and multi-token across title + path.
+    h.state.sessionFilter = 'src/pi2web debug';
+    h.api.renderAgentList();
+    expect(h.ids()).toEqual(['c']);
+    expect(h.elements.agentListCount.textContent).toBe('匹配 1 / 1（共 4）');
+    expect(h.elements.clearSessionFilter.hidden).toBe(false);
+    expect(h.api.sessionEntries({applyFilter: false})).toHaveLength(4);
+
+    // Matches terminals by title or path too, and reuses existing cards when the filter clears.
+    const cCard = h.card('c');
+    h.state.sessionFilter = 'shell tools';
+    h.api.renderAgentList();
+    expect(h.ids()).toEqual(['t1']);
+
+    // Empty match shows a placeholder without dropping cached cards.
+    h.state.sessionFilter = 'nonexistent';
+    h.api.renderAgentList();
+    expect(h.list.children).toHaveLength(1);
+    expect(h.list.children[0].className).toBe('agent-empty');
+    expect(h.elements.agentListCount.textContent).toBe('匹配 0 / 0（共 4）');
+
+    h.state.sessionFilter = 'voice';
+    const changes = h.settled();
+    h.api.renderAgentList();
+    expect(h.card('c')).toBe(cCard);
+    expect(changes().created).toBe(0);
   });
 });
