@@ -384,6 +384,13 @@ export function createOrchestratorExtension(agentId: string, bridge: Orchestrato
           ),
           thinkingLevel: Type.Optional(Type.String()),
           templateId: Type.Optional(Type.String()),
+          timeoutSeconds: Type.Optional(
+            Type.Integer({
+              minimum: 0,
+              maximum: 86400,
+              description: 'Per-run timeout in seconds (default 1800; 0 disables timeout protection)'
+            })
+          ),
           notifyMode: Type.Optional(StringEnum(['none', 'mail', 'orchestrator'] as const)),
           notifyOrchestratorId: Type.Optional(
             Type.String({
@@ -427,6 +434,7 @@ export function createOrchestratorExtension(agentId: string, bridge: Orchestrato
           ),
           thinkingLevel: Type.Optional(Type.Union([Type.Null(), Type.String()])),
           templateId: Type.Optional(Type.Union([Type.Null(), Type.String()])),
+          timeoutSeconds: Type.Optional(Type.Integer({minimum: 0, maximum: 86400})),
           notifyMode: Type.Optional(StringEnum(['none', 'mail', 'orchestrator'] as const)),
           notifyOrchestratorId: Type.Optional(Type.Union([Type.Null(), Type.String()]))
         },

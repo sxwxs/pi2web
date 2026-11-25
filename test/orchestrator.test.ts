@@ -17,6 +17,12 @@ class ScriptedBackend extends MockBackend {
   override async prompt(message: string, onAccepted?: () => void) {
     this.prompts.push(message);
     await super.prompt(message, onAccepted);
+    (this as any).emit({type: 'agent_settled', aborted: false});
+  }
+  override async abort() {
+    const wasStreaming = (await this.getState()).status === 'streaming';
+    await super.abort();
+    if (wasStreaming) (this as any).emit({type: 'agent_settled', aborted: true});
   }
   holdNextTurn() {
     let resolve!: () => void;
@@ -414,5 +420,75 @@ describe('orchestrator agents and tools', () => {
     await vi.waitFor(() => expect(orchBackend.prompts).toHaveLength(2));
     expect(orchBackend.prompts[1]).toContain('[pi2web completion notification]');
     expect(orchBackend.prompts[1]).toContain('Quick task');
+  });
+
+  it('keeps a notifyGroup open while the orchestrator is still streaming so a fast first worker cannot split the group', async () => {
+    const {workspace, server, backends, call} = await setupServer();
+    const orch = (await call('POST', '/api/v1/agents', {profile: 'orchestrator'})).data;
+    const orchBackend = backends.get(orch.agentId)!.backend;
+    const w1 = (await call('POST', '/api/v1/agents', {workspaceId: workspace.id, sessionName: 'Fast-1'}))
+      .data;
+    const w2 = (await call('POST', '/api/v1/agents', {workspaceId: workspace.id, sessionName: 'Slow-2'}))
+      .data;
+
+    // Orchestrator is mid-turn while dispatching reviewer 1 and reviewer 2 into the same group.
+    const releaseOrch = orchBackend.holdNextTurn();
+    const orchRun = server.agents.command(orch.agentId, 'prompt', 'Run parallel review');
+    await vi.waitFor(() => expect(server.agents.get(orch.agentId).record.status).toBe('streaming'));
+
+    // Reviewer 1 finishes immediately BEFORE reviewer 2 is even registered.
+    await server.orchestratorService.sendMessage(orch.agentId, {
+      agentId: w1.agentId,
+      message: 'Review A',
+      notifyOnComplete: true,
+      notifyGroup: 'grp-race'
+    });
+    await vi.waitFor(() => expect(server.agents.get(w1.agentId).record.status).toBe('idle'));
+    await new Promise(r => setTimeout(r, 60));
+
+    // Now orchestrator registers reviewer 2 (held) into the same group and finishes its own turn.
+    const release2 = backends.get(w2.agentId)!.backend.holdNextTurn();
+    await server.orchestratorService.sendMessage(orch.agentId, {
+      agentId: w2.agentId,
+      message: 'Review B',
+      notifyOnComplete: true,
+      notifyGroup: 'grp-race'
+    });
+    releaseOrch();
+    await orchRun;
+    await new Promise(r => setTimeout(r, 80));
+
+    // Must still wait for reviewer 2 rather than firing a partial notification for reviewer 1.
+    expect(orchBackend.prompts).toHaveLength(1);
+    expect(server.orchestratorHub.listFor(orch.agentId)).toHaveLength(2);
+
+    release2();
+    await vi.waitFor(() => expect(orchBackend.prompts).toHaveLength(2));
+    expect(orchBackend.prompts[1]).toContain('Fast-1');
+    expect(orchBackend.prompts[1]).toContain('Slow-2');
+  });
+
+  it('archives metadata when createWorker fails during initialPrompt preflight', async () => {
+    const {workspace, server, backends, call} = await setupServer();
+    const orch = (await call('POST', '/api/v1/agents', {profile: 'orchestrator'})).data;
+    const origCreate = server.agents.create.bind(server.agents);
+    vi.spyOn(server.agents, 'create').mockImplementationOnce(async (...args) => {
+      const rec = await origCreate(...args);
+      backends.get(rec.agentId)!.backend.prompt = async () => {
+        throw new Error('preflight rejected');
+      };
+      return rec;
+    });
+
+    await expect(
+      server.orchestratorService.createWorker(orch.agentId, {
+        workspaceId: workspace.id,
+        sessionName: 'Doomed',
+        initialPrompt: 'fail now'
+      })
+    ).rejects.toThrow('preflight rejected');
+
+    expect(server.agents.list().some(a => a.sessionName === 'Doomed')).toBe(false);
+    expect(server.metadata.listAgents().some(a => a.sessionName === 'Doomed')).toBe(false);
   });
 });

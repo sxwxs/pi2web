@@ -158,5 +158,6 @@
 .schedule-actions{display:flex;gap:5px;flex-wrap:wrap;flex:0 0 auto}
 .schedule-actions button{padding:4px 8px;font-size:12px}
 .schedule-run-row{display:flex;align-items:center;gap:8px;padding:6px 8px;margin:4px 0;background:#242933;border-radius:5px;font-size:12px}
+.schedule-run-row.schedule-run-alert{border-left:3px solid var(--red);background:#332428}
 .schedule-run-row .schedule-run-info{flex:1;min-width:0}
 .schedule-run-row .schedule-run-info small{display:block;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

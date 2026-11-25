@@ -68,10 +68,8 @@ const SUMMARY_MAX_CHARS = 3000;
 export class OrchestratorHub {
   private emitter = new EventEmitter();
   private watches = new Map<string, OrchestratorWatch>();
-  /** Latest assistant output and error per Agent during its active run. */
+  /** Latest assistant output and error for currently watched Agents during their active run. */
   private lastReply = new Map<string, {text: string; error?: string}>();
-  /** Pending fallback timers for backends (e.g. MockBackend) that emit agent_end without agent_settled. */
-  private endFallbacks = new Map<string, ReturnType<typeof setTimeout>>();
   /** Pending results waiting for debounce or for the orchestrator to become idle. */
   private pending = new Map<string, WatchResult[]>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -96,8 +94,6 @@ export class OrchestratorHub {
     this.unsubscribe = undefined;
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
-    for (const timer of this.endFallbacks.values()) clearTimeout(timer);
-    this.endFallbacks.clear();
     await Promise.allSettled([...this.delivering.values()]);
     this.watches.clear();
     this.pending.clear();
@@ -107,14 +103,9 @@ export class OrchestratorHub {
 
   /** Wait until scheduled notifications have been delivered (used in tests). */
   async drain() {
-    for (
-      let guard = 0;
-      guard < 50 && (this.endFallbacks.size || this.timers.size || this.delivering.size);
-      guard++
-    ) {
+    for (let guard = 0; guard < 50 && (this.timers.size || this.delivering.size); guard++) {
       await Promise.allSettled([...this.delivering.values()]);
-      if (this.endFallbacks.size || this.timers.size)
-        await new Promise(resolve => setTimeout(resolve, Math.max(this.debounceMs, 60) + 20));
+      if (this.timers.size) await new Promise(resolve => setTimeout(resolve, this.debounceMs + 20));
     }
     await Promise.allSettled([...this.delivering.values()]);
   }
@@ -245,13 +236,38 @@ export class OrchestratorHub {
 
   private onAgentEvent(agentId: string, status: string, event: AgentEvent) {
     if (this.closed) return;
-    // Track latest reply / error of every Agent so we have it ready when a watched run ends.
+
+    // When an orchestrator finishes its own turn, its dispatch loop is closed: evaluate any grouped
+    // barriers that settled while it was still creating siblings, and deliver queued notices.
+    if (event.type === 'agent_settled') {
+      const record = this.safeRecord(agentId);
+      if (record?.profile === 'orchestrator') {
+        this.flushReadyGroups(agentId);
+        if (this.pending.get(agentId)?.length) this.scheduleDelivery(agentId, 200);
+      }
+    }
+
+    // If an orchestrator was unloaded, clear its active watches so background workers don't silently restart it.
+    if (event.type === 'agent_unloaded') {
+      const record = this.safeRecord(agentId);
+      if (record?.profile === 'orchestrator') this.unwatch(agentId);
+    }
+
+    // Check if any active watch targets this Agent. Never cache replies for unwatched Agents so
+    // completed runs never accumulate in memory.
+    const matching = [...this.watches.values()].filter(w => w.targetId === agentId && !w.settled);
+    if (!matching.length) {
+      if (event.type === 'agent_start' || event.type === 'agent_settled' || event.type === 'agent_unloaded') {
+        this.lastReply.delete(agentId);
+      }
+      return;
+    }
+
     if (event.type === 'agent_start') {
-      const fb = this.endFallbacks.get(agentId);
-      if (fb) clearTimeout(fb);
-      this.endFallbacks.delete(agentId);
       this.lastReply.delete(agentId);
-    } else if (event.type === 'message_end') {
+      return;
+    }
+    if (event.type === 'message_end') {
       const msg = event.message as any;
       if (msg?.role === 'assistant') {
         const text = assistantText(msg) ?? '';
@@ -263,25 +279,8 @@ export class OrchestratorHub {
               : undefined;
         this.lastReply.set(agentId, {text, error});
       }
+      return;
     }
-
-    // If an orchestrator just finished its own turn and has queued completion notices waiting, deliver now.
-    if (
-      (event.type === 'agent_settled' || (event.type === 'agent_end' && event.willRetry !== true)) &&
-      this.pending.get(agentId)?.length
-    ) {
-      this.scheduleDelivery(agentId, 200);
-    }
-
-    // If an orchestrator was unloaded, clear its active watches so background workers don't silently restart it.
-    if (event.type === 'agent_unloaded') {
-      const record = this.safeRecord(agentId);
-      if (record?.profile === 'orchestrator') this.unwatch(agentId);
-    }
-
-    // Check if any watch targets this Agent.
-    const matching = [...this.watches.values()].filter(w => w.targetId === agentId && !w.settled);
-    if (!matching.length) return;
 
     if (event.type === 'extension_ui_request') {
       const title = typeof event.title === 'string' ? event.title : String(event.kind ?? 'input required');
@@ -301,40 +300,18 @@ export class OrchestratorHub {
     }
 
     if (event.type === 'agent_settled') {
-      const fb = this.endFallbacks.get(agentId);
-      if (fb) clearTimeout(fb);
-      this.endFallbacks.delete(agentId);
       this.settleWatched(agentId, {aborted: event.aborted === true, paused: event.paused === true});
       return;
     }
 
-    // Backends such as MockBackend emit non-retrying `agent_end` without a subsequent `agent_settled`.
-    // Wait briefly so real SdkBackend's `agent_settled` (which also carries `paused`) always takes precedence.
-    if (event.type === 'agent_end' && event.willRetry !== true) {
-      const existing = this.endFallbacks.get(agentId);
-      if (existing) clearTimeout(existing);
-      const aborted = event.aborted === true;
-      const timer = setTimeout(() => {
-        this.endFallbacks.delete(agentId);
-        if (this.closed) return;
-        const current = this.safeRecord(agentId);
-        if (current && BUSY_STATUSES.has(current.status)) return;
-        this.settleWatched(agentId, {aborted, paused: false});
-      }, 40);
-      timer.unref?.();
-      this.endFallbacks.set(agentId, timer);
-      return;
-    }
-
     if (event.type === 'agent_unloaded') {
-      const fb = this.endFallbacks.get(agentId);
-      if (fb) clearTimeout(fb);
-      this.endFallbacks.delete(agentId);
+      this.lastReply.delete(agentId);
       this.completeWatches(matching, 'stopped', undefined, 'Agent was stopped/unloaded');
       return;
     }
     if (status === 'error' && event.type === 'extension_ui_notify' && event.notificationType === 'error') {
       const msg = typeof event.message === 'string' ? event.message : 'Agent error';
+      this.lastReply.delete(agentId);
       this.completeWatches(matching, 'error', undefined, msg);
     }
   }
@@ -401,6 +378,10 @@ export class OrchestratorHub {
   }
 
   private flushReadyGroups(orchestratorId: string) {
+    // Keep group membership open while the orchestrator is still streaming its own turn so a fast
+    // worker (e.g. an immediate API error) cannot close the group before sibling watches are added.
+    const orchestrator = this.safeRecord(orchestratorId);
+    if (orchestrator && BUSY_STATUSES.has(orchestrator.status)) return;
     const groups = new Map<string, OrchestratorWatch[]>();
     for (const watch of this.watches.values()) {
       if (watch.orchestratorId !== orchestratorId || !watch.group) continue;
@@ -408,13 +389,16 @@ export class OrchestratorHub {
       list.push(watch);
       groups.set(watch.group, list);
     }
+    let flushed = false;
     for (const members of groups.values()) {
       if (!members.every(member => member.settled)) continue;
       for (const member of members) {
         this.watches.delete(member.id);
         this.enqueueResult(orchestratorId, member.settled!);
+        flushed = true;
       }
     }
+    if (flushed) this.emitWatches(orchestratorId);
   }
 
   private enqueueResult(orchestratorId: string, result: WatchResult) {

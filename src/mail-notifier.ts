@@ -118,17 +118,26 @@ export class MailNotifier {
     if (!this.timer) this.scheduleFlush();
   }
   /**
-   * Fire-and-forget notification that bypasses the agent-completion queue. Used by the collaboration hub:
-   * a pending human ruling blocks the whole session, so it must not wait for the aggregation window.
+   * Fire-and-forget notification that bypasses the agent-completion queue. Used by features that
+   * need immediate delivery independently of collaboration escalation toggles (such as scheduled tasks).
    */
-  notifyCollab(input: {subject: string; text: string}) {
-    if (this.closed || !this.settings.enabled || !this.settings.collabEscalations) return;
-    const job = this.sendMail(input.subject, clip(input.text, 24_000), {kind: 'collab'}).catch(error =>
-      console.error(`MailDispatch collaboration notification failed: ${(error as Error).message}`)
+  notifyDirect(input: {subject: string; text: string; kind?: string}) {
+    if (this.closed || !this.settings.enabled) return;
+    const kind = input.kind ?? 'direct';
+    const job = this.sendMail(input.subject, clip(input.text, 24_000), {kind}).catch(error =>
+      console.error(`MailDispatch ${kind} notification failed: ${(error as Error).message}`)
     );
     this.pending.add(job);
     void job.finally(() => this.pending.delete(job));
     return job;
+  }
+  /**
+   * Fire-and-forget notification that bypasses the agent-completion queue. Used by the collaboration hub:
+   * a pending human ruling blocks the whole session, so it must not wait for the aggregation window.
+   */
+  notifyCollab(input: {subject: string; text: string}) {
+    if (!this.settings.collabEscalations) return;
+    return this.notifyDirect({...input, kind: 'collab'});
   }
   async close() {
     this.closed = true;

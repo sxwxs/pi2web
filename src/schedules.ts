@@ -1,7 +1,9 @@
 import {existsSync, mkdirSync, writeFileSync} from 'node:fs';
+import {EventEmitter} from 'node:events';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import {randomUUID} from 'node:crypto';
+import {SessionManager} from '@earendil-works/pi-coding-agent';
 import type {AgentManager, AgentRecord} from './agents.js';
 import type {AgentTemplateStore} from './agent-templates.js';
 import type {MetadataStore} from './metadata-store.js';
@@ -20,7 +22,10 @@ import {assistantText, clipSummaryField} from './voice.js';
  */
 export type ScheduleKind = 'cron' | 'interval' | 'once';
 export type ScheduleNotifyMode = 'none' | 'mail' | 'orchestrator';
-export type ScheduleRunStatus = 'running' | 'completed' | 'error' | 'aborted' | 'skipped';
+export type ScheduleRunStatus = 'running' | 'completed' | 'error' | 'aborted' | 'timed_out' | 'skipped';
+
+export const DEFAULT_SCHEDULE_TIMEOUT_SECONDS = 1800;
+export const MAX_SCHEDULE_TIMEOUT_SECONDS = 86_400;
 
 export type ScheduledTask = {
   id: string;
@@ -36,6 +41,8 @@ export type ScheduledTask = {
   model?: {provider: string; modelId: string};
   thinkingLevel?: string;
   templateId?: string;
+  /** Per-run timeout in seconds; 0 disables timeout protection. Default 1800 (30 min). */
+  timeoutSeconds: number;
   notifyMode: ScheduleNotifyMode;
   notifyOrchestratorId?: string;
   historyDir: string;
@@ -71,8 +78,16 @@ export type ScheduleTaskInput = {
   model?: {provider: string; modelId: string} | null;
   thinkingLevel?: string | null;
   templateId?: string | null;
+  timeoutSeconds?: number;
   notifyMode?: ScheduleNotifyMode;
   notifyOrchestratorId?: string | null;
+};
+
+export type ScheduleEvent = {
+  type: 'run_finished';
+  taskId: string;
+  taskName: string;
+  run: ScheduledRun;
 };
 
 export type SchedulerOptions = {
@@ -132,8 +147,9 @@ function parseCronField(
         throw invalid(`Invalid cron ${name} range: ${trimmed}`);
     } else {
       start = Number(rangePart);
-      end = start;
       if (!Number.isInteger(start)) throw invalid(`Invalid cron ${name} value: ${trimmed}`);
+      // Support Quartz-style `N/step` (e.g. `0/15` -> `0..max` step 15) instead of silently ignoring `/step`.
+      end = stepPart === undefined ? start : max;
     }
     const maxBound = allowSevenForZero ? Math.max(max, 7) : max;
     if (start < min || end > maxBound) throw invalid(`Cron ${name} out of range (${min}-${max}): ${trimmed}`);
@@ -236,16 +252,22 @@ const iso = (ms: number | null | undefined) => (ms ? new Date(ms).toISOString() 
 const stampForFile = (ms: number) => new Date(ms).toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
 export class ScheduleManager {
+  private emitter = new EventEmitter();
   private timer?: ReturnType<typeof setInterval>;
   private unsubscribe?: () => void;
-  private activeByTask = new Map<string, {runId: string; agentId: string; taskId: string}>();
-  private activeByAgent = new Map<string, {runId: string; taskId: string}>();
+  private activeByTask = new Map<string, {runId: string; agentId?: string; taskId: string}>();
+  private activeByAgent = new Map<string, {runId: string; taskId: string; timedOut?: boolean}>();
+  private runTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
   private lastReply = new Map<string, {text: string; error?: string}>();
-  private endFallbacks = new Map<string, ReturnType<typeof setTimeout>>();
   private closed = false;
   private readonly now: () => number;
   constructor(private readonly options: SchedulerOptions) {
     this.now = options.now ?? (() => Date.now());
+  }
+
+  subscribe(listener: (event: ScheduleEvent) => void) {
+    this.emitter.on('event', listener);
+    return () => this.emitter.off('event', listener);
   }
 
   private get db() {
@@ -266,6 +288,7 @@ export class ScheduleManager {
         model_json TEXT,
         thinking_level TEXT,
         template_id TEXT,
+        timeout_seconds INTEGER NOT NULL DEFAULT ${DEFAULT_SCHEDULE_TIMEOUT_SECONDS},
         notify_mode TEXT NOT NULL DEFAULT 'none',
         notify_orchestrator_id TEXT,
         next_run_at INTEGER,
@@ -291,13 +314,26 @@ export class ScheduleManager {
       CREATE INDEX IF NOT EXISTS scheduled_runs_task_recent ON scheduled_runs(task_id, started_at DESC);
       CREATE INDEX IF NOT EXISTS scheduled_runs_recent ON scheduled_runs(started_at DESC);
     `);
+    // Additive migration for timeout_seconds.
+    const taskCols = this.db.prepare('PRAGMA table_info(scheduled_tasks)').all() as {name: string}[];
+    if (!taskCols.some(col => col.name === 'timeout_seconds')) {
+      this.db.exec(
+        `ALTER TABLE scheduled_tasks ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT ${DEFAULT_SCHEDULE_TIMEOUT_SECONDS}`
+      );
+    }
     // Any run still marked running from a previous server process did not finish cleanly.
+    // Reconcile both run and task status (interrupted Agents stay inspectable in the sidebar).
     const now = this.now();
-    this.db
-      .prepare(
-        "UPDATE scheduled_runs SET status='aborted', finished_at=?, error='Server restarted during run' WHERE status='running'"
-      )
-      .run(now);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE scheduled_runs SET status='aborted', finished_at=?, error='Server restarted during run' WHERE status='running'"
+        )
+        .run(now);
+      this.db
+        .prepare("UPDATE scheduled_tasks SET last_run_status='aborted' WHERE last_run_status='running'")
+        .run();
+    })();
     // Advance overdue recurring tasks to their next future trigger instead of firing a catch-up storm.
     for (const task of this.listTasks()) {
       if (!task.enabled || task.scheduleKind === 'once') continue;
@@ -332,11 +368,12 @@ export class ScheduleManager {
     this.timer = undefined;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
-    for (const timer of this.endFallbacks.values()) clearTimeout(timer);
-    this.endFallbacks.clear();
+    for (const timer of this.runTimeouts.values()) clearTimeout(timer);
+    this.runTimeouts.clear();
     this.activeByTask.clear();
     this.activeByAgent.clear();
     this.lastReply.clear();
+    this.emitter.removeAllListeners();
   }
 
   historyDir(taskId: string) {
@@ -369,9 +406,9 @@ export class ScheduleManager {
       .prepare(
         `INSERT INTO scheduled_tasks(
           id,name,enabled,schedule_kind,schedule_expr,prompt,workspace_id,relative_cwd,
-          model_json,thinking_level,template_id,notify_mode,notify_orchestrator_id,
+          model_json,thinking_level,template_id,timeout_seconds,notify_mode,notify_orchestrator_id,
           next_run_at,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         id,
@@ -385,6 +422,7 @@ export class ScheduleManager {
         validated.model ? JSON.stringify(validated.model) : null,
         validated.thinkingLevel ?? null,
         validated.templateId ?? null,
+        validated.timeoutSeconds,
         validated.notifyMode,
         validated.notifyOrchestratorId ?? null,
         nextRunAt ?? null,
@@ -407,6 +445,7 @@ export class ScheduleManager {
       model: patch.model !== undefined ? patch.model : existing.model,
       thinkingLevel: patch.thinkingLevel !== undefined ? patch.thinkingLevel : existing.thinkingLevel,
       templateId: patch.templateId !== undefined ? patch.templateId : existing.templateId,
+      timeoutSeconds: patch.timeoutSeconds !== undefined ? patch.timeoutSeconds : existing.timeoutSeconds,
       notifyMode: patch.notifyMode !== undefined ? patch.notifyMode : existing.notifyMode,
       notifyOrchestratorId:
         patch.notifyOrchestratorId !== undefined ? patch.notifyOrchestratorId : existing.notifyOrchestratorId
@@ -426,7 +465,7 @@ export class ScheduleManager {
       .prepare(
         `UPDATE scheduled_tasks SET
           name=?, enabled=?, schedule_kind=?, schedule_expr=?, prompt=?, workspace_id=?, relative_cwd=?,
-          model_json=?, thinking_level=?, template_id=?, notify_mode=?, notify_orchestrator_id=?,
+          model_json=?, thinking_level=?, template_id=?, timeout_seconds=?, notify_mode=?, notify_orchestrator_id=?,
           next_run_at=?, updated_at=?
         WHERE id=?`
       )
@@ -441,6 +480,7 @@ export class ScheduleManager {
         validated.model ? JSON.stringify(validated.model) : null,
         validated.thinkingLevel ?? null,
         validated.templateId ?? null,
+        validated.timeoutSeconds,
         validated.notifyMode,
         validated.notifyOrchestratorId ?? null,
         nextRunAt,
@@ -516,7 +556,8 @@ export class ScheduleManager {
 
   /**
    * Open a past scheduled run's Pi session file as a browsable Agent (or return its existing Agent
-   * if still loaded/active).
+   * if still loaded/active). Uses the original cwd recorded in the Pi session file rather than the
+   * task's current settings so editing a task's directory never mis-attaches old history.
    */
   async openRunAgent(runId: string): Promise<AgentRecord> {
     const run = this.getRun(runId);
@@ -530,17 +571,37 @@ export class ScheduleManager {
     if (!run.sessionFile || !existsSync(run.sessionFile))
       throw Object.assign(new Error('Run session file is not available'), {code: 'SESSION_NOT_FOUND'});
     const task = this.getTask(run.taskId);
-    const created = task.workspaceId
-      ? await this.options.agents.create(
-          task.workspaceId,
-          task.relativeCwd || '.',
-          run.sessionFile,
-          'default'
-        )
-      : await this.options.agents.createStandalone(task.historyDir, {
-          profile: 'default',
-          sessionFile: run.sessionFile
-        });
+    let sessionCwd = '';
+    try {
+      sessionCwd = SessionManager.open(run.sessionFile).getCwd() || '';
+    } catch {}
+    let created: AgentRecord;
+    if (sessionCwd && existsSync(sessionCwd)) {
+      const matched = await this.options.workspaces.matchDirectory(sessionCwd).catch(() => undefined);
+      created = matched
+        ? await this.options.agents.create(
+            matched.workspace.id,
+            path.relative(matched.workspace.rootPath, matched.cwd) || '.',
+            run.sessionFile,
+            'default'
+          )
+        : await this.options.agents.createStandalone(sessionCwd, {
+            profile: 'default',
+            sessionFile: run.sessionFile
+          });
+    } else {
+      created = task.workspaceId
+        ? await this.options.agents.create(
+            task.workspaceId,
+            task.relativeCwd || '.',
+            run.sessionFile,
+            'default'
+          )
+        : await this.options.agents.createStandalone(task.historyDir, {
+            profile: 'default',
+            sessionFile: run.sessionFile
+          });
+    }
     const label = `[定时] ${task.name} · ${run.startedAt.slice(0, 16).replace('T', ' ')}`;
     await this.options.agents.setSessionName(created.agentId, label).catch(() => {});
     const record = this.options.agents.get(created.agentId).record;
@@ -549,12 +610,16 @@ export class ScheduleManager {
   }
 
   private async executeTask(task: ScheduledTask, startedAt: number): Promise<ScheduledRun> {
+    if (this.activeByTask.has(task.id))
+      throw Object.assign(new Error('Scheduled task is already running'), {code: 'AGENT_BUSY'});
     const runId = `run-${randomUUID().slice(0, 12)}`;
+    // Reserve synchronously before the first await so concurrent ticks / double-clicks cannot overlap.
+    this.activeByTask.set(task.id, {runId, taskId: task.id});
     const dir = this.historyDir(task.id);
     mkdirSync(path.join(dir, 'runs'), {recursive: true});
-    const template = task.templateId ? this.options.templates.snapshot(task.templateId) : undefined;
-    let agent: AgentRecord;
+    let agent: AgentRecord | undefined;
     try {
+      const template = task.templateId ? this.options.templates.snapshot(task.templateId) : undefined;
       agent = task.workspaceId
         ? await this.options.agents.create(
             task.workspaceId,
@@ -573,6 +638,15 @@ export class ScheduleManager {
       this.options.metadata.saveAgent(fresh);
       agent = fresh;
     } catch (error) {
+      this.activeByTask.delete(task.id);
+      if (agent) {
+        let failedRecord = agent;
+        try {
+          failedRecord = {...this.options.agents.get(agent.agentId).record, status: 'unloaded'};
+        } catch {}
+        await this.options.agents.remove(agent.agentId).catch(() => {});
+        this.options.metadata.archiveAgent(failedRecord);
+      }
       const message = (error as Error).message;
       this.db
         .prepare(
@@ -596,6 +670,17 @@ export class ScheduleManager {
     this.activeByTask.set(task.id, {runId, agentId: agent.agentId, taskId: task.id});
     this.activeByAgent.set(agent.agentId, {runId, taskId: task.id});
 
+    if (task.timeoutSeconds > 0) {
+      const timeoutAgentId = agent.agentId;
+      const limitSec = task.timeoutSeconds;
+      const timer = setTimeout(() => {
+        this.runTimeouts.delete(timeoutAgentId);
+        void this.handleRunTimeout(timeoutAgentId, limitSec);
+      }, limitSec * 1000);
+      timer.unref?.();
+      this.runTimeouts.set(timeoutAgentId, timer);
+    }
+
     const fullPrompt = buildScheduledPrompt(task, dir, startedAt);
     try {
       await this.options.agents.submitCommand(agent.agentId, 'prompt', fullPrompt);
@@ -605,9 +690,28 @@ export class ScheduleManager {
     return this.getRun(runId);
   }
 
+  private async handleRunTimeout(agentId: string, timeoutSeconds: number) {
+    if (this.closed) return;
+    const active = this.activeByAgent.get(agentId);
+    if (!active) return;
+    active.timedOut = true;
+    const reply = this.lastReply.get(agentId)?.text ?? '';
+    const message = `Timed out after ${timeoutSeconds}s and was aborted automatically`;
+    try {
+      await this.options.agents.command(agentId, 'abort');
+      await this.options.agents.abortBash(agentId);
+    } catch {}
+    // Finalize immediately if abort did not synchronously settle the run.
+    if (this.activeByAgent.has(agentId)) {
+      this.lastReply.delete(agentId);
+      this.finishRun(agentId, 'timed_out', reply, message);
+    }
+  }
+
   private onAgentEvent(agentId: string, event: {type: string; [key: string]: unknown}) {
     if (this.closed) return;
-    if (!this.activeByAgent.has(agentId)) return;
+    const active = this.activeByAgent.get(agentId);
+    if (!active) return;
     if (event.type === 'message_end') {
       const msg = event.message as any;
       if (msg?.role === 'assistant') {
@@ -623,30 +727,32 @@ export class ScheduleManager {
       return;
     }
     if (event.type === 'agent_settled') {
-      const fb = this.endFallbacks.get(agentId);
-      if (fb) clearTimeout(fb);
-      this.endFallbacks.delete(agentId);
       const reply = this.lastReply.get(agentId);
       this.lastReply.delete(agentId);
-      const status: ScheduleRunStatus =
-        event.aborted === true ? 'aborted' : reply?.error ? 'error' : 'completed';
-      this.finishRun(agentId, status, reply?.text ?? '', reply?.error);
+      const status: ScheduleRunStatus = active.timedOut
+        ? 'timed_out'
+        : event.aborted === true || event.paused === true
+          ? 'aborted'
+          : reply?.error
+            ? 'error'
+            : 'completed';
+      const error = active.timedOut
+        ? 'Timed out and was aborted automatically'
+        : event.paused === true
+          ? 'Run was paused before completion'
+          : reply?.error;
+      this.finishRun(agentId, status, reply?.text ?? '', error);
       return;
     }
-    if (event.type === 'agent_end' && event.willRetry !== true) {
-      const existing = this.endFallbacks.get(agentId);
-      if (existing) clearTimeout(existing);
-      const aborted = event.aborted === true;
-      const timer = setTimeout(() => {
-        this.endFallbacks.delete(agentId);
-        if (this.closed || !this.activeByAgent.has(agentId)) return;
-        const reply = this.lastReply.get(agentId);
-        this.lastReply.delete(agentId);
-        const status: ScheduleRunStatus = aborted ? 'aborted' : reply?.error ? 'error' : 'completed';
-        this.finishRun(agentId, status, reply?.text ?? '', reply?.error);
-      }, 40);
-      timer.unref?.();
-      this.endFallbacks.set(agentId, timer);
+    if (event.type === 'agent_unloaded') {
+      const reply = this.lastReply.get(agentId);
+      this.lastReply.delete(agentId);
+      this.finishRun(
+        agentId,
+        active.timedOut ? 'timed_out' : 'aborted',
+        reply?.text ?? '',
+        'Agent was stopped'
+      );
     }
   }
 
@@ -655,6 +761,9 @@ export class ScheduleManager {
     if (!active) return;
     this.activeByAgent.delete(agentId);
     this.activeByTask.delete(active.taskId);
+    const timer = this.runTimeouts.get(agentId);
+    if (timer) clearTimeout(timer);
+    this.runTimeouts.delete(agentId);
     const finishedAt = this.now();
     let sessionFile: string | undefined;
     try {
@@ -709,6 +818,18 @@ export class ScheduleManager {
     // the JSONL session file and archived Markdown output stay intact and can be opened any time.
     void this.archiveTransientAgent(agentId);
 
+    try {
+      const run = this.getRun(active.runId);
+      if (task && !this.closed) {
+        this.emitter.emit('event', {
+          type: 'run_finished',
+          taskId: task.id,
+          taskName: task.name,
+          run
+        } satisfies ScheduleEvent);
+      }
+    } catch {}
+
     if (task) void this.deliverNotification(task, active.runId, status, output, error, outputFile);
   }
 
@@ -729,19 +850,21 @@ export class ScheduleManager {
     error?: string,
     outputFile?: string
   ) {
-    if (task.notifyMode === 'mail' && this.options.mailNotifier) {
-      const subject = `[Remote Pi 定时任务] ${task.name} · ${status}`;
+    // Timeouts always send mail when MailNotifier is enabled so silent kills never go unnoticed.
+    const shouldMail = this.options.mailNotifier && (task.notifyMode === 'mail' || status === 'timed_out');
+    if (shouldMail) {
+      const label = status === 'timed_out' ? '超时已中止' : status;
+      const subject = `[Remote Pi 定时任务] ${task.name} · ${label}`;
       const body = [
         `任务：${task.name} (${task.id})`,
         `运行 ID：${runId}`,
-        `状态：${status}`,
-        ...(error ? [`错误：${error}`] : []),
+        `状态：${label}`,
+        ...(error ? [`说明：${error}`] : []),
         ...(outputFile ? [`归档文件：${outputFile}`] : []),
         '',
         clipSummaryField(output.trim() || '(无文本输出)', 20_000)
       ].join('\n');
-      await this.options.mailNotifier.notifyCollab({subject, text: body});
-      return;
+      await this.options.mailNotifier!.notifyDirect({subject, text: body, kind: 'schedule'});
     }
     if (task.notifyMode === 'orchestrator' && task.notifyOrchestratorId) {
       try {
@@ -816,6 +939,16 @@ export class ScheduleManager {
     const templateId =
       typeof input.templateId === 'string' && input.templateId.trim() ? input.templateId.trim() : undefined;
     if (templateId) this.options.templates.get(templateId);
+    const timeoutSeconds =
+      input.timeoutSeconds === undefined
+        ? DEFAULT_SCHEDULE_TIMEOUT_SECONDS
+        : Math.trunc(Number(input.timeoutSeconds));
+    if (
+      !Number.isFinite(timeoutSeconds) ||
+      timeoutSeconds < 0 ||
+      timeoutSeconds > MAX_SCHEDULE_TIMEOUT_SECONDS
+    )
+      throw invalid(`timeoutSeconds must be an integer between 0 and ${MAX_SCHEDULE_TIMEOUT_SECONDS}`);
     const notifyMode: ScheduleNotifyMode = input.notifyMode ?? 'none';
     if (!['none', 'mail', 'orchestrator'].includes(notifyMode))
       throw invalid('notifyMode must be none, mail, or orchestrator');
@@ -838,6 +971,7 @@ export class ScheduleManager {
       model,
       thinkingLevel,
       templateId,
+      timeoutSeconds,
       notifyMode,
       notifyOrchestratorId
     };
@@ -862,6 +996,10 @@ export class ScheduleManager {
       ...(model ? {model} : {}),
       ...(row.thinking_level ? {thinkingLevel: row.thinking_level} : {}),
       ...(row.template_id ? {templateId: row.template_id} : {}),
+      timeoutSeconds:
+        row.timeout_seconds === undefined || row.timeout_seconds === null
+          ? DEFAULT_SCHEDULE_TIMEOUT_SECONDS
+          : Number(row.timeout_seconds),
       notifyMode: row.notify_mode ?? 'none',
       ...(row.notify_orchestrator_id ? {notifyOrchestratorId: row.notify_orchestrator_id} : {}),
       historyDir: this.historyDir(row.id),

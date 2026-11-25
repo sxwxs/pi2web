@@ -475,7 +475,12 @@ export class OrchestratorService {
       }
       return {agent: {...this.deps.agents.get(record.agentId).record}, ...(watch ? {watch} : {})};
     } catch (error) {
+      let failedRecord = created;
+      try {
+        failedRecord = {...this.deps.agents.get(created.agentId).record, status: 'unloaded'};
+      } catch {}
       await this.deps.agents.remove(created.agentId).catch(() => {});
+      this.deps.metadata.archiveAgent(failedRecord);
       throw error;
     }
   }

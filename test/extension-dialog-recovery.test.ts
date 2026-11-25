@@ -100,6 +100,7 @@ function setup() {
       setAgentStatus,
       setAgentActivity,
       setAgentWatches: vi.fn(),
+      handleScheduleEvent: vi.fn(),
       discardStreams: vi.fn(),
       updateMessageHistoryControl: vi.fn(),
       renderQueueBar: vi.fn(),

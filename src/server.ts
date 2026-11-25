@@ -217,6 +217,7 @@ export class RemotePiServer {
             drafts: this.drafts,
             collab: this.collab,
             orchestratorHub: this.orchestratorHub,
+            schedules: this.schedules,
             voice: this.voice,
             sessionNamer: this.sessionNamer,
             recordPrompt: text => this.recordPrompt(text),

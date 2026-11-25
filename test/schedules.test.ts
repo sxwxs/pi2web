@@ -1,18 +1,42 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {mkdtemp, readFile, rm} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, rm} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
+import WebSocket from 'ws';
+import {once} from 'node:events';
+import {Check} from 'typebox/value';
 import {RemotePiServer} from '../src/server.js';
 import {WorkspaceStore} from '../src/workspaces.js';
 import {AgentManager, MockBackend} from '../src/agents.js';
+import {MailNotifier} from '../src/mail-notifier.js';
 import {computeNextRun, parseCronExpression, parseIntervalMs} from '../src/schedules.js';
+import schema from '../packages/protocol/websocket.schema.json' with {type: 'json'};
 
 class TrackingBackend extends MockBackend {
   prompts: string[] = [];
+  private gate?: {resolve: () => void};
   override async prompt(message: string, onAccepted?: () => void) {
     this.prompts.push(message);
     await super.prompt(message, onAccepted);
+    (this as any).emit({type: 'agent_settled', aborted: false});
+  }
+  override async abort() {
+    const wasStreaming = (await this.getState()).status === 'streaming';
+    await super.abort();
+    if (wasStreaming) (this as any).emit({type: 'agent_settled', aborted: true});
+  }
+  holdNextTurn() {
+    let resolve!: () => void;
+    const promise = new Promise<void>(r => {
+      resolve = r;
+    });
+    this.gate = {resolve};
+    this.runTurn = () => promise;
+    return () => {
+      this.gate?.resolve();
+      this.runTurn = () => new Promise<void>(r => setTimeout(r, 0));
+    };
   }
 }
 
@@ -43,6 +67,11 @@ describe('schedule expression parser', () => {
     expect(parseIntervalMs('2h')).toBe(2 * 3_600_000);
     expect(() => parseIntervalMs('5s')).toThrow();
     expect(() => parseCronExpression('bad')).toThrow();
+
+    // Quartz-style numeric/step expands through the field's upper bound.
+    const stepped = parseCronExpression('0/15 2/6 * * *');
+    expect([...stepped.minutes]).toEqual([0, 15, 30, 45]);
+    expect([...stepped.hours]).toEqual([2, 8, 14, 20]);
   });
 });
 
@@ -182,5 +211,129 @@ describe('scheduled agents', () => {
     } finally {
       store.close();
     }
+  });
+
+  it('aborts timed-out scheduled runs, records timed_out status, alerts WS/mail regardless of collabEscalations, and supports clearing workspace + stopping mid-run', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'pi2web-sched-edge-'));
+    const dataDir = path.join(root, 'data');
+    const wsDir = path.join(root, 'ws');
+    await mkdir(wsDir, {recursive: true});
+
+    const sentMails: any[] = [];
+    const mailNotifier = new MailNotifier(
+      {endpoint: 'http://mail.test/send', apiKey: 'k', recipient: 'me@test'},
+      (async (_url, init) => {
+        sentMails.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ok: true}), {status: 200});
+      }) as typeof fetch
+    );
+    // Explicitly disable legacy collabEscalations to verify schedule mail still goes through.
+    mailNotifier.updateSettings({enabled: true, collabEscalations: false});
+
+    const workspaces = new WorkspaceStore();
+    const backends = new Map<string, TrackingBackend>();
+    let holdNext = false;
+    const agents = new AgentManager(workspaces, (id, cwd, sessionFile, _profile, opts) => {
+      const backend = new TrackingBackend(id, cwd, sessionFile, opts);
+      if (holdNext) {
+        backend.holdNextTurn();
+        holdNext = false;
+      }
+      backends.set(id, backend);
+      return backend;
+    });
+
+    const server = new RemotePiServer({
+      port: 0,
+      dataDir,
+      workspaces,
+      agents,
+      mailNotifier,
+      schedulerTickMs: 60_000
+    });
+    cleanups.push(async () => {
+      await server.stop();
+      await rm(root, {recursive: true, force: true});
+    });
+
+    const {token} = await server.auth.init();
+    const address = await server.start();
+    const base = `http://127.0.0.1:${address!.port}`;
+    const headers = {authorization: `Bearer ${token}`, 'content-type': 'application/json'};
+    const call = async (method: string, url: string, body?: unknown) => {
+      const res = await fetch(base + url, {
+        method,
+        headers,
+        ...(body !== undefined ? {body: JSON.stringify(body)} : {})
+      });
+      return {status: res.status, ...(await res.json())};
+    };
+
+    const ws = new WebSocket(`${base.replace('http', 'ws')}/api/v1/ws`, {
+      headers: {authorization: `Bearer ${token}`}
+    });
+    cleanups.push(async () => ws.terminate());
+    const wsMessages: any[] = [];
+    ws.on('message', raw => wsMessages.push(JSON.parse(String(raw))));
+    await once(ws, 'open');
+    ws.send(JSON.stringify({type: 'subscribe_all'}));
+    await vi.waitFor(() => expect(wsMessages.some(m => m.type === 'subscribed_all')).toBe(true));
+
+    const workspace = (await call('POST', '/api/v1/workspaces', {label: 'ws', rootPath: wsDir})).data;
+    const task = (
+      await call('POST', '/api/v1/schedules', {
+        name: 'Slow Job',
+        scheduleKind: 'interval',
+        scheduleExpr: '10m',
+        workspaceId: workspace.id,
+        relativeCwd: '.',
+        timeoutSeconds: 1,
+        prompt: 'Hang forever',
+        notifyMode: 'none'
+      })
+    ).data;
+    expect(task.workspaceId).toBe(workspace.id);
+
+    // Clearing workspaceId via empty string detaches the task from the Workspace.
+    const cleared = (await call('PUT', `/api/v1/schedules/${task.id}`, {workspaceId: '', relativeCwd: ''}))
+      .data;
+    expect(cleared.workspaceId).toBeUndefined();
+
+    // 1. Trigger a run that stalls until the 1s timeout kills it.
+    holdNext = true;
+    const runRes = await call('POST', `/api/v1/schedules/${task.id}/run`);
+    expect(runRes.status).toBe(200);
+
+    // Concurrent manual run while active must be rejected.
+    const dup = await call('POST', `/api/v1/schedules/${task.id}/run`);
+    expect(dup.status).toBe(400);
+
+    await vi.waitFor(
+      async () => {
+        const runs = (await call('GET', `/api/v1/schedules/${task.id}/runs`)).data.runs;
+        expect(runs[0].status).toBe('timed_out');
+      },
+      {timeout: 3000}
+    );
+
+    // Timeout produces both a schema-valid WS schedule_event and a direct email (even with collabEscalations=false).
+    await vi.waitFor(() => expect(wsMessages.some(m => m.type === 'schedule_event')).toBe(true));
+    const schedFrame = wsMessages.find(m => m.type === 'schedule_event');
+    expect(Check(schema as any, schedFrame)).toBe(true);
+    expect(schedFrame.event.run.status).toBe('timed_out');
+
+    await vi.waitFor(() => expect(sentMails.length).toBeGreaterThanOrEqual(1));
+    expect(sentMails[0].subject).toContain('超时已中止');
+
+    // 2. Stopping (unloading) a running scheduled Agent finalizes the run as aborted instead of locking the task.
+    await call('PUT', `/api/v1/schedules/${task.id}`, {timeoutSeconds: 0});
+    holdNext = true;
+    const run2 = (await call('POST', `/api/v1/schedules/${task.id}/run`)).data;
+    await call('DELETE', `/api/v1/agents/${run2.agentId}`);
+    await vi.waitFor(async () => {
+      const runs = (await call('GET', `/api/v1/schedules/${task.id}/runs`)).data.runs;
+      expect(runs[0].id).toBe(run2.id);
+      expect(runs[0].status).toBe('aborted');
+    });
   });
 });

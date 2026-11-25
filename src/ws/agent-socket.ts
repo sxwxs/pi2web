@@ -7,12 +7,14 @@ import type {SessionNamer} from '../session-namer.js';
 import type {VoiceManager} from '../voice.js';
 import type {FollowUpAdvisor} from '../follow-up-advisor.js';
 import type {OrchestratorHub} from '../orchestrator/hub.js';
+import type {ScheduleManager} from '../schedules.js';
 
 export type AgentSocketContext = {
   agents: AgentManager;
   drafts: DraftHub;
   collab: CollabHub;
   orchestratorHub?: OrchestratorHub;
+  schedules?: ScheduleManager;
   voice?: VoiceManager;
   sessionNamer?: SessionNamer;
   /** Adds what a person typed to the shared composer history. Never throws. */
@@ -149,6 +151,9 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
   const unsubscribeWatches = ctx.orchestratorHub?.subscribe((agentId, watches) => {
     if (subscriptions.has('*')) send({type: 'orchestrator_watches', agentId, watches});
   });
+  const unsubscribeSchedules = ctx.schedules?.subscribe(event => {
+    if (subscriptions.has('*')) send({type: 'schedule_event', event});
+  });
   ws.on('close', () => {
     focusRequest++; // A focus still loading is for a socket that no longer exists.
     if (batchTimer) clearTimeout(batchTimer);
@@ -159,6 +164,7 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
     unsubscribeNamer?.();
     unsubscribeFollowUp?.();
     unsubscribeWatches?.();
+    unsubscribeSchedules?.();
     for (const unsubscribe of subscriptions.values()) unsubscribe();
   });
   ws.on('message', raw => {

@@ -75,6 +75,8 @@
     advice: new Map(),
     // Active completion watches owned by each orchestrator Agent; see renderWatchBar.
     watches: new Map(),
+    // Unseen scheduled-task timeout alerts for the header badge.
+    scheduleAlerts: [],
     followUpBackendId: null,
     followUpRequest: 0,
     // The template / history picker next to the composer.
@@ -3408,6 +3410,10 @@
       setAgentWatches(message.agentId, message.watches || []);
       return;
     }
+    if (message.type === 'schedule_event') {
+      handleScheduleEvent(message.event);
+      return;
+    }
     if (message.type === 'agent_state') {
       // subscribe_all resends every current advice and watch list right after the states.
       setAgentAdvice(message.agentId, null);
@@ -4288,10 +4294,49 @@
     }
   }
 
+  function handleScheduleEvent(event) {
+    if (!event || event.type !== 'run_finished') return;
+    const run = event.run || {};
+    if (run.status === 'timed_out') {
+      const msg = `定时任务「${event.taskName || event.taskId}」超时已中止：${run.error || '超出单次运行时间上限'}`;
+      toast(msg);
+      if ('Notification' in window && Notification.permission === 'granted') {
+        try {
+          new Notification('Remote Pi · 定时任务超时中止', {body: msg});
+        } catch {}
+      }
+      state.scheduleAlerts.push({
+        taskId: event.taskId,
+        taskName: event.taskName,
+        runId: run.id,
+        error: run.error
+      });
+      renderScheduleBadge();
+    }
+  }
+  function renderScheduleBadge() {
+    const button = $('openSchedules');
+    if (!button) return;
+    const count = state.scheduleAlerts.length;
+    button.textContent = count ? `定时任务 (${count} 超时)` : '定时任务';
+    button.classList.toggle('danger-action', count > 0);
+  }
+  const scheduleStatusText = status =>
+    ({
+      running: '运行中',
+      completed: '已完成',
+      error: '失败',
+      aborted: '已中止',
+      timed_out: '超时中止',
+      skipped: '已跳过'
+    })[status] || status;
+
   async function openSchedulesManager() {
     if (!requireConnection()) return;
     const backend = targetBackend();
     if (!backend) return toast('没有已连接的 Backend');
+    state.scheduleAlerts = [];
+    renderScheduleBadge();
     let tasks = [],
       runs = [];
     const reloadData = async () => {
@@ -4336,7 +4381,15 @@
           wsLabel.append(wsSelect);
           body.append(wsLabel);
           const relCwd = field(body, '相对路径（绑定 Workspace 时生效）', existing?.relativeCwd || '.');
-          const notifyLabel = el('label', {textContent: '完成后通知'});
+          const timeoutInput = field(
+            body,
+            '单次超时保护（秒，默认 1800 即 30 分钟；填 0 关闭超时）',
+            String(existing?.timeoutSeconds ?? 1800),
+            'number'
+          );
+          timeoutInput.min = '0';
+          timeoutInput.max = '86400';
+          const notifyLabel = el('label', {textContent: '完成后通知（超时中止时会强制邮件/页面告警）'});
           const notifyMode = el('select');
           notifyMode.innerHTML =
             '<option value="none">不主动通知（仅归档到历史目录）</option><option value="mail">发送邮件（需配置 MailDispatch）</option><option value="orchestrator">推送给顶层总控 Agent</option>';
@@ -4372,11 +4425,12 @@
             name: name.value.trim(),
             scheduleKind: kind.value,
             scheduleExpr: expr.value.trim(),
-            workspaceId: wsSelect.value || undefined,
-            relativeCwd: wsSelect.value ? relCwd.value.trim() || '.' : undefined,
+            // Explicit empty string clears an existing Workspace binding on PUT.
+            workspaceId: wsSelect.value || '',
+            relativeCwd: wsSelect.value ? relCwd.value.trim() || '.' : '',
+            timeoutSeconds: Math.max(0, Math.trunc(Number(timeoutInput.value) || 0)),
             notifyMode: notifyMode.value,
-            notifyOrchestratorId:
-              notifyMode.value === 'orchestrator' ? orchSelect.value || undefined : undefined,
+            notifyOrchestratorId: notifyMode.value === 'orchestrator' ? orchSelect.value || '' : '',
             prompt: promptArea.value.trim(),
             enabled: enabled.checked
           });
@@ -4441,7 +4495,7 @@
                   textContent: `${task.enabled ? '● ' : '○ '}${task.name} · ${task.scheduleKind}: ${task.scheduleExpr}`
                 }),
                 el('small', {
-                  textContent: `下次运行：${task.nextRunAt ? new Date(task.nextRunAt).toLocaleString() : '无'} · 上次：${task.lastRunStatus || '未运行'}${task.lastRunAt ? ` (${new Date(task.lastRunAt).toLocaleString()})` : ''}\n历史目录：${task.historyDir}`
+                  textContent: `下次运行：${task.nextRunAt ? new Date(task.nextRunAt).toLocaleString() : '无'} · 超时：${task.timeoutSeconds ? `${task.timeoutSeconds}s` : '不限'} · 上次：${task.lastRunStatus ? scheduleStatusText(task.lastRunStatus) : '未运行'}${task.lastRunAt ? ` (${new Date(task.lastRunAt).toLocaleString()})` : ''}\n历史目录：${task.historyDir}`
                 })
               );
               const actions = el('div', {className: 'schedule-actions'});
@@ -4509,11 +4563,13 @@
             runBox.append(el('p', {className: 'muted', textContent: '暂无执行记录'}));
           } else {
             for (const run of runs) {
-              const row = el('div', {className: 'schedule-run-row'});
+              const row = el('div', {
+                className: `schedule-run-row${run.status === 'timed_out' || run.status === 'error' ? ' schedule-run-alert' : ''}`
+              });
               const info = el('div', {className: 'schedule-run-info'});
               info.append(
                 el('b', {
-                  textContent: `${run.taskName} · ${run.status} · ${new Date(run.startedAt).toLocaleString()}`
+                  textContent: `${run.taskName} · ${scheduleStatusText(run.status)} · ${new Date(run.startedAt).toLocaleString()}`
                 }),
                 el('small', {
                   textContent: run.error || run.summary || run.outputFile || '(无摘要)'
