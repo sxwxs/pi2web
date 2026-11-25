@@ -53,6 +53,9 @@ const parseTemplate = (value: unknown): AgentTemplateSnapshot | undefined => {
   return;
 };
 
+const parseProfile = (value: unknown): AgentRecord['profile'] =>
+  value === 'collab' ? 'collab' : value === 'orchestrator' ? 'orchestrator' : 'default';
+
 /** SQLite-backed pi2web metadata. Pi conversation JSONL files remain the source of truth. */
 export class MetadataStore {
   private db?: Database.Database;
@@ -86,7 +89,7 @@ export class MetadataStore {
       );
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY,
-        workspace_id TEXT NOT NULL,
+        workspace_id TEXT,
         session_id TEXT NOT NULL,
         session_file TEXT,
         session_name TEXT,
@@ -133,12 +136,46 @@ export class MetadataStore {
       CREATE INDEX IF NOT EXISTS sessions_cwd_active_recent ON sessions(cwd,last_active_at DESC,session_id DESC) WHERE archived_at IS NULL;
     `);
     // Additive migration: old normal Agents stay normal after an upgrade.
-    const agentColumns = db.prepare('PRAGMA table_info(agents)').all() as {name: string}[];
+    const agentColumns = db.prepare('PRAGMA table_info(agents)').all() as {name: string; notnull: number}[];
     if (!agentColumns.some(column => column.name === 'profile'))
       db.exec("ALTER TABLE agents ADD COLUMN profile TEXT NOT NULL DEFAULT 'default'");
     // System prompt template snapshot (JSON). Agents created before templates existed use Pi's prompt.
     if (!agentColumns.some(column => column.name === 'template'))
       db.exec('ALTER TABLE agents ADD COLUMN template TEXT');
+    // Orchestrator and standalone scheduled Agents have no Workspace. Rebuild the table in place for older DBs
+    // where workspace_id was NOT NULL; foreign_keys is paused only for the swap inside one transaction.
+    if (agentColumns.some(column => column.name === 'workspace_id' && column.notnull === 1)) {
+      db.pragma('foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+          db.exec(`
+            CREATE TABLE agents_next (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT,
+              session_id TEXT NOT NULL,
+              session_file TEXT,
+              session_name TEXT,
+              cwd TEXT NOT NULL,
+              status TEXT NOT NULL,
+              profile TEXT NOT NULL DEFAULT 'default',
+              template TEXT,
+              created_at INTEGER NOT NULL,
+              last_active_at INTEGER NOT NULL,
+              archived_at INTEGER,
+              FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+            INSERT INTO agents_next(id,workspace_id,session_id,session_file,session_name,cwd,status,profile,template,created_at,last_active_at,archived_at)
+              SELECT id,workspace_id,session_id,session_file,session_name,cwd,status,profile,template,created_at,last_active_at,archived_at FROM agents;
+            DROP TABLE agents;
+            ALTER TABLE agents_next RENAME TO agents;
+            CREATE INDEX IF NOT EXISTS agents_active_recent ON agents(last_active_at DESC,id DESC) WHERE archived_at IS NULL;
+            CREATE INDEX IF NOT EXISTS agents_workspace_active_recent ON agents(workspace_id,last_active_at DESC,id DESC) WHERE archived_at IS NULL;
+          `);
+        })();
+      } finally {
+        db.pragma('foreign_keys = ON');
+      }
+    }
     // Only stamp the initial version: later migrations (collaboration tables) raise it and must not be reset on restart.
     if (Number(db.pragma('user_version', {simple: true})) < 1) db.pragma('user_version = 1');
     this.archivedAgents = new Set(
@@ -226,13 +263,13 @@ export class MetadataStore {
         .all() as any[]
     ).map(row => ({
       agentId: row.id,
-      workspaceId: row.workspace_id,
+      ...(row.workspace_id ? {workspaceId: row.workspace_id} : {}),
       sessionId: row.session_id,
       sessionFile: row.session_file ?? undefined,
       sessionName: row.session_name ?? undefined,
       cwd: row.cwd,
       status: row.status,
-      profile: row.profile === 'collab' ? 'collab' : 'default',
+      profile: parseProfile(row.profile),
       ...(parseTemplate(row.template) ? {template: parseTemplate(row.template)} : {}),
       createdAt: new Date(row.created_at).toISOString(),
       lastActiveAt: new Date(row.last_active_at).toISOString()
@@ -247,7 +284,7 @@ export class MetadataStore {
       )
       .run(
         record.agentId,
-        record.workspaceId,
+        record.workspaceId ?? null,
         record.sessionId,
         record.sessionFile ?? null,
         record.sessionName ?? null,
@@ -358,7 +395,7 @@ export class MetadataStore {
       .run(
         sessionId,
         sessionFile,
-        record.workspaceId,
+        record.workspaceId ?? null,
         record.cwd,
         name ?? null,
         asTime(record.createdAt),
@@ -384,10 +421,54 @@ export class MetadataStore {
       allMessagesText: ''
     }));
   }
+  /** Search indexed sessions across all Workspaces (or narrowed by workspace/cwd/query). */
+  searchSessions(options: {query?: string; workspaceId?: string; cwd?: string; limit?: number} = {}) {
+    const where = ['archived_at IS NULL'],
+      params: unknown[] = [];
+    if (options.workspaceId) {
+      where.push('workspace_id = ?');
+      params.push(options.workspaceId);
+    }
+    if (options.cwd) {
+      where.push('(cwd = ? OR cwd LIKE ?)');
+      params.push(options.cwd, `${options.cwd}%`);
+    }
+    const query = options.query?.trim().toLowerCase();
+    if (query) {
+      const pattern = `%${query}%`;
+      where.push(
+        "(LOWER(COALESCE(name, '')) LIKE ? OR LOWER(cwd) LIKE ? OR LOWER(first_message) LIKE ? OR LOWER(session_id) LIKE ?)"
+      );
+      params.push(pattern, pattern, pattern, pattern);
+    }
+    const limit = Math.min(100, Math.max(1, Math.trunc(options.limit ?? 30) || 30));
+    const rows = this.database
+      .prepare(
+        `SELECT session_file AS path,session_id AS id,workspace_id AS workspaceId,cwd,name,parent_session_path AS parentSessionPath,created_at,last_active_at,message_count AS messageCount,first_message AS firstMessage FROM sessions WHERE ${where.join(' AND ')} ORDER BY last_active_at DESC,session_id DESC LIMIT ?`
+      )
+      .all(...params, limit) as any[];
+    return rows.map(row => ({
+      id: row.id as string,
+      path: row.path as string,
+      workspaceId: (row.workspaceId ?? undefined) as string | undefined,
+      cwd: row.cwd as string,
+      name: (row.name ?? undefined) as string | undefined,
+      parentSessionPath: (row.parentSessionPath ?? undefined) as string | undefined,
+      created: new Date(row.created_at).toISOString(),
+      modified: new Date(row.last_active_at).toISOString(),
+      messageCount: Number(row.messageCount) || 0,
+      firstMessage: String(row.firstMessage ?? '')
+    }));
+  }
   hasSession(cwd: string, sessionFile: string) {
     return !!this.database
       .prepare('SELECT 1 FROM sessions WHERE cwd=? AND session_file=? AND archived_at IS NULL')
       .get(cwd, sessionFile);
+  }
+  hasAnySession(sessionFile: string) {
+    return !!this.database
+      .prepare('SELECT 1 FROM sessions WHERE session_file=? AND archived_at IS NULL')
+      .get(sessionFile);
   }
   close() {
     if (!this.db) return;

@@ -8,9 +8,12 @@ import {
 } from '../agent-templates.js';
 import {json} from './utils.js';
 
+import {STARTER_AGENT_TEMPLATES} from '../orchestrator/templates.js';
+
 export type SystemPromptRouteContext = {
   agents: AgentManager;
   templates: AgentTemplateStore;
+  orchestratorDir?: string;
   body(): Promise<any>;
 };
 
@@ -42,24 +45,57 @@ export async function handleSystemPromptRoutes(
     }
   }
   if (req.method === 'GET' && u.pathname === '/api/v1/system-prompt/preview') {
-    const workspaceId = u.searchParams.get('workspaceId') ?? '',
+    const profile = u.searchParams.get('profile') ?? '',
+      workspaceId = u.searchParams.get('workspaceId') ?? '',
       relativeCwd = u.searchParams.get('relativeCwd') ?? '.',
       templateId = u.searchParams.get('templateId') || '',
       piDefaultPrompt = u.searchParams.get('source') === 'pi-default';
     const template = templateId && !piDefaultPrompt ? ctx.templates.snapshot(templateId) : undefined;
+    const preview =
+      profile === 'orchestrator' && ctx.orchestratorDir
+        ? await ctx.agents.systemPromptPreviewAt(ctx.orchestratorDir, 'orchestrator', {
+            template,
+            piDefaultPrompt
+          })
+        : await ctx.agents.systemPromptPreview(workspaceId, relativeCwd, {template, piDefaultPrompt});
     return send(200, {
       data: {
-        ...(await ctx.agents.systemPromptPreview(workspaceId, relativeCwd, {template, piDefaultPrompt})),
+        ...preview,
         template: template ?? null
       }
     });
   }
   if (parts[2] === 'agent-templates') {
-    if (parts.length === 3 && req.method === 'GET')
-      return send(200, {data: {dir: ctx.templates.dir, ...ctx.templates.list()}});
+    if (parts.length === 3 && req.method === 'GET') {
+      const includeBuiltIn = u.searchParams.get('includeBuiltIn') === 'true';
+      return send(200, {
+        data: {
+          dir: ctx.templates.dir,
+          ...ctx.templates.list(),
+          ...(includeBuiltIn
+            ? {
+                builtIn: Object.entries(STARTER_AGENT_TEMPLATES).map(([id, template]) => ({
+                  id,
+                  ...template,
+                  builtIn: true
+                }))
+              }
+            : {})
+        }
+      });
+    }
     if (parts.length === 4) {
       const id = decodeURIComponent(parts[3]);
-      if (req.method === 'GET') return send(200, {data: ctx.templates.get(id)});
+      if (req.method === 'GET') {
+        try {
+          return send(200, {data: ctx.templates.get(id)});
+        } catch (error) {
+          const starter = STARTER_AGENT_TEMPLATES[id];
+          if (starter && (error as any).code === 'TEMPLATE_NOT_FOUND')
+            return send(200, {data: {id, ...starter, builtIn: true}});
+          throw error;
+        }
+      }
       if (req.method === 'PUT') return send(200, {data: ctx.templates.save(id, await ctx.body())});
       if (req.method === 'DELETE') {
         ctx.templates.remove(id);

@@ -6,11 +6,13 @@ import type {DraftHub} from '../drafts.js';
 import type {SessionNamer} from '../session-namer.js';
 import type {VoiceManager} from '../voice.js';
 import type {FollowUpAdvisor} from '../follow-up-advisor.js';
+import type {OrchestratorHub} from '../orchestrator/hub.js';
 
 export type AgentSocketContext = {
   agents: AgentManager;
   drafts: DraftHub;
   collab: CollabHub;
+  orchestratorHub?: OrchestratorHub;
   voice?: VoiceManager;
   sessionNamer?: SessionNamer;
   /** Adds what a person typed to the shared composer history. Never throws. */
@@ -144,6 +146,9 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
   const unsubscribeFollowUp = ctx.followUp?.subscribe((agentId, advice) => {
     if (subscriptions.has('*')) send({type: 'follow_up_advice', agentId, advice});
   });
+  const unsubscribeWatches = ctx.orchestratorHub?.subscribe((agentId, watches) => {
+    if (subscriptions.has('*')) send({type: 'orchestrator_watches', agentId, watches});
+  });
   ws.on('close', () => {
     focusRequest++; // A focus still loading is for a socket that no longer exists.
     if (batchTimer) clearTimeout(batchTimer);
@@ -153,6 +158,7 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
     unsubscribeVoice?.();
     unsubscribeNamer?.();
     unsubscribeFollowUp?.();
+    unsubscribeWatches?.();
     for (const unsubscribe of subscriptions.values()) unsubscribe();
   });
   ws.on('message', raw => {
@@ -196,6 +202,8 @@ export function handleAgentSocket(ctx: AgentSocketContext, ws: WebSocket) {
           const known = new Set(agents.map(agent => agent.agentId));
           for (const [agentId, advice] of ctx.followUp?.all() ?? [])
             if (known.has(agentId)) send({type: 'follow_up_advice', agentId, advice});
+          for (const [agentId, watches] of ctx.orchestratorHub?.all() ?? [])
+            if (known.has(agentId)) send({type: 'orchestrator_watches', agentId, watches});
           subscriptions.set(
             '*',
             ctx.agents.subscribeAll((agentId, e) => {

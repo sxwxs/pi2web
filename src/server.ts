@@ -18,11 +18,16 @@ import {CollabStore} from './collab/store.js';
 import {CollabRouter} from './collab/routes.js';
 import {CollabDispatcher} from './collab/dispatcher.js';
 import {DraftHub} from './drafts.js';
-import {AGENT_TEMPLATES_DIR, defaultDataDir} from './paths.js';
+import {AGENT_TEMPLATES_DIR, ORCHESTRATOR_DIR, SCHEDULES_DIR, defaultDataDir} from './paths.js';
 import {AgentTemplateStore} from './agent-templates.js';
 import {PromptTemplateStore} from './prompt-templates.js';
 import {FollowUpAdvisor, type FollowUpSettings} from './follow-up-advisor.js';
 import type {CollabAction, CollabToolBridge} from './collab/pi-extension.js';
+import {OrchestratorHub} from './orchestrator/hub.js';
+import {OrchestratorService} from './orchestrator/service.js';
+import type {OrchestratorToolBridge} from './orchestrator/pi-extension.js';
+import {ScheduleManager} from './schedules.js';
+import {handleScheduleAndOrchestratorRoutes} from './http/schedule-routes.js';
 import {SessionManager, VERSION as PI_VERSION} from '@earendil-works/pi-coding-agent';
 import pkg from '../package.json' with {type: 'json'};
 import {
@@ -62,6 +67,10 @@ export type ServerOptions = {
   followUpFetcher?: typeof fetch;
   voiceCorrectionApiKey?: string;
   voiceCorrectionFetcher?: typeof fetch;
+  /** Override orchestrator completion notification debounce (ms). */
+  orchestratorDebounceMs?: number;
+  /** Override scheduler polling tick interval (ms). */
+  schedulerTickMs?: number;
 };
 export {LOOPBACK_HOSTS};
 export class RemotePiServer {
@@ -76,6 +85,10 @@ export class RemotePiServer {
   promptTemplates: PromptTemplateStore;
   readonly followUp: FollowUpAdvisor;
   collab!: CollabHub;
+  orchestratorHub!: OrchestratorHub;
+  orchestratorService!: OrchestratorService;
+  schedules!: ScheduleManager;
+  private readonly orchestratorDir: string;
   private collabRouter!: CollabRouter;
   private collabDispatcher!: CollabDispatcher;
   private unsubscribeCollab?: () => void;
@@ -103,6 +116,7 @@ export class RemotePiServer {
     this.noAuth = options.noAuth ?? false;
     this.allowInsecureNoAuth = options.allowInsecureNoAuth ?? false;
     this.dataDir = options.dataDir ?? defaultDataDir();
+    this.orchestratorDir = path.join(this.dataDir, ORCHESTRATOR_DIR);
     this.auth = new AuthStore(this.dataDir);
     this.metadata = new MetadataStore(this.dataDir);
     this.sottoStt = new SottoSttService(this.metadata);
@@ -133,9 +147,43 @@ export class RemotePiServer {
           sessionFile,
           profile,
           profile === 'collab' ? this.collabToolBridge() : undefined,
-          backendOptions
+          profile === 'orchestrator'
+            ? {...backendOptions, orchestratorBridge: this.orchestratorToolBridge()}
+            : backendOptions
         )
       );
+    this.orchestratorHub = new OrchestratorHub({
+      agents: this.agents,
+      debounceMs: options.orchestratorDebounceMs,
+      log: message => console.error(message)
+    });
+    this.schedules = new ScheduleManager({
+      connection: () => this.metadata.connection,
+      schedulesDir: path.join(this.dataDir, SCHEDULES_DIR),
+      agents: this.agents,
+      workspaces: this.workspaces,
+      metadata: this.metadata,
+      templates: this.templates,
+      mailNotifier: this.mailNotifier,
+      tickMs: options.schedulerTickMs,
+      log: message => console.error(message)
+    });
+    this.orchestratorService = new OrchestratorService({
+      agents: this.agents,
+      workspaces: this.workspaces,
+      metadata: this.metadata,
+      templates: this.templates,
+      orchestratorHub: this.orchestratorHub,
+      schedules: this.schedules,
+      orchestratorDir: this.orchestratorDir,
+      followUp: this.followUp,
+      ensureSessionIndex: (workspace, cwd, force) => this.ensureSessionIndex(workspace, cwd, force),
+      indexAgentSession: agentId => this.indexAgentSession(agentId),
+      recordUserPrompt: (agentId, text) => {
+        this.voice?.recordUserPrompt(agentId, text);
+        this.sessionNamer?.recordUserPrompt(agentId, text);
+      }
+    });
     this.terminals = options.terminals ?? new TerminalManager(this.workspaces);
     this.collabRouter = new CollabRouter(this.collab, {
       resolveCwd: (workspaceId, relativeCwd) => this.resolveWorkspaceCwd(workspaceId, relativeCwd),
@@ -168,6 +216,7 @@ export class RemotePiServer {
             agents: this.agents,
             drafts: this.drafts,
             collab: this.collab,
+            orchestratorHub: this.orchestratorHub,
             voice: this.voice,
             sessionNamer: this.sessionNamer,
             recordPrompt: text => this.recordPrompt(text),
@@ -197,6 +246,7 @@ export class RemotePiServer {
       );
     const first: {token?: string} = this.noAuth ? {} : await this.auth.init();
     this.metadata.init();
+    this.schedules.init();
     this.sottoStt.load();
     this.voiceCorrection.load();
     this.collab.init();
@@ -229,6 +279,8 @@ export class RemotePiServer {
     // Only now: resuming a queued wake-up calls agents.command(), which fails with "unknown agent" until the
     // persisted agents have been restored, and a failed dispatch is logged, not retried.
     this.collabDispatcher.start();
+    this.orchestratorHub.start();
+    this.schedules.start();
     this.unsubscribeMetadata = this.agents.subscribeAll((agentId, event) => {
       const record = this.agents.get(agentId).record;
       const applyName = async (name: string) => {
@@ -247,7 +299,7 @@ export class RemotePiServer {
       });
       this.mailNotifier?.handleAgentEvent(agentId, event.event, {
         sessionName: record.sessionName,
-        workspaceLabel: this.workspaces.get(record.workspaceId)?.label,
+        workspaceLabel: record.workspaceId ? this.workspaces.get(record.workspaceId)?.label : undefined,
         cwd: record.cwd
       });
       this.followUp.handleAgentEvent(agentId, event.event, {profile: record.profile});
@@ -305,6 +357,27 @@ export class RemotePiServer {
     return {
       getTask: async agentId => this.collab.claimTaskForAgent(agentId),
       submit: async (agentId, action, payload) => this.submitCollabTool(agentId, action, payload)
+    };
+  }
+  /** In-process bridge for `profile=orchestrator` Agents. Reuses server services directly without HTTP/tokens. */
+  orchestratorToolBridge(): OrchestratorToolBridge {
+    return {
+      listWorkspaces: () => this.orchestratorService.listWorkspaces(),
+      listModels: input => this.orchestratorService.listModels(input),
+      listTemplates: () => this.orchestratorService.listTemplates(),
+      listAgents: (callerId, filter) => this.orchestratorService.listAgents(callerId, filter),
+      searchSessions: (callerId, input) => this.orchestratorService.searchSessions(callerId, input),
+      readSession: input => this.orchestratorService.readSession(input),
+      createWorker: (callerId, input) => this.orchestratorService.createWorker(callerId, input),
+      sendMessage: (callerId, input) => this.orchestratorService.sendMessage(callerId, input),
+      watchAgents: (callerId, input) => this.orchestratorService.watchAgents(callerId, input),
+      controlAgent: (callerId, input) => this.orchestratorService.controlAgent(callerId, input),
+      listSchedules: () => this.orchestratorService.listSchedules(),
+      listScheduleRuns: (taskId, limit) => this.orchestratorService.listScheduleRuns(taskId, limit),
+      createSchedule: (callerId, input) => this.orchestratorService.createSchedule(callerId, input),
+      updateSchedule: (callerId, id, patch) => this.orchestratorService.updateSchedule(callerId, id, patch),
+      deleteSchedule: id => this.orchestratorService.deleteSchedule(id),
+      runScheduleNow: id => this.orchestratorService.runScheduleNow(id)
     };
   }
   private async submitCollabTool(agentId: string, action: CollabAction, payload: Record<string, unknown>) {
@@ -423,6 +496,8 @@ export class RemotePiServer {
     this.collabStallTimer = undefined;
     this.unsubscribeCollab?.();
     this.unsubscribeCollab = undefined;
+    this.schedules.stop();
+    await this.orchestratorHub.stop();
     await this.collabDispatcher.stop();
     this.collab.shutdown();
     this.unsubscribeMetadata?.();
@@ -791,7 +866,26 @@ export class RemotePiServer {
         return;
       if (
         await handleSystemPromptRoutes(
-          {agents: this.agents, templates: this.templates, body: () => readJsonBody(req)},
+          {
+            agents: this.agents,
+            templates: this.templates,
+            orchestratorDir: this.orchestratorDir,
+            body: () => readJsonBody(req)
+          },
+          req,
+          res,
+          u,
+          parts
+        )
+      )
+        return;
+      if (
+        await handleScheduleAndOrchestratorRoutes(
+          {
+            schedules: this.schedules,
+            orchestratorHub: this.orchestratorHub,
+            body: () => readJsonBody(req)
+          },
           req,
           res,
           u,
@@ -804,6 +898,8 @@ export class RemotePiServer {
         templates: this.templates,
         metadata: this.metadata,
         workspaces: this.workspaces,
+        orchestratorDir: this.orchestratorDir,
+        onAgentRemoved: (agentId: string) => this.orchestratorHub.handleAgentRemoved(agentId),
         voice: this.voice,
         sottoStt: this.sottoStt,
         sessionNamer: this.sessionNamer,

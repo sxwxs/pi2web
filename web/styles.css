@@ -140,3 +140,23 @@
 .shortcut-mode{position:fixed;left:12px;bottom:10px;z-index:40;padding:3px 8px;font:11px ui-monospace,monospace;color:var(--muted);background:#2b303bdd;border:1px solid var(--line);border-radius:5px;pointer-events:none}.shortcut-mode[hidden]{display:none}.shortcut-mode[data-mode="insert"]{color:var(--green)}.shortcut-mode[data-mode="terminal"]{color:var(--blue)}
 .shortcut-help{max-width:min(760px,94vw)}.shortcut-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:4px 24px}.shortcut-help h3{margin:14px 0 6px;font-size:13px;color:var(--blue)}.shortcut-help dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 12px;margin:0}.shortcut-help dt{white-space:nowrap}.shortcut-help dd{margin:0}.shortcut-help kbd{display:inline-block;min-width:1.7em;margin-right:3px;padding:1px 5px;text-align:center;font:12px ui-monospace,monospace;background:var(--input);border:1px solid #586174;border-bottom-width:2px;border-radius:4px}
 @media(max-width:700px){.shortcut-mode{display:none}.msg.block-cursor{outline:none}aside{padding-bottom:10px}}
+/* Orchestrator agents, completion watches, and scheduled tasks. */
+.orchestrator-tag{flex:0 0 auto;padding:2px 7px;border:1px solid var(--blue);border-radius:999px;background:#263744;color:var(--blue);font:700 10px/1.4 system-ui,sans-serif;white-space:nowrap}
+.agent.orchestrator{background:#2d3645}
+#watchBar{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;margin-bottom:8px;padding:6px 10px;font-size:12px;background:#273240;border:1px solid #4d6b82;border-left:3px solid var(--blue);border-radius:6px}
+.watch-chip{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;background:#1e2631;border:1px solid #4d6b82;border-radius:999px;max-width:100%}
+.watch-chip button{padding:1px 6px;font-size:11px;border:0;background:transparent;color:var(--blue)}
+.watch-chip button:hover{background:#344457}
+.watch-chip .watch-cancel{color:var(--muted)}
+.watch-bar-actions{margin-left:auto;display:flex;gap:6px}
+.watch-bar-actions button{padding:2px 8px;font-size:11px}
+.schedule-row{display:flex;align-items:flex-start;gap:10px;padding:9px;margin:6px 0;background:var(--input);border:1px solid var(--line);border-radius:6px}
+.schedule-row.disabled{opacity:.65}
+.schedule-info{flex:1;min-width:0}
+.schedule-info b,.schedule-info small{display:block;overflow:hidden;text-overflow:ellipsis}
+.schedule-info small{margin-top:3px;color:var(--muted);white-space:pre-wrap;word-break:break-word}
+.schedule-actions{display:flex;gap:5px;flex-wrap:wrap;flex:0 0 auto}
+.schedule-actions button{padding:4px 8px;font-size:12px}
+.schedule-run-row{display:flex;align-items:center;gap:8px;padding:6px 8px;margin:4px 0;background:#242933;border-radius:5px;font-size:12px}
+.schedule-run-row .schedule-run-info{flex:1;min-width:0}
+.schedule-run-row .schedule-run-info small{display:block;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

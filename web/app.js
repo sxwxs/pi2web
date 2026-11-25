@@ -73,6 +73,8 @@
     historyNav: {index: -1, draft: ''},
     // Server-made follow-up advice of each Agent after its last run; see renderAdviceBar.
     advice: new Map(),
+    // Active completion watches owned by each orchestrator Agent; see renderWatchBar.
+    watches: new Map(),
     followUpBackendId: null,
     followUpRequest: 0,
     // The template / history picker next to the composer.
@@ -353,6 +355,7 @@
     renderExtensionStatus();
     renderWidgets();
     renderAdviceBar();
+    renderWatchBar();
   }
 
   function clearTerminalSelection(backendId) {
@@ -373,9 +376,11 @@
     closeBackendSocket(backend);
     if (state.voiceAudio.backendId === backend.id) stopVoiceAudio();
     backendRegistry.deactivate(backend, status, error);
-    // Its advice comes back with the next subscribe_all.
+    // Its advice and watches come back with the next subscribe_all.
     for (const agentId of [...state.advice.keys()])
       if (splitResourceKey(agentId).backendId === backend.id) state.advice.delete(agentId);
+    for (const agentId of [...state.watches.keys()])
+      if (splitResourceKey(agentId).backendId === backend.id) state.watches.delete(agentId);
     clearWorkspaceSelection(backend.id);
     clearAgentSelection(backend.id);
     clearTerminalSelection(backend.id);
@@ -1328,9 +1333,11 @@
     return agent.sessionName || agent.name;
   }
   function agentLabel(agent) {
-    return agentName(agent) || agent.cwd || agent.agentId;
+    if (agentName(agent)) return agentName(agent);
+    return agent.profile === 'orchestrator' ? '顶层总控 Agent' : agent.cwd || agent.agentId;
   }
   function agentSubtitle(agent) {
+    if (agent.profile === 'orchestrator') return '总控 · 不绑定项目目录';
     return agentName(agent) ? agent.cwd : agent.agentId;
   }
   function updateKeyboardUi(connection) {
@@ -1454,7 +1461,7 @@
   let listCards = new Map();
   const listKey = (kind, id) => `${kind}:${id}`;
   const AGENT_CARD =
-    '<div class="agent-top"><b></b><span class="advice-mark" hidden></span><span class="state-badge"></span><span class="key-binding" hidden></span><span class="template-tag" hidden></span><span class="backend-tag" hidden></span></div><small></small><div class="agent-activity" hidden></div><div class="agent-context"><span>Context</span><div class="mini-track"><i></i></div><span class="context-text"></span></div>';
+    '<div class="agent-top"><span class="orchestrator-tag" hidden>总控</span><b></b><span class="advice-mark" hidden></span><span class="state-badge"></span><span class="key-binding" hidden></span><span class="template-tag" hidden></span><span class="backend-tag" hidden></span></div><small></small><div class="agent-activity" hidden></div><div class="agent-context"><span>Context</span><div class="mini-track"><i></i></div><span class="context-text"></span></div>';
   const TERMINAL_CARD =
     '<div class="agent-top"><span class="terminal-kind">&gt;_</span><b></b><span class="state-badge"></span><span class="backend-tag" hidden></span></div><small></small>';
   function createListCard(kind, id) {
@@ -1471,6 +1478,7 @@
       item: null,
       status: '',
       activity: null,
+      orchestrator: part('.orchestrator-tag'),
       name: part('b'),
       badge: part('.state-badge'),
       subtitle: part('small'),
@@ -1513,6 +1521,9 @@
     setProp(card.backend, 'textContent', item.backendName || '');
     setProp(card.backend, 'title', `来自 backend ${item.backendName}`);
     if (!isAgent) return;
+    const isOrchestrator = item.profile === 'orchestrator';
+    card.el.classList.toggle('orchestrator', isOrchestrator);
+    if (card.orchestrator) setProp(card.orchestrator, 'hidden', !isOrchestrator);
     const advice = state.advice.get(item.agentId);
     setProp(card.advice, 'hidden', !advice);
     if (advice) {
@@ -1951,6 +1962,7 @@
    * load is asynchronous, so waiting for it would let a slow tree restore the older selection.
    */
   async function syncWorkspaceForSelection(item) {
+    if (item.profile === 'orchestrator') return;
     const backend = backendOf(item.backendId);
     if (!backend || backend.status !== 'connected') return;
     if (ownsPath(state.workspace, item)) return;
@@ -2052,6 +2064,7 @@
     state.commandsAgentId = null;
     renderQueueBar();
     renderAdviceBar();
+    renderWatchBar();
     try {
       loadTimeline(agent);
       await loadSessionIdentity();
@@ -3391,9 +3404,14 @@
       setAgentAdvice(message.agentId, message.advice || null);
       return;
     }
+    if (message.type === 'orchestrator_watches') {
+      setAgentWatches(message.agentId, message.watches || []);
+      return;
+    }
     if (message.type === 'agent_state') {
-      // subscribe_all resends every current advice right after the states.
+      // subscribe_all resends every current advice and watch list right after the states.
       setAgentAdvice(message.agentId, null);
+      setAgentWatches(message.agentId, []);
       sessionKeyboard.updateAgent({...message.state, agentId: message.agentId});
       setAgentStatus(message.agentId, message.state.status);
       setAgentQueue(message.agentId, message.state.activity?.queue);
@@ -4006,6 +4024,7 @@
       binding = kind === 'agent' && sessionKeyboard.getBinding(item.agentId);
     $('menuForkAgent').hidden = kind !== 'agent';
     $('menuForkLatest').hidden = kind !== 'agent';
+    $('menuNewAgentHere').hidden = kind === 'agent' && item.profile === 'orchestrator';
     archive.hidden = kind !== 'agent';
     archive.disabled = active;
     archive.title = active ? 'Agent 执行期间不能 Archive' : '';
@@ -4083,6 +4102,468 @@
       toast(`按键 ${binding.slot + 1} 颜色已更新`);
     }
   }
+  function setAgentWatches(agentId, watches) {
+    if (Array.isArray(watches) && watches.length) state.watches.set(agentId, watches);
+    else state.watches.delete(agentId);
+    if (state.selectedKind === 'agent' && state.agent?.agentId === agentId) renderWatchBar();
+  }
+  function renderWatchBar() {
+    const bar = $('watchBar');
+    if (!bar) return;
+    const agent = state.selectedKind === 'agent' ? state.agent : null;
+    const watches = agent ? state.watches.get(agent.agentId) || [] : [];
+    if (!watches.length) {
+      bar.replaceChildren();
+      bar.hidden = true;
+      return;
+    }
+    const label = el('span', {textContent: `等待完成通知（${watches.length}）：`});
+    const chips = watches.map(watch => {
+      const targetKey = resourceKey(agent.backendId, watch.targetId);
+      const target = state.agents.find(item => item.agentId === targetKey);
+      const name = watch.label || target?.sessionName || watch.targetName || watch.targetId.slice(0, 14);
+      const statusText = watch.settled
+        ? `已结束:${watch.settled.outcome}`
+        : target?.status || watch.targetStatus || 'running';
+      const groupText = watch.group ? ` [${watch.group}]` : '';
+      const chip = el('span', {className: 'watch-chip'});
+      const jump = el('button', {
+        type: 'button',
+        textContent: `${name} · ${statusText}${groupText}`,
+        title: `跳转到 ${watch.targetId}`
+      });
+      jump.onclick = () => {
+        const current = state.agents.find(item => item.agentId === targetKey);
+        if (current) void selectAgent(current);
+        else toast('目标 Agent 不在当前列表中');
+      };
+      const cancel = el('button', {
+        type: 'button',
+        className: 'watch-cancel',
+        textContent: '×',
+        title: '取消此完成通知监听'
+      });
+      cancel.onclick = async () => {
+        try {
+          const data = await requestAgent(agent.agentId, `/watches/${encodeURIComponent(watch.id)}`, {
+            method: 'DELETE'
+          });
+          setAgentWatches(agent.agentId, data?.watches || []);
+        } catch (error) {
+          toast(`取消监听失败：${error.message}`);
+        }
+      };
+      chip.append(jump, cancel);
+      return chip;
+    });
+    const actions = el('span', {className: 'watch-bar-actions'});
+    const clearAll = el('button', {type: 'button', textContent: '全部取消'});
+    clearAll.onclick = async () => {
+      try {
+        await requestAgent(agent.agentId, '/watches', {method: 'DELETE'});
+        setAgentWatches(agent.agentId, []);
+      } catch (error) {
+        toast(`取消监听失败：${error.message}`);
+      }
+    };
+    actions.append(clearAll);
+    bar.replaceChildren(label, ...chips, actions);
+    bar.hidden = false;
+  }
+
+  /** Pick which connected Backend to use for backend-scoped features (orchestrator, schedules). */
+  function targetBackend() {
+    if (state.backendFilter) {
+      const filtered = backendOf(state.backendFilter);
+      if (filtered?.status === 'connected') return filtered;
+    }
+    if (state.agent) {
+      const b = backendOf(state.agent.backendId);
+      if (b?.status === 'connected') return b;
+    }
+    if (state.workspace) {
+      const b = backendOf(state.workspace.backendId);
+      if (b?.status === 'connected') return b;
+    }
+    return primaryBackend();
+  }
+
+  async function openOrCreateOrchestrator() {
+    if (!requireConnection()) return;
+    const backend = targetBackend();
+    if (!backend) return toast('没有已连接的 Backend');
+    const existing = state.agents
+      .filter(a => a.profile === 'orchestrator' && a.backendId === backend.id)
+      .sort((a, b) => recentTime(b.lastActiveAt, b.createdAt) - recentTime(a.lastActiveAt, a.createdAt));
+    if (existing.length) {
+      await selectAgent(existing[0]);
+      return;
+    }
+    await createOrchestratorAgent(backend);
+  }
+
+  async function createOrchestratorAgent(backend = targetBackend()) {
+    if (!requireConnection()) return;
+    if (!backend) return toast('没有已连接的 Backend');
+    let templates = [],
+      modelCatalog;
+    try {
+      const [tplData, catalog] = await Promise.all([
+        requestBackend(backend.id, '/api/v1/agent-templates?includeBuiltIn=true').catch(() => ({
+          templates: [],
+          builtIn: []
+        })),
+        requestBackend(backend.id, '/api/v1/agents/models?profile=orchestrator').catch(() => null)
+      ]);
+      const custom = tplData.templates || [];
+      const customIds = new Set(custom.map(item => item.id));
+      const builtIn = (tplData.builtIn || []).filter(item => !customIds.has(item.id));
+      templates = [...builtIn, ...custom];
+      modelCatalog = catalog;
+    } catch (error) {
+      return toast(error.message);
+    }
+    const result = await modal(
+      `新建顶层总控 Agent${connectedBackends().length > 1 ? ` · ${backend.name || backend.id}` : ''}`,
+      body => {
+        body.append(
+          el('p', {
+            className: 'muted',
+            textContent:
+              '不绑定特定项目目录，拥有全部 Pi2Web 管理工具（列/搜/读 Session、创建并调度 code agent、接收完成通知、管理定时任务）及内置调研工具。'
+          })
+        );
+        const nameInput = field(body, '名称（可选）', '');
+        nameInput.placeholder = '例如：总控 / 多模型 Review';
+        const modelLabel = document.createElement('label');
+        modelLabel.textContent = '模型';
+        const modelSelect = document.createElement('select');
+        const fallback = document.createElement('option');
+        fallback.value = '';
+        fallback.textContent = 'Pi 默认模型';
+        modelSelect.append(fallback);
+        for (const model of modelCatalog?.models || []) {
+          const option = document.createElement('option');
+          option.value = JSON.stringify([model.provider, model.id]);
+          option.textContent = `${model.provider} / ${model.name || model.id}`;
+          modelSelect.append(option);
+        }
+        if (modelCatalog?.model) {
+          const current = JSON.stringify([modelCatalog.model.provider, modelCatalog.model.id]);
+          if ([...modelSelect.options].some(option => option.value === current)) modelSelect.value = current;
+        }
+        modelLabel.append(modelSelect);
+        body.append(modelLabel);
+        const t = templateSelect(body, templates);
+        const preview = promptPreviewBox(body, () => ({
+          backendId: backend.id,
+          profile: 'orchestrator',
+          templateId: t.value
+        }));
+        t.onchange = () => preview.reset();
+        return () => ({
+          sessionName: nameInput.value.trim() || undefined,
+          templateId: t.value || undefined,
+          model: modelSelect.value ? JSON.parse(modelSelect.value) : null
+        });
+      },
+      '创建总控',
+      {focusOk: true}
+    );
+    if (!result) return;
+    try {
+      const created = await postBackend(backend.id, '/api/v1/agents', {
+        profile: 'orchestrator',
+        ...(result.sessionName ? {sessionName: result.sessionName} : {}),
+        ...(result.templateId ? {templateId: result.templateId} : {}),
+        ...(result.model ? {model: {provider: result.model[0], modelId: result.model[1]}} : {})
+      });
+      const agent = stampNewItem(backend.id, created);
+      const binding = autoBindNewSession(agent);
+      await refreshAgents();
+      await selectAgent(agent);
+      if (binding) toast(`新 Session 已自动绑定到按键 ${binding.slot + 1}`);
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+
+  async function openSchedulesManager() {
+    if (!requireConnection()) return;
+    const backend = targetBackend();
+    if (!backend) return toast('没有已连接的 Backend');
+    let tasks = [],
+      runs = [];
+    const reloadData = async () => {
+      const [taskRes, runRes] = await Promise.all([
+        requestBackend(backend.id, '/api/v1/schedules'),
+        requestBackend(backend.id, '/api/v1/schedule-runs?limit=30')
+      ]);
+      tasks = taskRes.tasks || [];
+      runs = runRes.runs || [];
+    };
+    try {
+      await reloadData();
+    } catch (error) {
+      return toast(`读取定时任务失败：${error.message}`);
+    }
+
+    const editTaskModal = async (existing = null) => {
+      const workspaces = backend.workspaces || [];
+      const orchestrators = state.agents.filter(
+        a => a.profile === 'orchestrator' && a.backendId === backend.id
+      );
+      const result = await modal(
+        existing ? `编辑定时任务 · ${existing.name}` : '新建定时任务',
+        body => {
+          const name = field(body, '任务名称', existing?.name || '');
+          const kindLabel = el('label', {textContent: '调度方式'});
+          const kind = el('select');
+          kind.innerHTML =
+            '<option value="cron">Cron（本地时间 5 段，如 0 9 * * 1-5）</option><option value="interval">固定间隔（如 30m / 6h / 1d）</option><option value="once">单次（ISO 时间，如 2026-05-01T09:00:00+08:00）</option>';
+          kind.value = existing?.scheduleKind || 'cron';
+          kindLabel.append(kind);
+          body.append(kindLabel);
+          const expr = field(body, '调度表达式', existing?.scheduleExpr || '0 9 * * *');
+          const wsLabel = el('label', {textContent: '工作目录 Workspace（可选；不选则运行在任务专属目录）'});
+          const wsSelect = el('select');
+          wsSelect.innerHTML =
+            '<option value="">不绑定 Workspace（使用任务专属历史目录）</option>' +
+            workspaces
+              .map(w => `<option value="${esc(w.id)}">${esc(w.label)} (${esc(w.rootPath)})</option>`)
+              .join('');
+          wsSelect.value = existing?.workspaceId || '';
+          wsLabel.append(wsSelect);
+          body.append(wsLabel);
+          const relCwd = field(body, '相对路径（绑定 Workspace 时生效）', existing?.relativeCwd || '.');
+          const notifyLabel = el('label', {textContent: '完成后通知'});
+          const notifyMode = el('select');
+          notifyMode.innerHTML =
+            '<option value="none">不主动通知（仅归档到历史目录）</option><option value="mail">发送邮件（需配置 MailDispatch）</option><option value="orchestrator">推送给顶层总控 Agent</option>';
+          notifyMode.value = existing?.notifyMode || 'none';
+          notifyLabel.append(notifyMode);
+          body.append(notifyLabel);
+          const orchLabel = el('label', {textContent: '接收通知的总控 Agent'});
+          const orchSelect = el('select');
+          orchSelect.innerHTML =
+            '<option value="">请选择总控 Agent</option>' +
+            orchestrators
+              .map(a => `<option value="${esc(a.remoteId)}">${esc(agentLabel(a))}</option>`)
+              .join('');
+          orchSelect.value = existing?.notifyOrchestratorId || orchestrators[0]?.remoteId || '';
+          orchLabel.append(orchSelect);
+          body.append(orchLabel);
+          const syncOrchVisibility = () => {
+            orchLabel.hidden = notifyMode.value !== 'orchestrator';
+          };
+          notifyMode.onchange = syncOrchVisibility;
+          syncOrchVisibility();
+          const promptArea = el('textarea', {
+            className: 'prompt-editor',
+            value: existing?.prompt || '',
+            placeholder: '每次运行都会开启全新空上下文，可提示 Agent 按需读取 latest.md / memory.md'
+          });
+          body.append(el('label', {textContent: '任务 Prompt'}, promptArea));
+          const enabledRow = el('label', {className: 'toggle-row'});
+          const enabled = el('input', {type: 'checkbox', checked: existing ? existing.enabled : true});
+          enabledRow.append(enabled, document.createTextNode('启用此定时任务'));
+          body.append(enabledRow);
+          return () => ({
+            name: name.value.trim(),
+            scheduleKind: kind.value,
+            scheduleExpr: expr.value.trim(),
+            workspaceId: wsSelect.value || undefined,
+            relativeCwd: wsSelect.value ? relCwd.value.trim() || '.' : undefined,
+            notifyMode: notifyMode.value,
+            notifyOrchestratorId:
+              notifyMode.value === 'orchestrator' ? orchSelect.value || undefined : undefined,
+            prompt: promptArea.value.trim(),
+            enabled: enabled.checked
+          });
+        },
+        existing ? '保存' : '创建'
+      );
+      if (!result) return false;
+      try {
+        if (existing) {
+          await requestBackend(backend.id, `/api/v1/schedules/${encodeURIComponent(existing.id)}`, {
+            method: 'PUT',
+            body: JSON.stringify(result)
+          });
+          toast('定时任务已更新');
+        } else {
+          await postBackend(backend.id, '/api/v1/schedules', result);
+          toast('定时任务已创建');
+        }
+        return true;
+      } catch (error) {
+        toast(`保存失败：${error.message}`);
+        return false;
+      }
+    };
+
+    const showListModal = async () => {
+      let reopen = false;
+      await modal(
+        `定时任务${connectedBackends().length > 1 ? ` · ${backend.name || backend.id}` : ''}`,
+        body => {
+          body.append(
+            el('p', {
+              className: 'muted',
+              textContent:
+                '每次触发都会以全新空上下文执行固定 Prompt，并将结果自动归档到该任务的专属历史目录（runs/ 与 latest.md），不占用主侧栏。也可以直接用自然语言让「总控 Agent」帮你创建和管理。'
+            })
+          );
+          const toolbar = el('div', {className: 'config-actions', style: 'margin-bottom:10px'});
+          const addBtn = el('button', {type: 'button', textContent: '＋ 新建定时任务'});
+          addBtn.onclick = () => {
+            reopen = 'create';
+            $('modal').close('cancel');
+          };
+          const refreshBtn = el('button', {type: 'button', textContent: '↻ 刷新'});
+          refreshBtn.onclick = () => {
+            reopen = 'refresh';
+            $('modal').close('cancel');
+          };
+          toolbar.append(addBtn, refreshBtn);
+          body.append(toolbar);
+
+          const taskBox = el('section', {className: 'config-section'});
+          taskBox.append(el('h3', {textContent: `任务列表（${tasks.length}）`}));
+          if (!tasks.length) {
+            taskBox.append(el('p', {className: 'muted', textContent: '暂无定时任务'}));
+          } else {
+            for (const task of tasks) {
+              const row = el('div', {className: `schedule-row${task.enabled ? '' : ' disabled'}`});
+              const info = el('div', {className: 'schedule-info'});
+              info.append(
+                el('b', {
+                  textContent: `${task.enabled ? '● ' : '○ '}${task.name} · ${task.scheduleKind}: ${task.scheduleExpr}`
+                }),
+                el('small', {
+                  textContent: `下次运行：${task.nextRunAt ? new Date(task.nextRunAt).toLocaleString() : '无'} · 上次：${task.lastRunStatus || '未运行'}${task.lastRunAt ? ` (${new Date(task.lastRunAt).toLocaleString()})` : ''}\n历史目录：${task.historyDir}`
+                })
+              );
+              const actions = el('div', {className: 'schedule-actions'});
+              const runBtn = el('button', {type: 'button', textContent: '立即运行'});
+              runBtn.onclick = async () => {
+                runBtn.disabled = true;
+                try {
+                  await postBackend(backend.id, `/api/v1/schedules/${encodeURIComponent(task.id)}/run`);
+                  toast(`已启动定时任务「${task.name}」`);
+                  reopen = 'refresh';
+                  $('modal').close('cancel');
+                } catch (error) {
+                  runBtn.disabled = false;
+                  toast(`启动失败：${error.message}`);
+                }
+              };
+              const toggleBtn = el('button', {
+                type: 'button',
+                textContent: task.enabled ? '暂停' : '启用'
+              });
+              toggleBtn.onclick = async () => {
+                try {
+                  await requestBackend(backend.id, `/api/v1/schedules/${encodeURIComponent(task.id)}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({enabled: !task.enabled})
+                  });
+                  reopen = 'refresh';
+                  $('modal').close('cancel');
+                } catch (error) {
+                  toast(error.message);
+                }
+              };
+              const editBtn = el('button', {type: 'button', textContent: '编辑'});
+              editBtn.onclick = () => {
+                reopen = task;
+                $('modal').close('cancel');
+              };
+              const delBtn = el('button', {
+                type: 'button',
+                className: 'danger-action',
+                textContent: '删除'
+              });
+              delBtn.onclick = async () => {
+                if (!confirm(`删除定时任务「${task.name}」？磁盘上的历史归档文件不会被删除。`)) return;
+                try {
+                  await requestBackend(backend.id, `/api/v1/schedules/${encodeURIComponent(task.id)}`, {
+                    method: 'DELETE'
+                  });
+                  reopen = 'refresh';
+                  $('modal').close('cancel');
+                } catch (error) {
+                  toast(error.message);
+                }
+              };
+              actions.append(runBtn, toggleBtn, editBtn, delBtn);
+              row.append(info, actions);
+              taskBox.append(row);
+            }
+          }
+          body.append(taskBox);
+
+          const runBox = el('section', {className: 'config-section'});
+          runBox.append(el('h3', {textContent: `最近执行记录（${runs.length}）`}));
+          if (!runs.length) {
+            runBox.append(el('p', {className: 'muted', textContent: '暂无执行记录'}));
+          } else {
+            for (const run of runs) {
+              const row = el('div', {className: 'schedule-run-row'});
+              const info = el('div', {className: 'schedule-run-info'});
+              info.append(
+                el('b', {
+                  textContent: `${run.taskName} · ${run.status} · ${new Date(run.startedAt).toLocaleString()}`
+                }),
+                el('small', {
+                  textContent: run.error || run.summary || run.outputFile || '(无摘要)'
+                })
+              );
+              row.append(info);
+              if (run.sessionFile || run.agentId) {
+                const openBtn = el('button', {type: 'button', textContent: '打开会话'});
+                openBtn.onclick = async () => {
+                  try {
+                    const data = await postBackend(
+                      backend.id,
+                      `/api/v1/schedule-runs/${encodeURIComponent(run.id)}/open`
+                    );
+                    const agent = stampNewItem(backend.id, data.agent);
+                    $('modal').close('cancel');
+                    await refreshAgents();
+                    await selectAgent(agent);
+                  } catch (error) {
+                    toast(`打开失败：${error.message}`);
+                  }
+                };
+                row.append(openBtn);
+              }
+              runBox.append(row);
+            }
+          }
+          body.append(runBox);
+          return null;
+        },
+        '关闭'
+      );
+      if (reopen === 'create') {
+        await editTaskModal(null);
+        await reloadData();
+        return showListModal();
+      }
+      if (reopen === 'refresh') {
+        await reloadData();
+        return showListModal();
+      }
+      if (reopen && typeof reopen === 'object') {
+        await editTaskModal(reopen);
+        await reloadData();
+        return showListModal();
+      }
+    };
+    await showListModal();
+  }
+
   async function createAgent({workspace = state.workspace, cwd = state.treePath || '.'} = {}) {
     if (!workspace) return toast('请先选择 Workspace');
     const preferenceKey = `rpLastTemplate:${workspace.backendId}`;
@@ -4271,16 +4752,20 @@
     let loaded = false,
       request = 0;
     const load = async () => {
-      const {backendId, workspaceId, relativeCwd, templateId, source} = target(),
+      const {backendId, workspaceId, relativeCwd, templateId, source, profile} = target(),
         current = ++request;
       pre.textContent = '';
-      if (!workspaceId) {
+      if (!workspaceId && profile !== 'orchestrator') {
         meta.textContent = '需要先选择该 Backend 上的 Workspace 才能预览（Prompt 与工作目录有关）。';
         return;
       }
       meta.textContent = '正在生成…';
       try {
-        const query = new URLSearchParams({workspaceId, relativeCwd: relativeCwd || '.'});
+        const query = new URLSearchParams(
+          profile === 'orchestrator'
+            ? {profile: 'orchestrator'}
+            : {workspaceId, relativeCwd: relativeCwd || '.'}
+        );
         if (templateId) query.set('templateId', templateId);
         if (source) query.set('source', source);
         const data = await requestBackend(backendId, `/api/v1/system-prompt/preview?${query}`);
@@ -4341,14 +4826,23 @@
     if (!agent) return toast('请先选择 Agent');
     const [session, catalog] = await Promise.all([
       requestAgent(agent.agentId, '/session'),
-      requestBackend(agent.backendId, '/api/v1/agent-templates')
+      requestBackend(
+        agent.backendId,
+        `/api/v1/agent-templates${agent.profile === 'orchestrator' ? '?includeBuiltIn=true' : ''}`
+      )
     ]);
-    if (agent.profile !== 'default' || session.entries?.some(entry => entry.type === 'message'))
+    if (
+      (agent.profile !== 'default' && agent.profile !== 'orchestrator') ||
+      session.entries?.some(entry => entry.type === 'message')
+    )
       return toast('会话开始后不能切换 System Prompt，请新建会话');
+    const custom = catalog.templates || [];
+    const customIds = new Set(custom.map(item => item.id));
+    const available = [...(catalog.builtIn || []).filter(item => !customIds.has(item.id)), ...custom];
     const choice = await modal(
       '切换 System Prompt（仅首次对话前）',
       body => {
-        const picker = templateSelect(body, catalog.templates || []);
+        const picker = templateSelect(body, available);
         picker.value = agent.template?.id || '';
         return () => picker.value;
       },
@@ -4357,7 +4851,7 @@
     if (choice === null) return;
     await postAgent(agent.agentId, '/system-prompt', {templateId: choice});
     localStorage.setItem(`rpLastTemplate:${agent.backendId}`, choice);
-    agent.template = (catalog.templates || []).find(item => item.id === choice) || undefined;
+    agent.template = available.find(item => item.id === choice) || undefined;
     await refreshAgents(true);
     toast('System Prompt 已切换');
   }
@@ -5111,6 +5605,9 @@
     if (!$('contextMenu').contains(e.target)) $('contextMenu').hidden = true;
     if (!$('agentContextMenu').contains(e.target)) $('agentContextMenu').hidden = true;
   });
+  $('openOrchestrator').onclick = () => void openOrCreateOrchestrator();
+  $('openSchedules').onclick = () => void openSchedulesManager();
+  $('newOrchestrator').onclick = () => void createOrchestratorAgent();
   $('newAgent').onclick = () => createAgent();
   $('newTerminal').onclick = () => openTerminal(state.treePath || '.');
   $('abort').onclick = () => {

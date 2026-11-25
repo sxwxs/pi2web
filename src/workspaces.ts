@@ -56,6 +56,29 @@ export class WorkspaceStore {
   get(id: string) {
     return this.items.find(x => x.id === id);
   }
+  /**
+   * Find the deepest Workspace that contains `targetPath` (resolving symlinks and Windows drive casing).
+   * Returns both the Workspace and the canonical directory path.
+   */
+  async matchDirectory(targetPath: string): Promise<{workspace: Workspace; cwd: string} | undefined> {
+    const resolved = path.resolve(targetPath);
+    let actual: string;
+    try {
+      actual = await realpath(resolved);
+    } catch {
+      throw Object.assign(new Error('Path does not exist'), {code: 'PATH_NOT_FOUND'});
+    }
+    if (!(await stat(actual)).isDirectory()) throw new Error('cwd is not a directory');
+    const fold = (value: string) => (process.platform === 'win32' ? value.toLowerCase() : value);
+    const target = fold(actual);
+    let best: {workspace: Workspace; rootLength: number} | undefined;
+    for (const workspace of this.items) {
+      const root = fold(canonicalRoot(workspace.rootPath));
+      if (target !== root && !target.startsWith(root + path.sep)) continue;
+      if (!best || root.length > best.rootLength) best = {workspace, rootLength: root.length};
+    }
+    return best ? {workspace: best.workspace, cwd: actual} : undefined;
+  }
   async resolve(ws: Workspace, relative = '.') {
     const candidate = path.resolve(ws.rootPath, relative);
     const root = await realpath(ws.rootPath);
