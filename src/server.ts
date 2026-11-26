@@ -294,11 +294,11 @@ export class RemotePiServer {
         sessionName: record.sessionName,
         setSessionName: applyName
       });
-      this.voice?.handleAgentEvent(agentId, event.event, {
-        sessionName: record.sessionName,
-        ...(this.sessionNamer ? {} : {setSessionName: applyName})
-      });
       if (!this.schedules.isScheduledAgent(agentId)) {
+        this.voice?.handleAgentEvent(agentId, event.event, {
+          sessionName: record.sessionName,
+          ...(this.sessionNamer ? {} : {setSessionName: applyName})
+        });
         this.mailNotifier?.handleAgentEvent(agentId, event.event, {
           sessionName: record.sessionName,
           workspaceLabel: record.workspaceId ? this.workspaces.get(record.workspaceId)?.label : undefined,

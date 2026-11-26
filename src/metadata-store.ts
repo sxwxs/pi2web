@@ -423,6 +423,7 @@ export class MetadataStore {
   }
   /** Search indexed sessions across all Workspaces (or narrowed by workspace/cwd/query). */
   searchSessions(options: {query?: string; workspaceId?: string; cwd?: string; limit?: number} = {}) {
+    const escapeLike = (value: string) => value.replace(/[\\%_]/g, '\\$&');
     const where = ['archived_at IS NULL'],
       params: unknown[] = [];
     if (options.workspaceId) {
@@ -430,14 +431,14 @@ export class MetadataStore {
       params.push(options.workspaceId);
     }
     if (options.cwd) {
-      where.push('(cwd = ? OR cwd LIKE ?)');
-      params.push(options.cwd, `${options.cwd}%`);
+      where.push("(cwd = ? OR cwd LIKE ? ESCAPE '\\')");
+      params.push(options.cwd, `${escapeLike(options.cwd)}%`);
     }
     const query = options.query?.trim().toLowerCase();
     if (query) {
-      const pattern = `%${query}%`;
+      const pattern = `%${escapeLike(query)}%`;
       where.push(
-        "(LOWER(COALESCE(name, '')) LIKE ? OR LOWER(cwd) LIKE ? OR LOWER(first_message) LIKE ? OR LOWER(session_id) LIKE ?)"
+        "(LOWER(COALESCE(name, '')) LIKE ? ESCAPE '\\' OR LOWER(cwd) LIKE ? ESCAPE '\\' OR LOWER(first_message) LIKE ? ESCAPE '\\' OR LOWER(session_id) LIKE ? ESCAPE '\\')"
       );
       params.push(pattern, pattern, pattern, pattern);
     }

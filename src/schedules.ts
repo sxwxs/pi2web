@@ -218,13 +218,7 @@ export function computeNextRun(kind: ScheduleKind, expr: string, afterMs: number
     const dayMatch = cron.days.has(candidate.getDate()),
       weekdayMatch = cron.weekdays.has(candidate.getDay());
     const dateOk =
-      cron.dayWildcard && cron.weekdayWildcard
-        ? true
-        : cron.dayWildcard && !cron.weekdayWildcard
-          ? dayMatch && weekdayMatch
-          : !cron.dayWildcard && cron.weekdayWildcard
-            ? dayMatch && weekdayMatch
-            : dayMatch || weekdayMatch;
+      cron.dayWildcard || cron.weekdayWildcard ? dayMatch && weekdayMatch : dayMatch || weekdayMatch;
     if (!dateOk) {
       candidate.setDate(candidate.getDate() + 1);
       candidate.setHours(0, 0, 0, 0);
@@ -268,6 +262,8 @@ export class ScheduleManager {
   private unsubscribe?: () => void;
   private activeByTask = new Map<string, {runId: string; agentId?: string; taskId: string}>();
   private activeByAgent = new Map<string, {runId: string; taskId: string; timedOut?: boolean}>();
+  /** Retains scheduled-run Agent IDs until archival completes so settlement listeners skip them reliably. */
+  private scheduledAgents = new Set<string>();
   private runTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
   private lastReply = new Map<string, {text: string; error?: string}>();
   private inFlight = new Set<Promise<unknown>>();
@@ -278,9 +274,9 @@ export class ScheduleManager {
     this.now = options.now ?? (() => Date.now());
   }
 
-  /** Whether `agentId` is currently executing a scheduled run (so generic mail/follow-up skips it). */
+  /** Whether `agentId` belongs to a scheduled run (so generic mail/voice/follow-up skips it). */
   isScheduledAgent(agentId: string) {
-    return this.activeByAgent.has(agentId);
+    return this.scheduledAgents.has(agentId);
   }
 
   subscribe(listener: (event: ScheduleEvent) => void) {
@@ -395,6 +391,7 @@ export class ScheduleManager {
     await Promise.allSettled([...this.inFlight]);
     this.activeByTask.clear();
     this.activeByAgent.clear();
+    this.scheduledAgents.clear();
     this.lastReply.clear();
     this.emitter.removeAllListeners();
   }
@@ -603,7 +600,10 @@ export class ScheduleManager {
 
   private track<T>(promise: Promise<T>): Promise<T> {
     this.inFlight.add(promise);
-    void promise.finally(() => this.inFlight.delete(promise));
+    const cleanup = () => {
+      this.inFlight.delete(promise);
+    };
+    promise.then(cleanup, cleanup);
     return promise;
   }
 
@@ -685,6 +685,7 @@ export class ScheduleManager {
             template
           )
         : await this.options.agents.createStandalone(dir, {profile: 'default', template});
+      this.scheduledAgents.add(agent.agentId);
       if (this.closed) throw new Error('Scheduler stopped during task startup');
       if (task.model)
         await this.options.agents.setModel(agent.agentId, task.model.provider, task.model.modelId, false);
@@ -704,6 +705,7 @@ export class ScheduleManager {
         } catch {}
         await this.options.agents.remove(agent.agentId).catch(() => {});
         this.options.metadata.archiveAgent(failedRecord);
+        this.scheduledAgents.delete(agent.agentId);
       }
       if (!this.closed) {
         const message = (error as Error).message;
@@ -760,10 +762,11 @@ export class ScheduleManager {
     const reply = this.lastReply.get(agentId)?.text ?? '';
     const message = `Timed out after ${timeoutSeconds}s and was aborted automatically`;
     try {
-      await this.options.agents.command(agentId, 'abort');
       await this.options.agents.abortBash(agentId);
+      // Dispose tears down the backend and resolves any pending extension UI dialogs that abort() alone cannot unblock.
+      await this.options.agents.dispose(agentId);
     } catch {}
-    // Finalize immediately if abort did not synchronously settle the run.
+    // Finalize immediately if disposal did not already trigger finishRun via agent_unloaded.
     if (this.activeByAgent.has(agentId)) {
       this.lastReply.delete(agentId);
       this.finishRun(agentId, 'timed_out', reply, message);
@@ -813,7 +816,7 @@ export class ScheduleManager {
         agentId,
         active.timedOut ? 'timed_out' : 'aborted',
         reply?.text ?? '',
-        'Agent was stopped'
+        active.timedOut ? 'Timed out and was aborted automatically' : 'Agent was stopped'
       );
       return;
     }
@@ -907,10 +910,14 @@ export class ScheduleManager {
 
   private async archiveTransientAgent(agentId: string) {
     try {
+      // Dispose first so an active dialog or late error state never blocks archiving the transient Agent.
+      await this.options.agents.dispose(agentId).catch(() => {});
       const record = await this.options.agents.archive(agentId);
       this.options.metadata.archiveAgent(record);
     } catch {
       /* Ignore if already removed or still winding down. */
+    } finally {
+      this.scheduledAgents.delete(agentId);
     }
   }
 
@@ -1017,7 +1024,7 @@ export class ScheduleManager {
         : undefined;
     const templateId =
       typeof input.templateId === 'string' && input.templateId.trim() ? input.templateId.trim() : undefined;
-    if (templateId) this.options.templates.get(templateId);
+    if (templateId) this.options.templates.snapshot(templateId);
     const timeoutSeconds =
       input.timeoutSeconds === undefined
         ? DEFAULT_SCHEDULE_TIMEOUT_SECONDS

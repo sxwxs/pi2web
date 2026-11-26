@@ -504,10 +504,13 @@ describe('orchestrator agents and tools', () => {
       })
     ).data;
 
-    // 1. Explicit watch rejects idle worker.
+    // 1. Explicit watch rejects idle worker; unwatch requires an explicit target/watchId.
     expect(() =>
       server.orchestratorService.watchAgents(orch.agentId, {action: 'watch', agentId: worker.agentId})
     ).toThrow(/no active run to watch/i);
+    expect(() => server.orchestratorService.watchAgents(orch.agentId, {action: 'unwatch'})).toThrow(
+      /watchId or agentId is required/i
+    );
 
     // 2. Search with workspace-relative cwd and partial prefix works without failing.
     const byRel = await server.orchestratorService.searchSessions(orch.agentId, {

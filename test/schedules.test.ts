@@ -76,6 +76,10 @@ describe('schedule expression parser', () => {
     // Wildcard-step day-of-month `*/1` still restricts weekdays with AND (`0 9 */1 * 1-5` skips Sunday).
     const weekdayOnly = computeNextRun('cron', '0 9 */1 * 1-5', base)!;
     expect(new Date(weekdayOnly).getDay()).toBe(1);
+
+    // Wildcard-step `*/2` on day-of-month honors the parsed alternating days (May 3 -> May 5, not May 4).
+    const everyTwoDays = computeNextRun('cron', '0 9 */2 * *', new Date(2026, 4, 3, 10, 0, 0, 0).getTime())!;
+    expect(new Date(everyTwoDays).getDate()).toBe(5);
   });
 });
 
@@ -374,5 +378,15 @@ describe('scheduled agents', () => {
       notifyOrchestratorId: 'nonexistent-agent'
     });
     expect(badOrch.status).toBe(404);
+
+    // 5. Built-in templates (like multi-agent-review) are accepted by schedule validation.
+    const withBuiltIn = await call('POST', '/api/v1/schedules', {
+      name: 'BuiltIn Template Task',
+      scheduleKind: 'interval',
+      scheduleExpr: '1h',
+      prompt: 'review',
+      templateId: 'multi-agent-review'
+    });
+    expect(withBuiltIn.status).toBe(201);
   });
 });

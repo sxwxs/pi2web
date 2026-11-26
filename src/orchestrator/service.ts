@@ -577,7 +577,9 @@ export class OrchestratorService {
       return {watch, watches: this.deps.orchestratorHub.listFor(callerId)};
     }
     if (input.action === 'unwatch') {
-      const removed = this.deps.orchestratorHub.unwatch(callerId, input.watchId ?? input.agentId);
+      const target = (input.watchId ?? input.agentId ?? '').trim();
+      if (!target) throw invalid('watchId or agentId is required for unwatch');
+      const removed = this.deps.orchestratorHub.unwatch(callerId, target);
       return {removed, watches: this.deps.orchestratorHub.listFor(callerId)};
     }
     throw invalid('action must be list, watch, or unwatch');

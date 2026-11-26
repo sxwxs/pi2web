@@ -1750,6 +1750,8 @@
     sessionKeyboard.updateAgent(agent);
     renderAgentList();
     updateAgentHeader();
+    if (state.selectedKind === 'agent' && state.agent && state.watches.get(state.agent.agentId)?.length)
+      renderWatchBar();
     if (state.agent?.agentId === agentId) {
       const picker = $('sendMode');
       if (status === 'streaming' || status === 'waiting_for_user') {
