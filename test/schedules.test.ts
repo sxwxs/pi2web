@@ -72,6 +72,10 @@ describe('schedule expression parser', () => {
     const stepped = parseCronExpression('0/15 2/6 * * *');
     expect([...stepped.minutes]).toEqual([0, 15, 30, 45]);
     expect([...stepped.hours]).toEqual([2, 8, 14, 20]);
+
+    // Wildcard-step day-of-month `*/1` still restricts weekdays with AND (`0 9 */1 * 1-5` skips Sunday).
+    const weekdayOnly = computeNextRun('cron', '0 9 */1 * 1-5', base)!;
+    expect(new Date(weekdayOnly).getDay()).toBe(1);
   });
 });
 
@@ -329,11 +333,46 @@ describe('scheduled agents', () => {
     await call('PUT', `/api/v1/schedules/${task.id}`, {timeoutSeconds: 0});
     holdNext = true;
     const run2 = (await call('POST', `/api/v1/schedules/${task.id}/run`)).data;
+
+    // Deleting a task while it is running must be rejected.
+    expect((await call('DELETE', `/api/v1/schedules/${task.id}`)).status).toBe(400);
+
     await call('DELETE', `/api/v1/agents/${run2.agentId}`);
     await vi.waitFor(async () => {
       const runs = (await call('GET', `/api/v1/schedules/${task.id}/runs`)).data.runs;
       expect(runs[0].id).toBe(run2.id);
       expect(runs[0].status).toBe('aborted');
     });
+
+    // 3. Normal scheduled run with notifyMode='none' must NOT trigger generic completion mail.
+    const mailCountBefore = sentMails.length;
+    const normalRun = await call('POST', `/api/v1/schedules/${task.id}/run`);
+    expect(normalRun.status).toBe(200);
+    await vi.waitFor(async () => {
+      const runs = (await call('GET', `/api/v1/schedules/${task.id}/runs`)).data.runs;
+      expect(runs[0].id).toBe(normalRun.data.id);
+      expect(runs[0].status).toBe('completed');
+    });
+    await new Promise(r => setTimeout(r, 80));
+    expect(sentMails.length).toBe(mailCountBefore);
+
+    // 4. Validation: reject past one-shot timestamp and invalid orchestrator recipient.
+    const pastOnce = await call('POST', '/api/v1/schedules', {
+      name: 'Past',
+      scheduleKind: 'once',
+      scheduleExpr: '2020-01-01T00:00:00Z',
+      prompt: 'too late'
+    });
+    expect(pastOnce.status).toBe(400);
+
+    const badOrch = await call('POST', '/api/v1/schedules', {
+      name: 'Bad Recipient',
+      scheduleKind: 'interval',
+      scheduleExpr: '10m',
+      prompt: 'hi',
+      notifyMode: 'orchestrator',
+      notifyOrchestratorId: 'nonexistent-agent'
+    });
+    expect(badOrch.status).toBe(404);
   });
 });

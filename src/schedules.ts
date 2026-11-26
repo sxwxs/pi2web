@@ -169,8 +169,9 @@ export function parseCronExpression(expr: string): ParsedCron {
     days: parseCronField(fields[2], 1, 31, 'day-of-month'),
     months: parseCronField(fields[3], 1, 12, 'month'),
     weekdays: parseCronField(fields[4], 0, 6, 'day-of-week', true),
-    dayWildcard: fields[2] === '*',
-    weekdayWildcard: fields[4] === '*'
+    // Both `*` and `*/step` are wildcard-based in standard cron day matching (AND with the other day field).
+    dayWildcard: fields[2] === '*' || fields[2].startsWith('*/'),
+    weekdayWildcard: fields[4] === '*' || fields[4].startsWith('*/')
   };
 }
 
@@ -199,15 +200,19 @@ export function computeNextRun(kind: ScheduleKind, expr: string, afterMs: number
   }
   if (kind !== 'cron') throw invalid('scheduleKind must be cron, interval, or once');
   const cron = parseCronExpression(expr);
-  const candidate = new Date(afterMs);
-  candidate.setSeconds(0, 0);
-  candidate.setMinutes(candidate.getMinutes() + 1);
+  // Start strictly after `afterMs` on the next minute boundary in epoch time (safe across DST fall-back).
+  const candidate = new Date(Math.floor(afterMs / 60_000) * 60_000 + 60_000);
   // Search up to 4 years ahead (covers leap day Feb 29).
   const limit = afterMs + 4 * 366 * 86_400_000;
+  const advanceMonotonic = (prevMs: number) => {
+    if (candidate.getTime() <= prevMs) candidate.setTime(prevMs + 60_000);
+  };
   while (candidate.getTime() <= limit) {
+    const prevMs = candidate.getTime();
     if (!cron.months.has(candidate.getMonth() + 1)) {
       candidate.setMonth(candidate.getMonth() + 1, 1);
       candidate.setHours(0, 0, 0, 0);
+      advanceMonotonic(prevMs);
       continue;
     }
     const dayMatch = cron.days.has(candidate.getDate()),
@@ -215,22 +220,28 @@ export function computeNextRun(kind: ScheduleKind, expr: string, afterMs: number
     const dateOk =
       cron.dayWildcard && cron.weekdayWildcard
         ? true
-        : cron.dayWildcard
-          ? weekdayMatch
-          : cron.weekdayWildcard
-            ? dayMatch
+        : cron.dayWildcard && !cron.weekdayWildcard
+          ? dayMatch && weekdayMatch
+          : !cron.dayWildcard && cron.weekdayWildcard
+            ? dayMatch && weekdayMatch
             : dayMatch || weekdayMatch;
     if (!dateOk) {
       candidate.setDate(candidate.getDate() + 1);
       candidate.setHours(0, 0, 0, 0);
+      advanceMonotonic(prevMs);
       continue;
     }
     if (!cron.hours.has(candidate.getHours())) {
       candidate.setHours(candidate.getHours() + 1, 0, 0, 0);
+      advanceMonotonic(prevMs);
       continue;
     }
     if (!cron.minutes.has(candidate.getMinutes())) {
-      candidate.setMinutes(candidate.getMinutes() + 1, 0, 0);
+      candidate.setTime(prevMs + 60_000);
+      continue;
+    }
+    if (candidate.getTime() <= afterMs) {
+      candidate.setTime(prevMs + 60_000);
       continue;
     }
     return candidate.getTime();
@@ -259,10 +270,17 @@ export class ScheduleManager {
   private activeByAgent = new Map<string, {runId: string; taskId: string; timedOut?: boolean}>();
   private runTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
   private lastReply = new Map<string, {text: string; error?: string}>();
+  private inFlight = new Set<Promise<unknown>>();
+  private ticking = false;
   private closed = false;
   private readonly now: () => number;
   constructor(private readonly options: SchedulerOptions) {
     this.now = options.now ?? (() => Date.now());
+  }
+
+  /** Whether `agentId` is currently executing a scheduled run (so generic mail/follow-up skips it). */
+  isScheduledAgent(agentId: string) {
+    return this.activeByAgent.has(agentId);
   }
 
   subscribe(listener: (event: ScheduleEvent) => void) {
@@ -357,12 +375,16 @@ export class ScheduleManager {
       );
     }
     if (!this.timer) {
-      this.timer = setInterval(() => void this.tick(), this.options.tickMs ?? 15_000);
+      this.timer = setInterval(() => {
+        void this.tick().catch(error =>
+          this.options.log?.(`Scheduler tick failed: ${(error as Error).message}`)
+        );
+      }, this.options.tickMs ?? 15_000);
       this.timer.unref?.();
     }
   }
 
-  stop() {
+  async stop() {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
@@ -370,6 +392,7 @@ export class ScheduleManager {
     this.unsubscribe = undefined;
     for (const timer of this.runTimeouts.values()) clearTimeout(timer);
     this.runTimeouts.clear();
+    await Promise.allSettled([...this.inFlight]);
     this.activeByTask.clear();
     this.activeByAgent.clear();
     this.lastReply.clear();
@@ -492,8 +515,11 @@ export class ScheduleManager {
 
   deleteTask(id: string) {
     this.getTask(id);
+    if (this.activeByTask.has(id))
+      throw Object.assign(new Error('Scheduled task is currently running and cannot be deleted'), {
+        code: 'AGENT_BUSY'
+      });
     this.db.prepare('DELETE FROM scheduled_tasks WHERE id=?').run(id);
-    this.activeByTask.delete(id);
   }
 
   listRuns(taskId?: string, limit = 30): ScheduledRun[] {
@@ -519,45 +545,72 @@ export class ScheduleManager {
 
   /** Check due tasks and launch them. Also callable directly in tests. */
   async tick() {
-    if (this.closed) return;
-    const now = this.now();
-    const due = this.db
-      .prepare(
-        'SELECT id FROM scheduled_tasks WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?'
-      )
-      .all(now) as {id: string}[];
-    for (const row of due) {
-      const task = this.getTask(row.id);
-      // Advance schedule before executing so a slow run cannot trigger twice on the next tick.
-      const next =
-        task.scheduleKind === 'once' ? undefined : computeNextRun(task.scheduleKind, task.scheduleExpr, now);
-      this.db
-        .prepare('UPDATE scheduled_tasks SET next_run_at=?, enabled=? WHERE id=?')
-        .run(next ?? null, task.scheduleKind === 'once' ? 0 : 1, task.id);
-      if (this.activeByTask.has(task.id)) {
-        this.recordSkipped(task, now, 'Previous run is still in progress');
-        continue;
-      }
-      await this.executeTask(task, now).catch(error =>
-        this.options.log?.(
-          `Scheduled task ${task.name} (${task.id}) failed to start: ${(error as Error).message}`
+    if (this.closed || this.ticking) return;
+    this.ticking = true;
+    const job = (async () => {
+      const now = this.now();
+      const due = this.db
+        .prepare(
+          'SELECT id FROM scheduled_tasks WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?'
         )
-      );
+        .all(now) as {id: string}[];
+      for (const row of due) {
+        if (this.closed) break;
+        // Re-read immediately before advancing so pauses, edits, or deletions during an earlier startup take effect.
+        let task: ScheduledTask;
+        try {
+          task = this.getTask(row.id);
+        } catch {
+          continue;
+        }
+        const dueAt = task.nextRunAt ? Date.parse(task.nextRunAt) : Number.NaN;
+        if (!task.enabled || !Number.isFinite(dueAt) || dueAt > now) continue;
+        // Advance schedule before executing so a slow run cannot trigger twice on the next tick.
+        const next =
+          task.scheduleKind === 'once'
+            ? undefined
+            : computeNextRun(task.scheduleKind, task.scheduleExpr, now);
+        this.db
+          .prepare('UPDATE scheduled_tasks SET next_run_at=?, enabled=? WHERE id=?')
+          .run(next ?? null, task.scheduleKind === 'once' ? 0 : 1, task.id);
+        if (this.activeByTask.has(task.id)) {
+          this.recordSkipped(task, now, 'Previous run is still in progress');
+          continue;
+        }
+        await this.executeTask(task, now).catch(error =>
+          this.options.log?.(
+            `Scheduled task ${task.name} (${task.id}) failed to start: ${(error as Error).message}`
+          )
+        );
+      }
+    })();
+    this.track(job);
+    try {
+      await job;
+    } finally {
+      this.ticking = false;
     }
   }
 
   /** Manually trigger one run of a scheduled task right now (even if disabled). */
   async runNow(taskId: string): Promise<ScheduledRun> {
+    if (this.closed) throw invalid('Scheduler is stopped');
     const task = this.getTask(taskId);
     if (this.activeByTask.has(task.id))
       throw Object.assign(new Error('Scheduled task is already running'), {code: 'AGENT_BUSY'});
-    return this.executeTask(task, this.now());
+    return this.track(this.executeTask(task, this.now()));
+  }
+
+  private track<T>(promise: Promise<T>): Promise<T> {
+    this.inFlight.add(promise);
+    void promise.finally(() => this.inFlight.delete(promise));
+    return promise;
   }
 
   /**
    * Open a past scheduled run's Pi session file as a browsable Agent (or return its existing Agent
-   * if still loaded/active). Uses the original cwd recorded in the Pi session file rather than the
-   * task's current settings so editing a task's directory never mis-attaches old history.
+   * if still loaded/active). Reuses any live Agent already attached to the same sessionFile to avoid
+   * duplicate backends writing to one JSONL file, and uses the session file's original cwd.
    */
   async openRunAgent(runId: string): Promise<AgentRecord> {
     const run = this.getRun(runId);
@@ -565,11 +618,13 @@ export class ScheduleManager {
       try {
         return {...this.options.agents.get(run.agentId).record};
       } catch {
-        /* Was archived after completion; reopen from its sessionFile below. */
+        /* Was archived after completion; check sessionFile below. */
       }
     }
     if (!run.sessionFile || !existsSync(run.sessionFile))
       throw Object.assign(new Error('Run session file is not available'), {code: 'SESSION_NOT_FOUND'});
+    const existing = this.options.agents.list().find(agent => agent.sessionFile === run.sessionFile);
+    if (existing) return existing;
     const task = this.getTask(run.taskId);
     let sessionCwd = '';
     try {
@@ -610,15 +665,16 @@ export class ScheduleManager {
   }
 
   private async executeTask(task: ScheduledTask, startedAt: number): Promise<ScheduledRun> {
+    if (this.closed) throw invalid('Scheduler is stopped');
     if (this.activeByTask.has(task.id))
       throw Object.assign(new Error('Scheduled task is already running'), {code: 'AGENT_BUSY'});
     const runId = `run-${randomUUID().slice(0, 12)}`;
-    // Reserve synchronously before the first await so concurrent ticks / double-clicks cannot overlap.
+    // Reserve synchronously before any I/O or await so concurrent ticks / double-clicks cannot overlap.
     this.activeByTask.set(task.id, {runId, taskId: task.id});
     const dir = this.historyDir(task.id);
-    mkdirSync(path.join(dir, 'runs'), {recursive: true});
     let agent: AgentRecord | undefined;
     try {
+      mkdirSync(path.join(dir, 'runs'), {recursive: true});
       const template = task.templateId ? this.options.templates.snapshot(task.templateId) : undefined;
       agent = task.workspaceId
         ? await this.options.agents.create(
@@ -629,11 +685,13 @@ export class ScheduleManager {
             template
           )
         : await this.options.agents.createStandalone(dir, {profile: 'default', template});
+      if (this.closed) throw new Error('Scheduler stopped during task startup');
       if (task.model)
         await this.options.agents.setModel(agent.agentId, task.model.provider, task.model.modelId, false);
       if (task.thinkingLevel) await this.options.agents.setThinkingLevel(agent.agentId, task.thinkingLevel);
       const runTitle = `[定时] ${task.name} · ${new Date(startedAt).toISOString().slice(0, 16).replace('T', ' ')}`;
       await this.options.agents.setSessionName(agent.agentId, runTitle).catch(() => {});
+      if (this.closed) throw new Error('Scheduler stopped during task startup');
       const fresh = this.options.agents.get(agent.agentId).record;
       this.options.metadata.saveAgent(fresh);
       agent = fresh;
@@ -647,15 +705,19 @@ export class ScheduleManager {
         await this.options.agents.remove(agent.agentId).catch(() => {});
         this.options.metadata.archiveAgent(failedRecord);
       }
-      const message = (error as Error).message;
-      this.db
-        .prepare(
-          'INSERT INTO scheduled_runs(id,task_id,status,started_at,finished_at,error) VALUES(?,?,?,?,?,?)'
-        )
-        .run(runId, task.id, 'error', startedAt, this.now(), message);
-      this.db
-        .prepare('UPDATE scheduled_tasks SET last_run_at=?, last_run_status=? WHERE id=?')
-        .run(startedAt, 'error', task.id);
+      if (!this.closed) {
+        const message = (error as Error).message;
+        this.db
+          .prepare(
+            'INSERT INTO scheduled_runs(id,task_id,status,started_at,finished_at,error) VALUES(?,?,?,?,?,?)'
+          )
+          .run(runId, task.id, 'error', startedAt, this.now(), message);
+        this.db
+          .prepare('UPDATE scheduled_tasks SET last_run_at=?, last_run_status=? WHERE id=?')
+          .run(startedAt, 'error', task.id);
+        this.emitRunFinished(task, runId);
+        void this.deliverNotification(task, runId, 'error', '', message);
+      }
       throw error;
     }
 
@@ -753,6 +815,13 @@ export class ScheduleManager {
         reply?.text ?? '',
         'Agent was stopped'
       );
+      return;
+    }
+    if (event.type === 'command_error') {
+      const reply = this.lastReply.get(agentId);
+      this.lastReply.delete(agentId);
+      const message = typeof event.message === 'string' ? event.message : 'Agent execution error';
+      this.finishRun(agentId, active.timedOut ? 'timed_out' : 'error', reply?.text ?? '', message);
     }
   }
 
@@ -814,23 +883,26 @@ export class ScheduleManager {
       );
     this.db.prepare('UPDATE scheduled_tasks SET last_run_status=? WHERE id=?').run(status, active.taskId);
 
-    // Archive the completed transient Agent out of the main sidebar so scheduled runs never flood the list;
-    // the JSONL session file and archived Markdown output stay intact and can be opened any time.
-    void this.archiveTransientAgent(agentId);
-
-    try {
-      const run = this.getRun(active.runId);
-      if (task && !this.closed) {
-        this.emitter.emit('event', {
-          type: 'run_finished',
-          taskId: task.id,
-          taskName: task.name,
-          run
-        } satisfies ScheduleEvent);
-      }
-    } catch {}
+    // Archive the completed transient Agent before emitting `run_finished` so connected UIs can
+    // reconcile their sidebar list cleanly without leaving a stale card behind.
+    void this.archiveTransientAgent(agentId).finally(() => {
+      if (task) this.emitRunFinished(task, active.runId);
+    });
 
     if (task) void this.deliverNotification(task, active.runId, status, output, error, outputFile);
+  }
+
+  private emitRunFinished(task: ScheduledTask, runId: string) {
+    if (this.closed) return;
+    try {
+      const run = this.getRun(runId);
+      this.emitter.emit('event', {
+        type: 'run_finished',
+        taskId: task.id,
+        taskName: task.name,
+        run
+      } satisfies ScheduleEvent);
+    } catch {}
   }
 
   private async archiveTransientAgent(agentId: string) {
@@ -900,7 +972,7 @@ export class ScheduleManager {
       .run(at, 'skipped', task.id);
   }
 
-  private validateInput(input: ScheduleTaskInput, _existing?: ScheduledTask) {
+  private validateInput(input: ScheduleTaskInput, existing?: ScheduledTask) {
     const name = typeof input.name === 'string' ? input.name.trim() : '';
     if (!name || name.length > 120 || /[\r\n]/.test(name))
       throw invalid('name must be a single line of 1-120 characters');
@@ -909,8 +981,15 @@ export class ScheduleManager {
     const scheduleKind = input.scheduleKind;
     const scheduleExpr = typeof input.scheduleExpr === 'string' ? input.scheduleExpr.trim() : '';
     if (!scheduleExpr) throw invalid('scheduleExpr is required');
-    validateScheduleExpression(scheduleKind, scheduleExpr, this.now());
     const enabled = input.enabled !== false;
+    const nextTrigger = validateScheduleExpression(scheduleKind, scheduleExpr, this.now());
+    const scheduleOrEnableChanged =
+      !existing ||
+      scheduleKind !== existing.scheduleKind ||
+      scheduleExpr !== existing.scheduleExpr ||
+      (enabled && !existing.enabled);
+    if (enabled && scheduleKind === 'once' && scheduleOrEnableChanged && !nextTrigger)
+      throw invalid('One-shot scheduleExpr must be a future ISO-8601 date/time');
     let workspaceId =
       typeof input.workspaceId === 'string' && input.workspaceId.trim()
         ? input.workspaceId.trim()
@@ -958,8 +1037,25 @@ export class ScheduleManager {
       input.notifyOrchestratorId.trim()
         ? input.notifyOrchestratorId.trim()
         : undefined;
-    if (notifyMode === 'orchestrator' && !notifyOrchestratorId)
-      throw invalid('notifyOrchestratorId is required when notifyMode is orchestrator');
+    if (notifyMode === 'orchestrator') {
+      if (!notifyOrchestratorId)
+        throw invalid('notifyOrchestratorId is required when notifyMode is orchestrator');
+      // Validate recipient when enabled or changing recipient, while still allowing disabling a task
+      // whose previous orchestrator was later archived.
+      const recipientChanged = !existing || notifyOrchestratorId !== existing.notifyOrchestratorId;
+      if (enabled || recipientChanged) {
+        let recipient: AgentRecord;
+        try {
+          recipient = this.options.agents.get(notifyOrchestratorId).record;
+        } catch {
+          throw Object.assign(new Error(`Orchestrator agent not found: ${notifyOrchestratorId}`), {
+            code: 'AGENT_NOT_FOUND'
+          });
+        }
+        if (recipient.profile !== 'orchestrator')
+          throw invalid(`Agent ${notifyOrchestratorId} is not an orchestrator`);
+      }
+    }
     return {
       name,
       enabled,

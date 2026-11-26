@@ -72,6 +72,7 @@ export class OrchestratorHub {
   private lastReply = new Map<string, {text: string; error?: string}>();
   /** Pending results waiting for debounce or for the orchestrator to become idle. */
   private pending = new Map<string, WatchResult[]>();
+  private deliveryRetries = new Map<string, number>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private delivering = new Map<string, Promise<void>>();
   private unsubscribe?: () => void;
@@ -97,6 +98,7 @@ export class OrchestratorHub {
     await Promise.allSettled([...this.delivering.values()]);
     this.watches.clear();
     this.pending.clear();
+    this.deliveryRetries.clear();
     this.lastReply.clear();
     this.emitter.removeAllListeners();
   }
@@ -164,25 +166,58 @@ export class OrchestratorHub {
       createdAt: Date.now()
     };
     this.watches.set(watch.id, watch);
+    this.notifyExistingDialogs(watch);
     this.emitWatches(orchestratorId);
     return this.viewOf(watch);
+  }
+
+  /** If the target already entered `waiting_for_user` before the watch was added, surface that dialog now. */
+  private notifyExistingDialogs(watch: OrchestratorWatch) {
+    try {
+      const snapshot = this.options.agents.snapshotState(watch.targetId);
+      const pendingDialog = snapshot.activity.dialogs[0];
+      if (snapshot.status === 'waiting_for_user' && pendingDialog && !watch.notifiedDialog) {
+        watch.notifiedDialog = true;
+        this.enqueueResult(
+          watch.orchestratorId,
+          this.buildResult(watch, 'waiting_for_user', undefined, pendingDialog.title)
+        );
+      }
+    } catch {}
   }
 
   /** Cancel one watch (by watchId or targetId) or all watches for an orchestrator. */
   unwatch(orchestratorId: string, targetOrWatchId?: string): number {
     let removed = 0;
+    const removedWatchIds = new Set<string>();
+    const removedTargets = new Set<string>();
     for (const [id, watch] of [...this.watches.entries()]) {
       if (watch.orchestratorId !== orchestratorId) continue;
       if (targetOrWatchId && id !== targetOrWatchId && watch.targetId !== targetOrWatchId) continue;
       this.watches.delete(id);
+      removedWatchIds.add(id);
+      removedTargets.add(watch.targetId);
       removed++;
     }
     if (!targetOrWatchId) {
       this.pending.delete(orchestratorId);
+      this.deliveryRetries.delete(orchestratorId);
       const timer = this.timers.get(orchestratorId);
       if (timer) clearTimeout(timer);
       this.timers.delete(orchestratorId);
     } else {
+      const queued = this.pending.get(orchestratorId);
+      if (queued?.length) {
+        const remaining = queued.filter(
+          item =>
+            !removedWatchIds.has(item.watchId) &&
+            item.watchId !== targetOrWatchId &&
+            !removedTargets.has(item.targetId) &&
+            item.targetId !== targetOrWatchId
+        );
+        if (remaining.length) this.pending.set(orchestratorId, remaining);
+        else this.pending.delete(orchestratorId);
+      }
       // Removing a member of a group may unblock the rest of the group if everyone left is already settled.
       this.flushReadyGroups(orchestratorId);
     }
@@ -256,10 +291,15 @@ export class OrchestratorHub {
     // Check if any active watch targets this Agent. Never cache replies for unwatched Agents so
     // completed runs never accumulate in memory.
     const matching = [...this.watches.values()].filter(w => w.targetId === agentId && !w.settled);
+    if (
+      (event.type === 'agent_settled' || event.type === 'agent_unloaded' || event.type === 'command_error') &&
+      !matching.length
+    ) {
+      this.lastReply.delete(agentId);
+      return;
+    }
     if (!matching.length) {
-      if (event.type === 'agent_start' || event.type === 'agent_settled' || event.type === 'agent_unloaded') {
-        this.lastReply.delete(agentId);
-      }
+      if (event.type === 'agent_start') this.lastReply.delete(agentId);
       return;
     }
 
@@ -309,8 +349,8 @@ export class OrchestratorHub {
       this.completeWatches(matching, 'stopped', undefined, 'Agent was stopped/unloaded');
       return;
     }
-    if (status === 'error' && event.type === 'extension_ui_notify' && event.notificationType === 'error') {
-      const msg = typeof event.message === 'string' ? event.message : 'Agent error';
+    if (event.type === 'command_error') {
+      const msg = typeof event.message === 'string' ? event.message : 'Agent execution error';
       this.lastReply.delete(agentId);
       this.completeWatches(matching, 'error', undefined, msg);
     }
@@ -449,9 +489,24 @@ export class OrchestratorHub {
     const message = formatNotification(batch, remaining);
     try {
       await this.options.agents.submitCommand(orchestratorId, 'prompt', message);
+      this.deliveryRetries.delete(orchestratorId);
     } catch (error) {
-      this.options.log?.(
-        `Orchestrator notification delivery to ${orchestratorId} failed: ${(error as Error).message}`
+      const code = (error as {code?: string}).code;
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const retries = this.deliveryRetries.get(orchestratorId) ?? 0;
+      if ((code === 'SESSION_BUSY' || code === 'AGENT_BUSY') && retries < 3) {
+        this.deliveryRetries.set(orchestratorId, retries + 1);
+        const current = this.pending.get(orchestratorId) ?? [];
+        this.pending.set(orchestratorId, [...batch, ...current]);
+        this.scheduleDelivery(orchestratorId, Math.max(this.debounceMs, 500));
+        return;
+      }
+      this.deliveryRetries.delete(orchestratorId);
+      this.options.log?.(`Orchestrator notification delivery to ${orchestratorId} failed: ${errMsg}`);
+      this.options.agents.notify(
+        orchestratorId,
+        `子 Agent 完成通知未能自动送达（${batch.map(b => b.targetName || b.targetId).join(', ')}）：${errMsg}`,
+        'error'
       );
     }
   }

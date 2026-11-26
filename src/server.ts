@@ -298,12 +298,14 @@ export class RemotePiServer {
         sessionName: record.sessionName,
         ...(this.sessionNamer ? {} : {setSessionName: applyName})
       });
-      this.mailNotifier?.handleAgentEvent(agentId, event.event, {
-        sessionName: record.sessionName,
-        workspaceLabel: record.workspaceId ? this.workspaces.get(record.workspaceId)?.label : undefined,
-        cwd: record.cwd
-      });
-      this.followUp.handleAgentEvent(agentId, event.event, {profile: record.profile});
+      if (!this.schedules.isScheduledAgent(agentId)) {
+        this.mailNotifier?.handleAgentEvent(agentId, event.event, {
+          sessionName: record.sessionName,
+          workspaceLabel: record.workspaceId ? this.workspaces.get(record.workspaceId)?.label : undefined,
+          cwd: record.cwd
+        });
+        this.followUp.handleAgentEvent(agentId, event.event, {profile: record.profile});
+      }
       if (
         ['message_end', 'agent_end', 'agent_settled', 'session_info_changed'].includes(
           String(event.event.type)
@@ -497,7 +499,7 @@ export class RemotePiServer {
     this.collabStallTimer = undefined;
     this.unsubscribeCollab?.();
     this.unsubscribeCollab = undefined;
-    this.schedules.stop();
+    await this.schedules.stop();
     await this.orchestratorHub.stop();
     await this.collabDispatcher.stop();
     this.collab.shutdown();

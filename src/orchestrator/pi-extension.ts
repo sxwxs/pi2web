@@ -185,7 +185,17 @@ export function createOrchestratorExtension(agentId: string, bridge: Orchestrato
           before: Type.Optional(
             Type.String({description: 'Item ID for loading an older page (from nextBefore)'})
           ),
-          itemId: Type.Optional(Type.String({description: 'Fetch full body of a single timeline item'})),
+          itemId: Type.Optional(Type.String({description: 'Fetch raw body slice of a single timeline item'})),
+          offset: Type.Optional(
+            Type.Integer({minimum: 0, description: 'Character offset when reading a long itemId body'})
+          ),
+          maxChars: Type.Optional(
+            Type.Integer({
+              minimum: 100,
+              maximum: 64000,
+              description: 'Max characters to return for itemId (default 16000)'
+            })
+          ),
           includeToolArgs: Type.Optional(Type.Boolean({description: 'Include tool call argument JSON'})),
           includeThinking: Type.Optional(
             Type.Boolean({description: 'Include thinking blocks (default false)'})

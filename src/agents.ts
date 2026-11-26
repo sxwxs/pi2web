@@ -672,14 +672,22 @@ export class AgentManager {
         // The sender already has its acknowledgement. Report execution errors through the existing
         // event stream rather than turning a delivered prompt into a failed send.
         const entry = this.agents.get(id);
-        if (entry)
+        if (entry) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
           this.publish(entry, {
             type: 'extension_ui_notify',
             notificationType: 'error',
-            message: error instanceof Error ? error.message : String(error)
+            message: errorMessage
           });
+          this.publish(entry, {type: 'command_error', message: errorMessage});
+        }
       });
     });
+  }
+  /** Publish a server-side notice onto an Agent's event stream (never throws if the Agent is gone). */
+  notify(id: string, message: string, notificationType: 'info' | 'warning' | 'error' = 'info') {
+    const entry = this.agents.get(id);
+    if (entry) this.publish(entry, {type: 'extension_ui_notify', notificationType, message});
   }
   async command(
     id: string,

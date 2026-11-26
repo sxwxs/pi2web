@@ -1,4 +1,4 @@
-import {existsSync} from 'node:fs';
+import {existsSync, realpathSync} from 'node:fs';
 import path from 'node:path';
 import {SessionManager} from '@earendil-works/pi-coding-agent';
 import type {AgentManager, AgentRecord} from '../agents.js';
@@ -75,6 +75,8 @@ export type ReadSessionInput = {
   limit?: number;
   before?: string;
   itemId?: string;
+  offset?: number;
+  maxChars?: number;
   includeToolArgs?: boolean;
   includeThinking?: boolean;
 };
@@ -188,16 +190,34 @@ export class OrchestratorService {
     const query = input.query?.trim() || '';
     const limit = Math.min(50, Math.max(1, Math.trunc(input.limit ?? 20) || 20));
     const lower = query.toLowerCase();
+    let cwdFilter: string | undefined;
 
-    // Refresh session index for targeted workspace/cwd (or every configured workspace root when none specified).
+    // Normalize cwd filter (supporting workspace-relative paths, symlinks, and partial prefixes) and
+    // refresh the session index only when the target resolves to an existing directory.
     if (input.workspaceId) {
       const ws = this.deps.workspaces.get(input.workspaceId);
       if (!ws) throw Object.assign(new Error('Workspace not found'), {code: 'WORKSPACE_NOT_FOUND'});
-      const targetCwd = input.cwd ? await this.deps.workspaces.resolve(ws, input.cwd) : ws.rootPath;
-      await this.deps.ensureSessionIndex(ws, targetCwd).catch(() => {});
+      if (input.cwd) {
+        const resolved = await this.deps.workspaces.resolve(ws, input.cwd).catch(() => undefined);
+        if (resolved) {
+          cwdFilter = resolved;
+          await this.deps.ensureSessionIndex(ws, resolved).catch(() => {});
+        } else {
+          cwdFilter = path.isAbsolute(input.cwd)
+            ? path.resolve(input.cwd)
+            : path.resolve(ws.rootPath, input.cwd);
+        }
+      } else {
+        await this.deps.ensureSessionIndex(ws, ws.rootPath).catch(() => {});
+      }
     } else if (input.cwd) {
       const matched = await this.deps.workspaces.matchDirectory(input.cwd).catch(() => undefined);
-      if (matched) await this.deps.ensureSessionIndex(matched.workspace, matched.cwd).catch(() => {});
+      if (matched) {
+        cwdFilter = matched.cwd;
+        await this.deps.ensureSessionIndex(matched.workspace, matched.cwd).catch(() => {});
+      } else {
+        cwdFilter = canonicalIfExists(input.cwd);
+      }
     } else {
       await Promise.allSettled(
         this.deps.workspaces.list().map(ws => this.deps.ensureSessionIndex(ws, ws.rootPath))
@@ -207,7 +227,7 @@ export class OrchestratorService {
     // 1. Live Agents (always freshest, including unloaded or newly named ones).
     const activeAgents = this.listAgents(callerId, {
       workspaceId: input.workspaceId,
-      cwd: input.cwd,
+      cwd: cwdFilter,
       includeSelf: false
     }).filter(agent => {
       if (!lower) return true;
@@ -219,12 +239,12 @@ export class OrchestratorService {
       );
     });
 
-    // 2. Indexed historical Pi sessions from SQLite.
-    const indexed = this.deps.metadata.searchSessions({
-      query: input.includeContent ? undefined : query || undefined,
+    // 2. Indexed historical Pi sessions matching metadata filters directly in SQL.
+    const sessions = this.deps.metadata.searchSessions({
+      query: query || undefined,
       workspaceId: input.workspaceId,
-      cwd: input.cwd,
-      limit: input.includeContent ? 60 : limit
+      cwd: cwdFilter,
+      limit
     });
 
     const contentMatches: Array<{
@@ -238,7 +258,13 @@ export class OrchestratorService {
     }> = [];
 
     if (input.includeContent && lower) {
-      // Scan bounded set of recent session files for message text matches.
+      // Separately fetch recent unfiltered rows for the bounded content scan so metadata results above
+      // are never truncated by the 60-row recency window.
+      const recentForScan = this.deps.metadata.searchSessions({
+        workspaceId: input.workspaceId,
+        cwd: cwdFilter,
+        limit: 60
+      });
       const seenFiles = new Set<string>();
       const candidates: Array<{
         id: string;
@@ -251,7 +277,7 @@ export class OrchestratorService {
       for (const agent of this.deps.agents.list()) {
         if (agent.agentId === callerId || !agent.sessionFile || seenFiles.has(agent.sessionFile)) continue;
         if (input.workspaceId && agent.workspaceId !== input.workspaceId) continue;
-        if (input.cwd && !agent.cwd.toLowerCase().startsWith(input.cwd.toLowerCase())) continue;
+        if (cwdFilter && !agent.cwd.toLowerCase().startsWith(cwdFilter.toLowerCase())) continue;
         seenFiles.add(agent.sessionFile);
         candidates.push({
           id: agent.sessionId,
@@ -262,7 +288,7 @@ export class OrchestratorService {
           messageCount: 0
         });
       }
-      for (const item of indexed) {
+      for (const item of recentForScan) {
         if (seenFiles.has(item.path)) continue;
         seenFiles.add(item.path);
         candidates.push(item);
@@ -280,21 +306,14 @@ export class OrchestratorService {
             messageCount: item.messageCount,
             snippet
           });
+        // Yield between files so large JSONL scans do not starve other HTTP/WS clients.
+        await new Promise<void>(resolve => setImmediate(resolve));
       }
     }
 
     return {
       agents: activeAgents.slice(0, limit),
-      sessions: (input.includeContent && lower
-        ? indexed.filter(
-            item =>
-              (item.name ?? '').toLowerCase().includes(lower) ||
-              item.cwd.toLowerCase().includes(lower) ||
-              item.firstMessage.toLowerCase().includes(lower) ||
-              item.id.toLowerCase().includes(lower)
-          )
-        : indexed
-      ).slice(0, limit),
+      sessions: sessions.slice(0, limit),
       ...(input.includeContent ? {contentMatches} : {})
     };
   }
@@ -337,14 +356,24 @@ export class OrchestratorService {
       const body = itemBody(timeline, input.itemId);
       if (body === undefined)
         throw Object.assign(new Error('Timeline item not found'), {code: 'TIMELINE_ITEM_NOT_FOUND'});
+      const offset = Math.max(0, Math.trunc(input.offset ?? 0) || 0);
+      const maxChars = Math.min(
+        64_000,
+        Math.max(100, Math.trunc(input.maxChars ?? MAX_ITEM_BODY_CHARS) || MAX_ITEM_BODY_CHARS)
+      );
+      const slice = body.slice(offset, offset + maxChars);
+      const nextOffset = offset + slice.length;
       return {
         sessionId,
         sessionName,
         cwd,
         status,
         itemId: input.itemId,
+        offset,
         totalLength: body.length,
-        body: clipSummaryField(body, MAX_ITEM_BODY_CHARS)
+        hasMore: nextOffset < body.length,
+        ...(nextOffset < body.length ? {nextOffset} : {}),
+        body: slice
       };
     }
 
@@ -535,6 +564,12 @@ export class OrchestratorService {
     if (input.action === 'list') return {watches: this.deps.orchestratorHub.listFor(callerId)};
     if (input.action === 'watch') {
       if (!input.agentId) throw invalid('agentId is required for watch');
+      const target = this.deps.agents.get(input.agentId).record;
+      if (!['starting', 'streaming', 'waiting_for_user', 'stopping'].includes(target.status)) {
+        throw invalid(
+          `Agent ${input.agentId} is currently ${target.status} (no active run to watch). Use pi2web_read_session to inspect its latest output or pi2web_send_message with notifyOnComplete=true.`
+        );
+      }
       const watch = this.deps.orchestratorHub.watch(callerId, input.agentId, {
         group: input.group,
         label: input.label
@@ -660,6 +695,15 @@ export class OrchestratorService {
 
   runScheduleNow(id: string) {
     return this.deps.schedules.runNow(id);
+  }
+}
+
+function canonicalIfExists(targetPath: string): string {
+  const resolved = path.resolve(targetPath);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
   }
 }
 

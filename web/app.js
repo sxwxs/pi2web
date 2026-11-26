@@ -378,11 +378,13 @@
     closeBackendSocket(backend);
     if (state.voiceAudio.backendId === backend.id) stopVoiceAudio();
     backendRegistry.deactivate(backend, status, error);
-    // Its advice and watches come back with the next subscribe_all.
+    // Its advice, watches, and schedule alerts come back on reconnect.
     for (const agentId of [...state.advice.keys()])
       if (splitResourceKey(agentId).backendId === backend.id) state.advice.delete(agentId);
     for (const agentId of [...state.watches.keys()])
       if (splitResourceKey(agentId).backendId === backend.id) state.watches.delete(agentId);
+    state.scheduleAlerts = state.scheduleAlerts.filter(alert => alert.backendId !== backend.id);
+    renderScheduleBadge();
     clearWorkspaceSelection(backend.id);
     clearAgentSelection(backend.id);
     clearTerminalSelection(backend.id);
@@ -3411,7 +3413,7 @@
       return;
     }
     if (message.type === 'schedule_event') {
-      handleScheduleEvent(message.event);
+      handleScheduleEvent(message.event, message.backendId);
       return;
     }
     if (message.type === 'agent_state') {
@@ -4183,8 +4185,9 @@
       const filtered = backendOf(state.backendFilter);
       if (filtered?.status === 'connected') return filtered;
     }
-    if (state.agent) {
-      const b = backendOf(state.agent.backendId);
+    const active = state.selectedKind === 'terminal' ? state.terminal : state.agent;
+    if (active) {
+      const b = backendOf(active.backendId);
       if (b?.status === 'connected') return b;
     }
     if (state.workspace) {
@@ -4294,9 +4297,19 @@
     }
   }
 
-  function handleScheduleEvent(event) {
+  function handleScheduleEvent(event, backendId) {
     if (!event || event.type !== 'run_finished') return;
     const run = event.run || {};
+    // Transient scheduled Agents are archived right before `run_finished` is emitted; drop any stale
+    // card from the sidebar immediately instead of leaving an unloaded card that 404s when clicked.
+    if (run.agentId && backendId) {
+      const backend = backendOf(backendId);
+      const compositeId = resourceKey(backendId, run.agentId);
+      if (backend && backend.agents.some(item => item.agentId === compositeId)) {
+        backend.agents = backend.agents.filter(item => item.agentId !== compositeId);
+        syncSessionLists();
+      }
+    }
     if (run.status === 'timed_out') {
       const msg = `定时任务「${event.taskName || event.taskId}」超时已中止：${run.error || '超出单次运行时间上限'}`;
       toast(msg);
@@ -4306,6 +4319,7 @@
         } catch {}
       }
       state.scheduleAlerts.push({
+        backendId: backendId || '',
         taskId: event.taskId,
         taskName: event.taskName,
         runId: run.id,
@@ -4335,8 +4349,6 @@
     if (!requireConnection()) return;
     const backend = targetBackend();
     if (!backend) return toast('没有已连接的 Backend');
-    state.scheduleAlerts = [];
-    renderScheduleBadge();
     let tasks = [],
       runs = [];
     const reloadData = async () => {
@@ -4352,6 +4364,11 @@
     } catch (error) {
       return toast(`读取定时任务失败：${error.message}`);
     }
+    // Clear only this backend's alerts, and only after its history actually loaded.
+    state.scheduleAlerts = state.scheduleAlerts.filter(
+      alert => alert.backendId && alert.backendId !== backend.id
+    );
+    renderScheduleBadge();
 
     const editTaskModal = async (existing = null) => {
       const workspaces = backend.workspaces || [];
@@ -4421,19 +4438,23 @@
           const enabled = el('input', {type: 'checkbox', checked: existing ? existing.enabled : true});
           enabledRow.append(enabled, document.createTextNode('启用此定时任务'));
           body.append(enabledRow);
-          return () => ({
-            name: name.value.trim(),
-            scheduleKind: kind.value,
-            scheduleExpr: expr.value.trim(),
-            // Explicit empty string clears an existing Workspace binding on PUT.
-            workspaceId: wsSelect.value || '',
-            relativeCwd: wsSelect.value ? relCwd.value.trim() || '.' : '',
-            timeoutSeconds: Math.max(0, Math.trunc(Number(timeoutInput.value) || 0)),
-            notifyMode: notifyMode.value,
-            notifyOrchestratorId: notifyMode.value === 'orchestrator' ? orchSelect.value || '' : '',
-            prompt: promptArea.value.trim(),
-            enabled: enabled.checked
-          });
+          return () => {
+            const rawTimeout = timeoutInput.value.trim();
+            const parsedTimeout = rawTimeout === '' ? 1800 : Math.trunc(Number(rawTimeout));
+            return {
+              name: name.value.trim(),
+              scheduleKind: kind.value,
+              scheduleExpr: expr.value.trim(),
+              // Explicit empty string clears an existing Workspace binding on PUT.
+              workspaceId: wsSelect.value || '',
+              relativeCwd: wsSelect.value ? relCwd.value.trim() || '.' : '',
+              timeoutSeconds: Number.isFinite(parsedTimeout) && parsedTimeout >= 0 ? parsedTimeout : 1800,
+              notifyMode: notifyMode.value,
+              notifyOrchestratorId: notifyMode.value === 'orchestrator' ? orchSelect.value || '' : '',
+              prompt: promptArea.value.trim(),
+              enabled: enabled.checked
+            };
+          };
         },
         existing ? '保存' : '创建'
       );

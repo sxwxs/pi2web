@@ -491,4 +491,90 @@ describe('orchestrator agents and tools', () => {
     expect(server.agents.list().some(a => a.sessionName === 'Doomed')).toBe(false);
     expect(server.metadata.listAgents().some(a => a.sessionName === 'Doomed')).toBe(false);
   });
+
+  it('rejects explicit watch on idle agent, surfaces existing dialog on watch, drops pending notice on unwatch, and slices long itemId bodies', async () => {
+    const {workspace, server, backends, call} = await setupServer();
+    const orch = (await call('POST', '/api/v1/agents', {profile: 'orchestrator'})).data;
+    const orchBackend = backends.get(orch.agentId)!.backend;
+    const worker = (
+      await call('POST', '/api/v1/agents', {
+        workspaceId: workspace.id,
+        relativeCwd: 'packages/api',
+        sessionName: 'API'
+      })
+    ).data;
+
+    // 1. Explicit watch rejects idle worker.
+    expect(() =>
+      server.orchestratorService.watchAgents(orch.agentId, {action: 'watch', agentId: worker.agentId})
+    ).toThrow(/no active run to watch/i);
+
+    // 2. Search with workspace-relative cwd and partial prefix works without failing.
+    const byRel = await server.orchestratorService.searchSessions(orch.agentId, {
+      workspaceId: workspace.id,
+      cwd: 'packages/api'
+    });
+    expect(byRel.agents.map(a => a.agentId)).toContain(worker.agentId);
+    const byPrefix = await server.orchestratorService.searchSessions(orch.agentId, {
+      workspaceId: workspace.id,
+      cwd: 'packages/ap'
+    });
+    expect(byPrefix.agents.map(a => a.agentId)).toContain(worker.agentId);
+
+    // 3. Long itemId body returns unmodified slices with offset/hasMore/nextOffset.
+    const longText = 'line1\n  indented   spaces\n' + 'X'.repeat(500);
+    await server.agents.command(worker.agentId, 'prompt', longText);
+    const page = await server.orchestratorService.readSession({agentId: worker.agentId, limit: 10});
+    const userItem = page.items!.find((i: any) => i.kind === 'user') as any;
+    const slice1 = await server.orchestratorService.readSession({
+      agentId: worker.agentId,
+      itemId: userItem.id,
+      offset: 0,
+      maxChars: 120
+    });
+    expect(slice1.hasMore).toBe(true);
+    expect(slice1.body).toBe(longText.slice(0, 120));
+    const slice2 = await server.orchestratorService.readSession({
+      agentId: worker.agentId,
+      itemId: userItem.id,
+      offset: slice1.nextOffset,
+      maxChars: 1000
+    });
+    expect(slice2.hasMore).toBe(false);
+    expect(`${slice1.body}${slice2.body}`).toBe(longText);
+
+    // 4. Adding a watch after a worker already entered waiting_for_user surfaces the existing dialog,
+    //    and unwatching while the orchestrator is busy purges that queued dialog notice.
+    const releaseOrch = orchBackend.holdNextTurn();
+    const orchRun = server.agents.command(orch.agentId, 'prompt', 'Busy orchestrator');
+    await vi.waitFor(() => expect(server.agents.get(orch.agentId).record.status).toBe('streaming'));
+
+    const releaseWorker = backends.get(worker.agentId)!.backend.holdNextTurn();
+    const workerRun = server.agents.command(worker.agentId, 'prompt', 'Need confirm');
+    await vi.waitFor(() => expect(server.agents.get(worker.agentId).record.status).toBe('streaming'));
+    backends.get(worker.agentId)!.backend.emitCustom({
+      type: 'extension_ui_request',
+      requestId: 'pre-dialog',
+      kind: 'confirm',
+      title: 'Existing dialog?'
+    });
+    await vi.waitFor(() => expect(server.agents.get(worker.agentId).record.status).toBe('waiting_for_user'));
+
+    const {watch} = server.orchestratorService.watchAgents(orch.agentId, {
+      action: 'watch',
+      agentId: worker.agentId
+    });
+    // Cancel the watch before the orchestrator finishes; queued dialog notification must also be purged.
+    server.orchestratorService.watchAgents(orch.agentId, {action: 'unwatch', watchId: watch!.id});
+    releaseOrch();
+    await orchRun;
+    await new Promise(r => setTimeout(r, 100));
+    expect(orchBackend.prompts).toHaveLength(1);
+
+    backends
+      .get(worker.agentId)!
+      .backend.emitCustom({type: 'extension_ui_response', requestId: 'pre-dialog'});
+    releaseWorker();
+    await workerRun;
+  });
 });
