@@ -1,6 +1,7 @@
 import {getAgentDir, parseFrontmatter} from '@earendil-works/pi-coding-agent';
 import {existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
+import {STARTER_AGENT_TEMPLATES} from './orchestrator/templates.js';
 
 /**
  * How a template's text is combined with Pi's system prompt.
@@ -152,8 +153,21 @@ export class AgentTemplateStore {
     rmSync(file);
   }
   snapshot(id: string): AgentTemplateSnapshot {
-    const {name, mode, systemPrompt} = this.get(id);
-    return {id, name, mode, systemPrompt};
+    try {
+      const {name, mode, systemPrompt} = this.get(id);
+      return {id, name, mode, systemPrompt};
+    } catch (error) {
+      const starter = STARTER_AGENT_TEMPLATES[id];
+      if (starter && (error as any).code === 'TEMPLATE_NOT_FOUND') {
+        return {
+          id,
+          name: String(starter.name ?? id),
+          mode: starter.mode === 'replace' ? 'replace' : 'append',
+          systemPrompt: String(starter.systemPrompt ?? '')
+        };
+      }
+      throw error;
+    }
   }
 }
 

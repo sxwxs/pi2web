@@ -14,6 +14,8 @@ export type AgentRouteContext = {
   metadata: MetadataStore;
   templates: AgentTemplateStore;
   workspaces: WorkspaceStore;
+  orchestratorDir: string;
+  onAgentRemoved?: (agentId: string) => void;
   voice?: VoiceManager;
   sottoStt: SottoSttService;
   sessionNamer?: SessionNamer;
@@ -38,6 +40,9 @@ export async function handleAgentRoutes(
     return true;
   };
   if (req.method === 'GET' && u.pathname === '/api/v1/agents/models') {
+    const profile = u.searchParams.get('profile') ?? '';
+    if (profile === 'orchestrator')
+      return send(200, {data: await ctx.agents.capabilityPreviewAt(ctx.orchestratorDir, 'orchestrator')});
     const workspaceId = u.searchParams.get('workspaceId') ?? '',
       relativeCwd = u.searchParams.get('relativeCwd') ?? '.';
     return send(200, {data: await ctx.agents.capabilityPreview(workspaceId, relativeCwd)});
@@ -56,29 +61,38 @@ export async function handleAgentRoutes(
   if (req.method === 'POST' && u.pathname === '/api/v1/agents') {
     const b = await ctx.body(),
       profile: AgentProfile = b.profile === undefined ? 'default' : b.profile;
-    if (profile !== 'default' && profile !== 'collab')
-      throw Object.assign(new Error('profile must be default or collab'), {code: 'INVALID_REQUEST'});
+    if (profile !== 'default' && profile !== 'collab' && profile !== 'orchestrator')
+      throw Object.assign(new Error('profile must be default, collab, or orchestrator'), {
+        code: 'INVALID_REQUEST'
+      });
     let sessionFile: string | undefined;
     if (b.sessionFile) {
-      const workspace = ctx.workspaces.get(b.workspaceId);
-      if (!workspace) throw Object.assign(new Error('Workspace not found'), {code: 'WORKSPACE_NOT_FOUND'});
-      const cwd = await ctx.workspaces.resolve(workspace, b.relativeCwd ?? '.');
-      await ctx.ensureSessionIndex(workspace, cwd);
-      if (!ctx.metadata.hasSession(cwd, b.sessionFile))
-        throw Object.assign(new Error('Session is not valid for cwd'), {code: 'SESSION_NOT_FOUND'});
-      sessionFile = b.sessionFile;
+      if (profile === 'orchestrator') {
+        if (!ctx.metadata.hasAnySession(b.sessionFile))
+          throw Object.assign(new Error('Session not found'), {code: 'SESSION_NOT_FOUND'});
+        sessionFile = b.sessionFile;
+      } else {
+        const workspace = ctx.workspaces.get(b.workspaceId);
+        if (!workspace) throw Object.assign(new Error('Workspace not found'), {code: 'WORKSPACE_NOT_FOUND'});
+        const cwd = await ctx.workspaces.resolve(workspace, b.relativeCwd ?? '.');
+        await ctx.ensureSessionIndex(workspace, cwd);
+        if (!ctx.metadata.hasSession(cwd, b.sessionFile))
+          throw Object.assign(new Error('Session is not valid for cwd'), {code: 'SESSION_NOT_FOUND'});
+        sessionFile = b.sessionFile;
+      }
     }
     if (b.templateId !== undefined && b.templateId !== null && typeof b.templateId !== 'string')
       throw Object.assign(new Error('templateId must be a string'), {code: 'INVALID_REQUEST'});
     // The template is copied now; later edits to the template file do not affect this Agent.
     const template = b.templateId ? ctx.templates.snapshot(b.templateId) : undefined;
-    const agent = await ctx.agents.create(
-      b.workspaceId,
-      b.relativeCwd ?? '.',
-      sessionFile,
-      profile,
-      template
-    );
+    const agent =
+      profile === 'orchestrator'
+        ? await ctx.agents.createStandalone(ctx.orchestratorDir, {
+            profile: 'orchestrator',
+            sessionFile,
+            template
+          })
+        : await ctx.agents.create(b.workspaceId, b.relativeCwd ?? '.', sessionFile, profile, template);
     try {
       if (b.model !== undefined) {
         if (!b.model || typeof b.model.provider !== 'string' || typeof b.model.modelId !== 'string')
@@ -111,6 +125,7 @@ export async function handleAgentRoutes(
     if (req.method === 'POST' && parts[4] === 'archive') {
       const record = await ctx.agents.archive(id);
       ctx.metadata.archiveAgent(record);
+      ctx.onAgentRemoved?.(id);
       return send(200, {data: {archived: true}});
     }
     if (req.method === 'GET' && parts[4] === 'state') return send(200, {data: await ctx.agents.state(id)});

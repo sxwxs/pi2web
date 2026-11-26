@@ -12,7 +12,9 @@
 <body>
 <header>
   <div class="brand"><img src="/icon.svg" alt="" width="32" height="32"><h1>Remote Pi</h1></div>
-  <a href="/collab.html" id="collabLink" title="多 Agent 协作看板" style="color:var(--blue)">协作</a>
+  <button id="openOrchestrator" type="button" title="新建或打开顶层总控 Agent（不绑定目录，可调度其他 Agent 与定时任务）">总控</button>
+  <button id="openSchedules" type="button" title="管理定时运行的 Agent 任务与历史记录">定时任务</button>
+  <a href="/collab.html" id="collabLink" title="多 Agent 协作看板（旧版）" style="color:var(--blue)">协作</a>
   <button id="openConfig" title="连接、通知与语音设置">配置</button>
   <span id="status" class="muted">未配对</span>
   <span id="serverInfo" class="muted"></span>
@@ -30,7 +32,7 @@
       </div>
     </section>
     <section id="agentsSection">
-      <div class="section-title"><h2>Agents &amp; Terminals</h2><span class="agent-create-actions"><button id="newAgent" title="新建 Agent" aria-label="新建 Agent">＋A</button><button id="newTerminal" title="新建 Terminal" aria-label="新建 Terminal">&gt;_</button></span></div>
+      <div class="section-title"><h2>Agents &amp; Terminals</h2><span class="agent-create-actions"><button id="newOrchestrator" title="新建顶层总控 Agent" aria-label="新建顶层总控 Agent">＋总控</button><button id="newAgent" title="新建 Agent" aria-label="新建 Agent">＋A</button><button id="newTerminal" title="新建 Terminal" aria-label="新建 Terminal">&gt;_</button></span></div>
       <div class="session-filter"><input id="sessionFilter" type="search" placeholder="筛选 Session（标题或路径，按 f）" aria-label="筛选 Session" autocomplete="off"><button id="clearSessionFilter" type="button" title="清空筛选" aria-label="清空筛选" hidden>×</button></div>
       <div id="agents"></div>
       <div id="agentListControls" class="list-controls"><label>每次加载 <select id="agentPageSize" aria-label="每次加载的 Session 数量"><option value="10" selected>10</option><option value="25">25</option><option value="50">50</option></select> 条</label><span id="agentListCount" class="muted"></span><button id="loadMoreAgents" type="button">加载更多</button></div>
@@ -63,6 +65,7 @@
     <div id="messages" aria-live="polite"><div class="empty">选择或创建 Agent 开始对话</div></div>
     <form id="prompt">
       <button type="button" id="jumpToLatest" title="回到最新输出并继续跟随" hidden>↓ 最新</button>
+      <div id="watchBar" hidden></div>
       <div id="activityBar" hidden></div>
       <div id="queueBar" hidden><span id="queueText"></span><div id="queueItems"></div><button type="button" id="queueClear" title="清空队列并把消息放回输入框">清空队列</button></div>
       <div id="adviceBar" hidden aria-live="polite"></div>

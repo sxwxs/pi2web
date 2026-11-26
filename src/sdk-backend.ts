@@ -22,13 +22,17 @@ import type {TimelineEntry} from './timeline.js';
 import {PERFORMANCE_ENTRY, SessionPerformanceTracker} from './session-performance.js';
 import {SafePause} from './safe-pause.js';
 
+import {createCollabExtension, type CollabToolBridge} from './collab/pi-extension.js';
+import {createOrchestratorExtension, type OrchestratorToolBridge} from './orchestrator/pi-extension.js';
+
 export type BackendOptions = {
   /** System prompt template copied onto the Agent at creation time. */
   template?: AgentTemplateSnapshot;
   /** Ignore SYSTEM.md / APPEND_SYSTEM.md and templates: Pi's built-in prompt, used for previews only. */
   piDefaultPrompt?: boolean;
+  /** In-process bridge for `profile=orchestrator` Agents. */
+  orchestratorBridge?: OrchestratorToolBridge;
 };
-import {createCollabExtension, type CollabToolBridge} from './collab/pi-extension.js';
 
 /** Older Pi builds resolved steer()/followUp() with undefined; treat anything but an explicit `handled` as queued. */
 const normalizeDisposition = (value: unknown): QueuedInputDisposition =>
@@ -70,13 +74,15 @@ export class SdkBackend implements AgentBackend {
     options: BackendOptions = {}
   ): Promise<SdkBackend> {
     const sessionManager = sessionFile ? SessionManager.open(sessionFile) : SessionManager.create(cwd);
-    const {template, piDefaultPrompt} = options;
-    // This factory is deliberately inline instead of auto-discovered: normal Pi and normal pi2web agents
-    // never load the collaboration tools or their collaboration-specific system guidance.
+    const {template, piDefaultPrompt, orchestratorBridge} = options;
+    // Both factories are deliberately inline instead of auto-discovered: normal Pi and normal pi2web
+    // agents never load collaboration or orchestrator tools and system guidance.
     const extensionFactories =
       profile === 'collab' && collabBridge
         ? [{name: 'pi2web-collab', factory: createCollabExtension(agentId, collabBridge)}]
-        : [];
+        : profile === 'orchestrator' && orchestratorBridge
+          ? [{name: 'pi2web-orchestrator', factory: createOrchestratorExtension(agentId, orchestratorBridge)}]
+          : [];
     // A template behaves like Pi's own prompt files: `replace` stands in for SYSTEM.md, `append` follows
     // APPEND_SYSTEM.md. `piDefaultPrompt` ignores both files to show what Pi itself would send.
     const systemPromptOverride = piDefaultPrompt
@@ -89,12 +95,15 @@ export class SdkBackend implements AgentBackend {
       : template?.mode === 'append'
         ? (base: string[]) => [...base, template.systemPrompt]
         : undefined;
+    // Orchestrator agents live in a neutral directory and must not inherit any project AGENTS.md.
+    const noContextFiles = profile === 'orchestrator';
     const resourceLoader =
-      extensionFactories.length || systemPromptOverride || appendSystemPromptOverride
+      extensionFactories.length || systemPromptOverride || appendSystemPromptOverride || noContextFiles
         ? new DefaultResourceLoader({
             cwd,
             agentDir: getAgentDir(),
             extensionFactories,
+            noContextFiles,
             systemPromptOverride,
             appendSystemPromptOverride
           })

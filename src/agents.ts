@@ -1,6 +1,8 @@
 import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
-import {relative as pathRelative} from 'node:path';
+import {mkdirSync} from 'node:fs';
+import {realpath, stat} from 'node:fs/promises';
+import path, {relative as pathRelative} from 'node:path';
 import type {WorkspaceStore} from './workspaces.js';
 import {createSdkBackend, type BackendOptions} from './sdk-backend.js';
 import type {AgentTemplateSnapshot} from './agent-templates.js';
@@ -341,9 +343,9 @@ export class MockBackend implements AgentBackend {
     this.emitter.removeAllListeners();
   }
 }
-export type AgentProfile = 'default' | 'collab';
+export type AgentProfile = 'default' | 'collab' | 'orchestrator';
 export type AgentRecord = AgentState & {
-  workspaceId: string;
+  workspaceId?: string;
   profile: AgentProfile;
   /** System prompt snapshot. Editable only before the first conversation message; inherited by forks. */
   template?: AgentTemplateSnapshot;
@@ -394,9 +396,14 @@ export class AgentManager {
     const ws = this.workspaces.get(workspaceId);
     if (!ws) throw Object.assign(new Error('Workspace not found'), {code: 'WORKSPACE_NOT_FOUND'});
     const cwd = await this.workspaces.resolve(ws, relativeCwd);
-    if (!(await import('node:fs/promises')).stat(cwd).then(s => s.isDirectory()))
-      throw new Error('cwd is not a directory');
+    if (!(await stat(cwd)).isDirectory()) throw new Error('cwd is not a directory');
     return cwd;
+  }
+  private async ensureDirectory(dir: string) {
+    mkdirSync(dir, {recursive: true});
+    const actual = await realpath(path.resolve(dir));
+    if (!(await stat(actual)).isDirectory()) throw new Error('cwd is not a directory');
+    return actual;
   }
   async create(
     workspaceId: string,
@@ -406,12 +413,45 @@ export class AgentManager {
     template?: AgentTemplateSnapshot
   ) {
     const cwd = await this.resolveCwd(workspaceId, relativeCwd);
+    return this.createAt(cwd, {workspaceId, sessionFile, profile, template});
+  }
+  /**
+   * Create a workspace-independent Agent (such as an orchestrator or a standalone scheduled run)
+   * rooted at a server-managed directory.
+   */
+  async createStandalone(
+    cwd: string,
+    options: {
+      profile?: AgentProfile;
+      sessionFile?: string;
+      template?: AgentTemplateSnapshot;
+      workspaceId?: string;
+    } = {}
+  ) {
+    const actual = await this.ensureDirectory(cwd);
+    return this.createAt(actual, {
+      workspaceId: options.workspaceId,
+      sessionFile: options.sessionFile,
+      profile: options.profile ?? 'orchestrator',
+      template: options.template
+    });
+  }
+  private async createAt(
+    cwd: string,
+    options: {
+      workspaceId?: string;
+      sessionFile?: string;
+      profile: AgentProfile;
+      template?: AgentTemplateSnapshot;
+    }
+  ) {
+    const {workspaceId, sessionFile, profile, template} = options;
     const id = `agent-${randomUUID()}`,
       backend = await this.factory(id, cwd, sessionFile, profile, template ? {template} : {}),
       now = new Date().toISOString();
     const record: AgentRecord = {
       ...(await backend.getState()),
-      workspaceId,
+      ...(workspaceId ? {workspaceId} : {}),
       profile,
       ...(template ? {template: {...template}} : {}),
       createdAt: now,
@@ -422,8 +462,13 @@ export class AgentManager {
   }
   /** Build a disposable session so the UI sees the models actually available for this project and its extensions. */
   async capabilityPreview(workspaceId: string, relativeCwd = '.') {
-    const cwd = await this.resolveCwd(workspaceId, relativeCwd),
-      backend = await this.factory(`preview-${randomUUID()}`, cwd);
+    const cwd = await this.resolveCwd(workspaceId, relativeCwd);
+    return this.capabilityPreviewAt(cwd);
+  }
+  /** Disposable model catalog for a server-managed directory (e.g. orchestrator without a Workspace). */
+  async capabilityPreviewAt(cwd: string, profile: AgentProfile = 'default') {
+    const actual = await this.ensureDirectory(cwd),
+      backend = await this.factory(`preview-${randomUUID()}`, actual, undefined, profile);
     try {
       return await backend.getCapabilities();
     } finally {
@@ -435,10 +480,14 @@ export class AgentManager {
    * `piDefaultPrompt` ignores SYSTEM.md / APPEND_SYSTEM.md to show Pi's built-in prompt.
    */
   async systemPromptPreview(workspaceId: string, relativeCwd = '.', options: BackendOptions = {}) {
-    const cwd = await this.resolveCwd(workspaceId, relativeCwd),
-      backend = await this.factory(`preview-${randomUUID()}`, cwd, undefined, 'default', options);
+    const cwd = await this.resolveCwd(workspaceId, relativeCwd);
+    return this.systemPromptPreviewAt(cwd, 'default', options);
+  }
+  async systemPromptPreviewAt(cwd: string, profile: AgentProfile = 'default', options: BackendOptions = {}) {
+    const actual = await this.ensureDirectory(cwd),
+      backend = await this.factory(`preview-${randomUUID()}`, actual, undefined, profile, options);
     try {
-      return {...(await backend.getSystemPrompt()), cwd};
+      return {...(await backend.getSystemPrompt()), cwd: actual};
     } finally {
       await backend.dispose();
     }
@@ -509,9 +558,14 @@ export class AgentManager {
   async restore(records: AgentRecord[]) {
     for (const saved of records) {
       try {
-        const ws = this.workspaces.get(saved.workspaceId);
-        if (!ws) continue;
-        const cwd = await this.workspaces.resolve(ws, pathRelative(ws.rootPath, saved.cwd));
+        let cwd: string;
+        if (saved.workspaceId) {
+          const ws = this.workspaces.get(saved.workspaceId);
+          if (!ws) continue;
+          cwd = await this.workspaces.resolve(ws, pathRelative(ws.rootPath, saved.cwd));
+        } else {
+          cwd = await this.ensureDirectory(saved.cwd);
+        }
         const record = {...saved, profile: saved.profile ?? 'default', cwd, status: 'unloaded' as const};
         this.agents.set(saved.agentId, {
           record,
@@ -618,14 +672,22 @@ export class AgentManager {
         // The sender already has its acknowledgement. Report execution errors through the existing
         // event stream rather than turning a delivered prompt into a failed send.
         const entry = this.agents.get(id);
-        if (entry)
+        if (entry) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
           this.publish(entry, {
             type: 'extension_ui_notify',
             notificationType: 'error',
-            message: error instanceof Error ? error.message : String(error)
+            message: errorMessage
           });
+          this.publish(entry, {type: 'command_error', message: errorMessage});
+        }
       });
     });
+  }
+  /** Publish a server-side notice onto an Agent's event stream (never throws if the Agent is gone). */
+  notify(id: string, message: string, notificationType: 'info' | 'warning' | 'error' = 'info') {
+    const entry = this.agents.get(id);
+    if (entry) this.publish(entry, {type: 'extension_ui_notify', notificationType, message});
   }
   async command(
     id: string,
@@ -797,7 +859,7 @@ export class AgentManager {
     const entry = this.get(id);
     this.assertCurrent(entry);
     if (
-      entry.record.profile !== 'default' ||
+      (entry.record.profile !== 'default' && entry.record.profile !== 'orchestrator') ||
       entry.record.status === 'stopped' ||
       entry.streaming ||
       entry.writes
@@ -897,14 +959,22 @@ export class AgentManager {
       this.assertCurrent(source, backend);
       if (!result.sessionFile)
         throw Object.assign(new Error('Session persistence is disabled'), {code: 'SESSION_NOT_PERSISTED'});
-      const ws = this.workspaces.get(source.record.workspaceId)!;
-      const agent = await this.create(
-        source.record.workspaceId,
-        pathRelative(ws.rootPath, source.record.cwd),
-        result.sessionFile,
-        source.record.profile,
-        source.record.template
-      );
+      if (source.record.workspaceId) {
+        const ws = this.workspaces.get(source.record.workspaceId)!;
+        const agent = await this.create(
+          source.record.workspaceId,
+          pathRelative(ws.rootPath, source.record.cwd),
+          result.sessionFile,
+          source.record.profile,
+          source.record.template
+        );
+        return {agent, selectedText: result.selectedText};
+      }
+      const agent = await this.createStandalone(source.record.cwd, {
+        sessionFile: result.sessionFile,
+        profile: source.record.profile,
+        template: source.record.template
+      });
       return {agent, selectedText: result.selectedText};
     });
   }

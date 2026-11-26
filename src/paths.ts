@@ -9,3 +9,7 @@ export const defaultDataDir = () => process.env.PI2WEB_DIR || path.join(homedir(
 export const METADATA_DB_FILE = 'pi2web.db';
 /** Shareable Agent templates: one Markdown file per template, see `agent-templates.ts`. */
 export const AGENT_TEMPLATES_DIR = 'agent-templates';
+/** Neutral working directory for workspace-independent orchestrator Agents. */
+export const ORCHESTRATOR_DIR = 'orchestrator';
+/** Per-task run history and working directories for scheduled Agents. */
+export const SCHEDULES_DIR = 'schedules';
