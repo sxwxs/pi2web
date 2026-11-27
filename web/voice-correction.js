@@ -108,8 +108,8 @@
    * `onWrite({start, end, text})` reports every composer edit, since it fires no input event.
    */
   class VoiceCorrection {
-    constructor({$, getAgent, getBackend, getContext, request, toast, onWrite}) {
-      Object.assign(this, {$, getAgent, getBackend, getContext, request, toast, onWrite});
+    constructor({$, getBackend, getContext, request, toast, onWrite}) {
+      Object.assign(this, {$, getBackend, getContext, request, toast, onWrite});
       this.session = null;
       $('voiceCorrectionToggle').onclick = () => this.toggle();
       $('voiceCorrectionClose').onclick = () => this.clear();
@@ -122,7 +122,6 @@
       this.session = {
         owner,
         agentId: owner.agentId,
-        agentBackendId: this.getAgent()?.backendId,
         backendId: backend.id,
         input: owner.input,
         at: owner.at,
@@ -142,7 +141,8 @@
     }
     clear(backendId) {
       const s = this.session;
-      if (backendId && s && s.backendId !== backendId && s.agentBackendId !== backendId) return;
+      // Only the correction backend matters; the Agent's backend only supplies optional context.
+      if (backendId && s && s.backendId !== backendId) return;
       clearTimeout(s?.timer);
       clearTimeout(s?.tick);
       s?.controller?.abort();

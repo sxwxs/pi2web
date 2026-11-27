@@ -129,30 +129,31 @@ describe('recorded audio transcription into the Web UI input', () => {
     expect(h.input.value).toBe('已有草稿');
     expect(h.correction.begin).not.toHaveBeenCalled();
   });
-  it.each(['local', 'remote'])(
-    'cancels a pending transcription when its %s backend is disconnected',
+  it('cancels a pending transcription when the local speech backend is disconnected', async () => {
+    const h = harness(),
+      done = h.transcribeVoice();
+    h.cancelVoiceRecording('local');
+    expect(h.fetcher.mock.calls[0][1].signal!.aborted).toBe(true);
+    h.requests[0].reject(new Error('aborted'));
+    await done;
+    expect(h.state.pendingTranscription).toBeNull();
+    expect(h.toast).not.toHaveBeenCalled();
+  });
+  // The recording's Agent only supplies correction context: losing its backend does not lose the audio.
+  it.each(['unrelated', 'remote'])(
+    'leaves the transcription running when the %s backend disconnects',
     async backendId => {
       const h = harness(),
         done = h.transcribeVoice();
+      const pending = h.state.pendingTranscription;
       h.cancelVoiceRecording(backendId);
-      expect(h.fetcher.mock.calls[0][1].signal!.aborted).toBe(true);
-      h.requests[0].reject(new Error('aborted'));
+      expect(h.state.pendingTranscription).toBe(pending);
+      expect(h.fetcher.mock.calls[0][1].signal!.aborted).toBe(false);
+      h.resolve(new Response(JSON.stringify({data: {text: '有效原文'}})));
       await done;
-      expect(h.state.pendingTranscription).toBeNull();
-      expect(h.toast).not.toHaveBeenCalled();
+      expect(h.input.value).toBe('已有草稿 有效原文');
     }
   );
-  it('leaves an unrelated backend transcription running', async () => {
-    const h = harness(),
-      done = h.transcribeVoice();
-    const pending = h.state.pendingTranscription;
-    h.cancelVoiceRecording('unrelated');
-    expect(h.state.pendingTranscription).toBe(pending);
-    expect(h.fetcher.mock.calls[0][1].signal!.aborted).toBe(false);
-    h.resolve(new Response(JSON.stringify({data: {text: '有效原文'}})));
-    await done;
-    expect(h.input.value).toBe('已有草稿 有效原文');
-  });
   it.each(['success', 'error'])(
     'an old %s does not change the new request or its microphone button',
     async outcome => {

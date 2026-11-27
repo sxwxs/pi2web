@@ -94,7 +94,9 @@ function harness({
     ${section('  function cancelVoiceRecording(', '  function clearAgentSelection(')}
     ${section('  const handledDrafts = new Set()', '  function handleAgentEvent(')}
     ${section('  async function navigateAgent(', '  const performanceTime =')}
-    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability, handleDraftEvent, navigateAgent})`,
+    ${section('  function restoreFailedSend(', '  async function selectAgent(')}
+    ${section('  function prependInput(', '  function showUncertainSend(')}
+    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability, handleDraftEvent, navigateAgent, restoreFailedSend})`,
     {
       state,
       location: {origin: backend.base},
@@ -194,6 +196,37 @@ describe('Web Sotto input', () => {
     expect(h.toast).not.toHaveBeenCalled();
     // The context for correction stays with the Agent where dictation started.
     expect(voice.agentId).toBe('a:one');
+  });
+
+  it('stops dictation before a failed send is put back ahead of its spot, keeping what was recognised', async () => {
+    const h = harness();
+    await h.start();
+    h.message({type: 'final', segment: 0, text: '第一句'});
+    h.message({type: 'partial', segment: 1, text: '第二'});
+    h.state.failedSends = new Map([['a:two', '被拒绝的消息']]);
+    h.api.restoreFailedSend('a:two');
+    expect(h.state.voiceStream).toBeNull();
+    expect(h.input.value).toBe('被拒绝的消息\ndraft 第一句');
+    expect(h.state.failedSends.size).toBe(0);
+    expect(h.toast).toHaveBeenCalledWith('之前发送失败的消息已放回输入框，语音输入已停止');
+    h.message({type: 'final', segment: 1, text: '第二句'});
+    expect(h.input.value).toBe('被拒绝的消息\ndraft 第一句');
+    // Without dictation it only puts the text back.
+    h.state.failedSends.set('a:three', '另一条');
+    h.api.restoreFailedSend('a:three');
+    expect(h.input.value).toBe('另一条\n被拒绝的消息\ndraft 第一句');
+    expect(h.toast).toHaveBeenLastCalledWith('之前发送失败的消息已放回输入框');
+  });
+
+  it('keeps dictating when only the dictating Agent backend disconnects', async () => {
+    const h = harness({remote: true});
+    await h.start();
+    h.api.cancelVoiceRecording('b');
+    expect(h.state.voiceStream.phase).toBe('recording');
+    h.message({type: 'final', segment: 0, text: '继续说'});
+    expect(h.input.value).toBe('draft 继续说');
+    h.api.cancelVoiceRecording('a'); // The local speech backend.
+    expect(h.state.voiceStream).toBeNull();
   });
 
   it('does not cancel dictation or correction when selecting an Agent', () => {
@@ -447,6 +480,20 @@ describe('Web Sotto input', () => {
     expect(h.state.voiceStream.phase).toBe('draining');
     expect(h.track.stop).toHaveBeenCalledOnce();
     h.api.cancelVoiceRecording();
+  });
+
+  it('keeps a recorded (non-live) take stoppable and visible without a selected Agent', async () => {
+    const h = harness();
+    const recorder = {state: 'recording', stop: vi.fn()};
+    h.state.mediaRecorder = recorder;
+    h.state.agent = null;
+    h.api.updateVoiceAvailability();
+    expect(h.state.voiceSttEnabled).toBe(false);
+    expect(h.mic.hidden).toBe(false);
+    await h.api.toggleVoiceInput();
+    expect(recorder.stop).toHaveBeenCalledOnce();
+    expect(h.mic.disabled).toBe(true);
+    expect(h.toast).not.toHaveBeenCalled();
   });
 
   it('keeps recording while text keeps arriving and stops after one minute without new text', async () => {

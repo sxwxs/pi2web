@@ -294,35 +294,24 @@
     $('workspaceHeading').textContent = 'Workspace';
   }
 
+  /**
+   * Voice input belongs to the shared composer and the local speech backend, not to an Agent: only that
+   * backend going away (or no `backendId`: everything) cancels it. The Agent's backend only supplies
+   * correction context, which falls back to none when it cannot be read.
+   */
   function cancelVoiceRecording(backendId) {
     state.voiceCorrection?.clear(backendId);
-    if (
-      state.voiceStream &&
-      (!backendId ||
-        splitResourceKey(state.voiceStream.agentId).backendId === backendId ||
-        state.voiceStream.transcribeBackendId === backendId)
-    )
+    if (state.voiceStream && (!backendId || state.voiceStream.transcribeBackendId === backendId))
       finishSottoStream(state.voiceStream, true);
     const pending = state.pendingTranscription;
-    if (
-      pending &&
-      (!backendId ||
-        splitResourceKey(pending.agentId).backendId === backendId ||
-        pending.transcribeBackendId === backendId)
-    ) {
+    if (pending && (!backendId || pending.transcribeBackendId === backendId)) {
       state.pendingTranscription = null;
       pending.controller.abort();
       $('voiceInput').textContent = '🎙';
       $('voiceInput').disabled = false;
       $('voiceInput').title = '开始语音输入（Space；输入框内 Alt+Shift+V）';
     }
-    if (!state.mediaAgentId) return;
-    if (
-      backendId &&
-      splitResourceKey(state.mediaAgentId).backendId !== backendId &&
-      state.mediaBackendId !== backendId
-    )
-      return;
+    if (!state.mediaAgentId || (backendId && state.mediaBackendId !== backendId)) return;
     clearTimeout(state.mediaTimer);
     if (state.mediaRecorder) {
       state.mediaRecorder.onstop = null;
@@ -467,7 +456,8 @@
     state.voiceEnabled = backends.some(backend => backend.voiceEnabled);
     state.voiceSttEnabled = Boolean(transcriptionBackend());
     $('voicePlayback').hidden = !state.voiceEnabled;
-    $('voiceInput').hidden = !state.voiceSttEnabled && !state.voiceStream;
+    // A recording in progress stays stoppable even when a new one could not be started.
+    $('voiceInput').hidden = !state.voiceSttEnabled && !state.voiceStream && !state.mediaRecorder;
     $('voiceInput').title = '开始语音输入（Space；输入框内 Alt+Shift+V）';
     if (!state.voiceEnabled) stopVoiceAudio();
     updateVoiceButton();
@@ -2041,6 +2031,17 @@
       toast(error.message);
     }
   }
+  /** A send the Agent rejected while another one was shown goes back to the top of the composer. */
+  function restoreFailedSend(agentId) {
+    const failed = state.failedSends.get(agentId);
+    if (failed === undefined) return;
+    state.failedSends.delete(agentId);
+    // Like Undo, rewriting the composer ahead of a live dictation's spot stops the dictation first.
+    const dictating = state.voiceStream;
+    if (dictating) finishSottoStream(dictating, true);
+    prependInput(failed);
+    toast(`之前发送失败的消息已放回输入框${dictating ? '，语音输入已停止' : ''}`);
+  }
   async function selectAgent(agent, openView = true) {
     // The composer is shared by all Agents, so dictation and its correction carry on across a switch.
     state.selectedKind = 'agent';
@@ -2049,12 +2050,7 @@
     state.agent = agent;
     shortcuts.noteSelection(listKey('agent', agent.agentId));
     updateVoiceAvailability();
-    const failed = state.failedSends.get(agent.agentId);
-    if (failed !== undefined) {
-      state.failedSends.delete(agent.agentId);
-      prependInput(failed);
-      toast('之前发送失败的消息已放回输入框');
-    }
+    restoreFailedSend(agent.agentId);
     localStorage.rpAgentId = agent.agentId;
     localStorage.rpSelectedKind = 'agent';
     showAgentView();
@@ -3244,10 +3240,6 @@
   }
   async function toggleVoiceInput() {
     if (state.voiceStream) return stopSottoStream(state.voiceStream);
-    if ($('voiceInput').disabled) return;
-    if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
-    if (!state.agent) return toast('请先选择 Agent');
-    if (transcriptionBackend()?.statusInfo?.sottoStt?.enabled) return startSottoStream();
     if (state.mediaRecorder) {
       if (state.mediaRecorder.state === 'recording') {
         $('voiceInput').disabled = true;
@@ -3255,6 +3247,10 @@
       }
       return;
     }
+    if ($('voiceInput').disabled) return;
+    if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
+    if (!state.agent) return toast('请先选择 Agent');
+    if (transcriptionBackend()?.statusInfo?.sottoStt?.enabled) return startSottoStream();
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder)
       return toast('当前浏览器不支持麦克风录音');
     try {
@@ -5531,7 +5527,6 @@
   };
   state.voiceCorrection = new window.RemotePiVoiceCorrection.VoiceCorrection({
     $,
-    getAgent: () => state.agent,
     getBackend: backendOf,
     getContext: (agentId, options) => requestAgent(agentId, '/voice-correction-context', options),
     request: requestBackend,
