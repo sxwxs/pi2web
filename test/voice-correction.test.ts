@@ -75,14 +75,14 @@ describe('voice transcript correction', () => {
       expect(result).toEqual({
         original,
         corrected: '更新最新主分支，并修正语音识别结果。',
-        model: 'gpt-6.1-terra',
+        model: 'gpt-6-luna',
         contextUsed: false
       });
       const [url, options] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
       expect(url).toBe('http://localhost:8313/v1/chat/completions');
       expect(options.headers).toMatchObject({authorization: 'Bearer secret'});
       const body = JSON.parse(String(options.body));
-      expect(body.model).toBe('gpt-6.1-terra');
+      expect(body.model).toBe('gpt-6-luna');
       expect(body.stream).toBe(false);
       expect(body.temperature).toBeUndefined();
       expect(body.messages[0].content).toContain('不要猜测');
@@ -249,7 +249,7 @@ describe('authenticated voice correction API', () => {
       );
     const saved = await call('PUT', {enabled: true, includeContext: true});
     expect(saved.status).toBe(200);
-    expect(saved.body.data.settings.model).toBe('gpt-6.1-terra');
+    expect(saved.body.data.settings.model).toBe('gpt-6-luna');
     expect(saved.body.data.settings.includeContext).toBe(true);
     expect(JSON.stringify(saved.body)).not.toContain('secret');
     expect((await call('POST', {text: '原文'})).body.data.original).toBe('原文');

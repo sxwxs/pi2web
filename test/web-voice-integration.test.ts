@@ -87,16 +87,21 @@ describe('recorded audio transcription into the Web UI input', () => {
     expect(h.correction.end).toHaveBeenCalledWith(owner, '识别原文');
     expect(h.fetcher.mock.calls[0][0]).toBe('http://localhost:11318/api/v1/transcribe');
   });
-  it('does not insert or correct a late transcription after switching Agent', async () => {
+  it('inserts and corrects a transcription that arrives after switching Agent, in the shared composer', async () => {
     const h = harness(),
       done = h.transcribeVoice();
     h.state.agent = {agentId: 'remote:other'};
     h.resolve(new Response(JSON.stringify({data: {text: '晚到原文'}})));
     await done;
-    expect(h.input.value).toBe('已有草稿');
-    expect(h.correction.begin).not.toHaveBeenCalled();
+    expect(h.fetcher.mock.calls[0][1].signal!.aborted).toBe(false);
+    expect(h.input.value).toBe('已有草稿 晚到原文');
+    const owner = h.correction.begin.mock.calls[0][0];
+    // The correction context stays with the Agent the audio was recorded for.
+    expect(owner).toMatchObject({agentId: 'remote:agent', at: 5});
+    expect(h.correction.end).toHaveBeenCalledWith(owner, '晚到原文');
+    expect(h.toast).toHaveBeenCalledWith('语音已转换为文字');
   });
-  it('does not restore cancelled text or a preview after switching away and back to the same Agent', async () => {
+  it('does not restore cancelled text or a preview, even back on the same Agent', async () => {
     const h = harness(),
       done = h.transcribeVoice();
     const signal = h.fetcher.mock.calls[0][1].signal!;
