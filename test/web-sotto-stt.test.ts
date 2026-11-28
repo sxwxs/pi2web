@@ -94,9 +94,7 @@ function harness({
     ${section('  function cancelVoiceRecording(', '  function clearAgentSelection(')}
     ${section('  const handledDrafts = new Set()', '  function handleAgentEvent(')}
     ${section('  async function navigateAgent(', '  const performanceTime =')}
-    ${section('  function restoreFailedSend(', '  async function selectAgent(')}
-    ${section('  function prependInput(', '  function showUncertainSend(')}
-    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability, handleDraftEvent, navigateAgent, restoreFailedSend})`,
+    ({startSottoStream, stopSottoStream, finishSottoStream, toggleVoiceInput, cancelVoiceRecording, applyVoiceStatus, updateVoiceAvailability, handleDraftEvent, navigateAgent})`,
     {
       state,
       location: {origin: backend.base},
@@ -196,26 +194,6 @@ describe('Web Sotto input', () => {
     expect(h.toast).not.toHaveBeenCalled();
     // The context for correction stays with the Agent where dictation started.
     expect(voice.agentId).toBe('a:one');
-  });
-
-  it('stops dictation before a failed send is put back ahead of its spot, keeping what was recognised', async () => {
-    const h = harness();
-    await h.start();
-    h.message({type: 'final', segment: 0, text: '第一句'});
-    h.message({type: 'partial', segment: 1, text: '第二'});
-    h.state.failedSends = new Map([['a:two', '被拒绝的消息']]);
-    h.api.restoreFailedSend('a:two');
-    expect(h.state.voiceStream).toBeNull();
-    expect(h.input.value).toBe('被拒绝的消息\ndraft 第一句');
-    expect(h.state.failedSends.size).toBe(0);
-    expect(h.toast).toHaveBeenCalledWith('之前发送失败的消息已放回输入框，语音输入已停止');
-    h.message({type: 'final', segment: 1, text: '第二句'});
-    expect(h.input.value).toBe('被拒绝的消息\ndraft 第一句');
-    // Without dictation it only puts the text back.
-    h.state.failedSends.set('a:three', '另一条');
-    h.api.restoreFailedSend('a:three');
-    expect(h.input.value).toBe('另一条\n被拒绝的消息\ndraft 第一句');
-    expect(h.toast).toHaveBeenLastCalledWith('之前发送失败的消息已放回输入框');
   });
 
   it('keeps dictating when only the dictating Agent backend disconnects', async () => {

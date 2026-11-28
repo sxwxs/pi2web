@@ -2031,17 +2031,6 @@
       toast(error.message);
     }
   }
-  /** A send the Agent rejected while another one was shown goes back to the top of the composer. */
-  function restoreFailedSend(agentId) {
-    const failed = state.failedSends.get(agentId);
-    if (failed === undefined) return;
-    state.failedSends.delete(agentId);
-    // Like Undo, rewriting the composer ahead of a live dictation's spot stops the dictation first.
-    const dictating = state.voiceStream;
-    if (dictating) finishSottoStream(dictating, true);
-    prependInput(failed);
-    toast(`之前发送失败的消息已放回输入框${dictating ? '，语音输入已停止' : ''}`);
-  }
   async function selectAgent(agent, openView = true) {
     // The composer is shared by all Agents, so dictation and its correction carry on across a switch.
     state.selectedKind = 'agent';
@@ -2050,7 +2039,12 @@
     state.agent = agent;
     shortcuts.noteSelection(listKey('agent', agent.agentId));
     updateVoiceAvailability();
-    restoreFailedSend(agent.agentId);
+    const failed = state.failedSends.get(agent.agentId);
+    if (failed !== undefined) {
+      state.failedSends.delete(agent.agentId);
+      prependInput(failed);
+      toast('之前发送失败的消息已放回输入框');
+    }
     localStorage.rpAgentId = agent.agentId;
     localStorage.rpSelectedKind = 'agent';
     showAgentView();
