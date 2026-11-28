@@ -14,7 +14,8 @@ const deferred = () => {
 const document = {createElement: (tagName: string) => ({tagName, textContent: ''})};
 const loadModule = () => {
   const window: any = {};
-  runInNewContext(source, {window, document, setTimeout, clearTimeout, AbortController, AbortSignal});
+  // Date is passed in so that fake timers also move the clock the module reads.
+  runInNewContext(source, {window, document, setTimeout, clearTimeout, AbortController, AbortSignal, Date});
   return window.RemotePiVoiceCorrection;
 };
 /** The diff box as text: [-removed] and {+added}. */
@@ -65,7 +66,7 @@ function harness({enabled = true, remote = false, includeContext = false} = {}) 
       }
     }
   };
-  let agent = {agentId: remote ? 'remote:agent' : 'local:agent', backendId: remote ? 'remote' : 'local'};
+  const agent = {agentId: remote ? 'remote:agent' : 'local:agent', backendId: remote ? 'remote' : 'local'};
   const owner = {agentId: agent.agentId, transcribeBackendId: backend.id, input, at: input.value.length};
   const requests: ReturnType<typeof deferred>[] = [];
   const request = vi.fn(() => {
@@ -78,7 +79,6 @@ function harness({enabled = true, remote = false, includeContext = false} = {}) 
     onWrite = vi.fn();
   const correction = new (loadModule().VoiceCorrection)({
     $,
-    getAgent: () => agent,
     getBackend: () => backend,
     getContext,
     request,
@@ -104,10 +104,7 @@ function harness({enabled = true, remote = false, includeContext = false} = {}) 
     backend,
     observe,
     diff: () => shown($('voiceCorrectionDiff').children),
-    toggle: () => $('voiceCorrectionToggle'),
-    switchAgent: () => {
-      agent = {agentId: 'other:agent', backendId: 'other'};
-    }
+    toggle: () => $('voiceCorrectionToggle')
   };
 }
 
@@ -375,17 +372,13 @@ describe('voice correction preview and acceptance', () => {
     expect(h.input.value).toBe('已有草稿 修正');
   });
 
-  it('cancels a dismissed preview, a changed backend configuration, and a switched Agent', async () => {
-    for (const action of ['dismiss', 'settings', 'agent']) {
+  it('cancels a dismissed preview and a changed backend configuration', async () => {
+    for (const action of ['dismiss', 'settings']) {
       const h = harness();
       h.observe('原文');
       h.correction.end(h.owner, '原文');
       if (action === 'dismiss') h.correction.clear();
-      else if (action === 'settings') h.correction.configure(h.backend);
-      else {
-        h.switchAgent();
-        h.correction.clear();
-      }
+      else h.correction.configure(h.backend);
       expect((h.request.mock.calls[0] as any)[2].signal.aborted).toBe(true);
       h.requests[0].resolve({corrected: '晚到的结果'});
       await vi.advanceTimersByTimeAsync(0);
@@ -394,12 +387,52 @@ describe('voice correction preview and acceptance', () => {
     }
   });
 
-  it('does not clear a local correction just because an unrelated backend disconnects', () => {
+  // The module never looks at the selected Agent, so switching Agents cannot cancel or redirect it.
+  it('corrects with the dictating Agent context in the shared composer, keeping restore and retry', async () => {
+    const h = harness({includeContext: true});
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.getContext.mock.calls[0][0]).toBe(h.owner.agentId);
+    expect(h.$('voiceCorrectionPanel').hidden).toBe(false);
+    expect((h.request.mock.calls[0] as any)[2].signal.aborted).toBe(false);
+    h.requests[0].resolve({corrected: '修正'});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.input.value).toBe('已有草稿 修正');
+    expect(h.toggle()).toMatchObject({textContent: '恢复原文', disabled: false});
+    h.correction.toggle();
+    expect(h.input.value).toBe('已有草稿 原文');
+    expect(h.$('voiceCorrectionRetry').disabled).toBe(false);
+    h.$('voiceCorrectionRetry').onclick();
+    await vi.advanceTimersByTimeAsync(0);
+    h.requests[1].resolve({corrected: '再次修正'});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.input.value).toBe('已有草稿 再次修正');
+    h.correction.clear();
+  });
+
+  it('shows how long the model has been running and stops counting once it answers', async () => {
+    const h = harness();
+    h.observe('原文');
+    h.correction.end(h.owner, '原文');
+    expect(h.$('voiceCorrectionStatus').textContent).toMatch(/^正在调用模型纠错… /);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.$('voiceCorrectionStatus').textContent).toMatch(/^正在调用模型纠错…（3 秒）/);
+    h.requests[0].resolve({corrected: '修正'});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.$('voiceCorrectionStatus').textContent).not.toContain('秒');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('is cancelled only when its correction backend disconnects, not the dictating Agent backend', () => {
     const h = harness({remote: true});
     h.observe('原文');
     h.correction.clear('unrelated');
     expect(h.$('voiceCorrectionPanel').hidden).toBe(false);
+    // Without the Agent's backend the context cannot be read, and correction goes on without it.
     h.correction.clear('remote');
+    expect(h.$('voiceCorrectionPanel').hidden).toBe(false);
+    h.correction.clear('local');
     expect(h.$('voiceCorrectionPanel').hidden).toBe(true);
   });
 });

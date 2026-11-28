@@ -102,12 +102,14 @@
   /**
    * A single dictation's correction. Once dictation has stopped, a correction replaces the dictated
    * text in the composer, but only while that spot still holds exactly the text put there by
-   * dictation or by this panel: whatever the user typed there wins. Nothing is ever sent.
+   * dictation or by this panel: whatever the user typed there wins. Nothing is ever sent. The composer
+   * is shared by all Agents, so the correction follows it across Agent switches; the context it reads
+   * is still the Agent's where dictation started.
    * `onWrite({start, end, text})` reports every composer edit, since it fires no input event.
    */
   class VoiceCorrection {
-    constructor({$, getAgent, getBackend, getContext, request, toast, onWrite}) {
-      Object.assign(this, {$, getAgent, getBackend, getContext, request, toast, onWrite});
+    constructor({$, getBackend, getContext, request, toast, onWrite}) {
+      Object.assign(this, {$, getBackend, getContext, request, toast, onWrite});
       this.session = null;
       $('voiceCorrectionToggle').onclick = () => this.toggle();
       $('voiceCorrectionClose').onclick = () => this.clear();
@@ -120,7 +122,6 @@
       this.session = {
         owner,
         agentId: owner.agentId,
-        agentBackendId: this.getAgent()?.backendId,
         backendId: backend.id,
         input: owner.input,
         at: owner.at,
@@ -133,13 +134,17 @@
         status: 'waiting',
         requestText: null,
         controller: null,
-        timer: null
+        timer: null,
+        // Re-renders the waiting time while a request is pending.
+        tick: null
       };
     }
     clear(backendId) {
       const s = this.session;
-      if (backendId && s && s.backendId !== backendId && s.agentBackendId !== backendId) return;
+      // Only the correction backend matters; the Agent's backend only supplies optional context.
+      if (backendId && s && s.backendId !== backendId) return;
       clearTimeout(s?.timer);
+      clearTimeout(s?.tick);
       s?.controller?.abort();
       this.session = null;
       this.$('voiceCorrectionPanel').hidden = true;
@@ -184,6 +189,7 @@
       s.controller = controller;
       s.requestText = text;
       s.status = 'analyzing';
+      s.startedAt = Date.now();
       s.contextRequested = !!this.getBackend(s.backendId)?.statusInfo?.voiceCorrection?.includeContext;
       s.contextUsed = false;
       s.contextWarning = '';
@@ -230,7 +236,7 @@
     /** Puts `text` where this session's text is. False when the user has changed that spot. */
     replace(s, text) {
       if (text === s.current) return true;
-      if (this.getAgent()?.agentId !== s.agentId || !this.matches(s)) return false;
+      if (!this.matches(s)) return false;
       const input = s.input,
         start = s.at,
         end = s.at + s.current.length,
@@ -249,14 +255,7 @@
     /** Switches the dictated spot between the correction and the original. Never focuses the composer. */
     toggle() {
       const s = this.session;
-      if (
-        !s ||
-        s.recording ||
-        s.status === 'analyzing' ||
-        s.corrected === null ||
-        this.getAgent()?.agentId !== s.agentId
-      )
-        return;
+      if (!s || s.recording || s.status === 'analyzing' || s.corrected === null) return;
       // Recheck on click: programmatic edits can bypass the input event.
       if (this.matches(s)) this.replace(s, s.current === s.corrected ? s.original : s.corrected);
       // An edited correction cannot be restored, but any other correction can still be appended.
@@ -291,10 +290,11 @@
     render() {
       const s = this.session,
         $ = this.$;
-      $('voiceCorrectionPanel').hidden = !s?.original || this.getAgent()?.agentId !== s?.agentId;
+      $('voiceCorrectionPanel').hidden = !s?.original;
       if (!s) return;
       this.renderDiff(s);
       const busy = s.status === 'analyzing',
+        waited = busy ? Math.floor((Date.now() - s.startedAt) / 1000) : 0,
         matches = this.matches(s),
         changed = s.corrected !== null && s.corrected !== s.original,
         applied = changed && s.current === s.corrected,
@@ -312,7 +312,7 @@
       const context = s.contextUsed ? ' 已结合截断的用户/AI消息。' : ' 未使用会话上下文。';
       $('voiceCorrectionStatus').textContent =
         (busy
-          ? '正在调用模型纠错…'
+          ? `正在调用模型纠错…${waited ? `（${waited} 秒）` : ''}`
           : s.status === 'error'
             ? `纠错失败：${s.error}；${applied ? '输入框保留之前的修正' : '原文已保留'}，可重试或手动修改。`
             : s.status !== 'ready'
@@ -330,6 +330,8 @@
           : changed && !applied && !matches
             ? ' 输入框已修改，采用时将追加而不覆盖。'
             : ' 不会自动发送。');
+      clearTimeout(s.tick);
+      if (busy) s.tick = setTimeout(() => this.session === s && this.render(), 1000);
     }
   }
   window.RemotePiVoiceCorrection = {VoiceCorrection, diffChars};

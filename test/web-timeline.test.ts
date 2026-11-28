@@ -145,7 +145,7 @@ function setup(olderPages: any[] = []) {
     renderTranscriptEvent = vi.fn(),
     showUncertainSend = vi.fn();
   const api = runInNewContext(
-    `${timelineSource}\n({loadTimeline, handleDetail, addCard, refreshToolCards, followLatest, onMessagesScroll})`,
+    `${timelineSource}\n({loadTimeline, handleDetail, addCard, refreshToolCards, followLatest, onMessagesScroll, onMessagesResize})`,
     {
       state,
       $: (id: string) => (id === 'jumpToLatest' ? jump : messages),
@@ -397,10 +397,17 @@ describe('following the newest output', () => {
     ui.messages.scrollHeight = 1000;
     ui.open([user]);
     ui.onMessagesScroll();
+    ui.onMessagesResize();
     // The reader scrolls; the browser then reports it.
     const scrollTo = (top: number) => {
       ui.messages.scrollTop = top;
       ui.onMessagesScroll();
+    };
+    /** The composer grows by `by` pixels (shrinks when negative): the browser clamps, then reports it. */
+    const composer = (by: number) => {
+      ui.messages.clientHeight -= by;
+      ui.messages.scrollTop = ui.messages.scrollTop;
+      ui.onMessagesResize();
     };
     const grow = (height = 300) => (ui.messages.scrollHeight += height);
     const streamed = async (delta: string) => {
@@ -408,8 +415,38 @@ describe('following the newest output', () => {
       ui.detail({type: 'delta', kind: 'text', delta});
       await new Promise(resolve => setTimeout(resolve, 0));
     };
-    return {...ui, scrollTo, grow, streamed};
+    return {...ui, scrollTo, composer, grow, streamed};
   };
+
+  it('pushes a following transcript up when the composer grows, instead of hiding its end', () => {
+    const ui = opened();
+    expect(ui.messages.scrollTop).toBe(600);
+    ui.composer(150); // E.g. the voice correction panel opens below a finished answer.
+    expect(ui.messages.scrollTop).toBe(750);
+    expect(ui.state.followOutput).toBe(true);
+    ui.composer(-150);
+    expect(ui.messages.scrollTop).toBe(600);
+    expect(ui.state.followOutput).toBe(true);
+  });
+
+  it('keeps the bottom line of a scrolled-up reader in view when the composer grows', () => {
+    const ui = opened();
+    ui.scrollTo(200);
+    ui.composer(150);
+    expect(ui.messages.scrollTop).toBe(350);
+    expect(ui.state.followOutput).toBe(false);
+    ui.composer(-150); // Shrinking only reveals more below.
+    expect(ui.messages.scrollTop).toBe(350);
+  });
+
+  it('leaves a scrolled-up reader in place when a hidden transcript is shown again', () => {
+    const ui = opened();
+    ui.scrollTo(200);
+    ui.composer(400); // Hidden: no height.
+    ui.messages.scrollTop = 200; // Shown again where it was.
+    ui.composer(-400);
+    expect(ui.messages.scrollTop).toBe(200);
+  });
 
   it('keeps to the end while streaming and shows no jump button', async () => {
     const ui = opened();

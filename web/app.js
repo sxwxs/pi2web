@@ -63,6 +63,7 @@
     // Whether the transcript keeps to its newest output; see followLatest.
     followOutput: true,
     messagesScrollTop: 0,
+    messagesHeight: 0,
     commands: [],
     commandsAgentId: null,
     commandFiltered: [],
@@ -293,35 +294,24 @@
     $('workspaceHeading').textContent = 'Workspace';
   }
 
+  /**
+   * Voice input belongs to the shared composer and the local speech backend, not to an Agent: only that
+   * backend going away (or no `backendId`: everything) cancels it. The Agent's backend only supplies
+   * correction context, which falls back to none when it cannot be read.
+   */
   function cancelVoiceRecording(backendId) {
     state.voiceCorrection?.clear(backendId);
-    if (
-      state.voiceStream &&
-      (!backendId ||
-        splitResourceKey(state.voiceStream.agentId).backendId === backendId ||
-        state.voiceStream.transcribeBackendId === backendId)
-    )
+    if (state.voiceStream && (!backendId || state.voiceStream.transcribeBackendId === backendId))
       finishSottoStream(state.voiceStream, true);
     const pending = state.pendingTranscription;
-    if (
-      pending &&
-      (!backendId ||
-        splitResourceKey(pending.agentId).backendId === backendId ||
-        pending.transcribeBackendId === backendId)
-    ) {
+    if (pending && (!backendId || pending.transcribeBackendId === backendId)) {
       state.pendingTranscription = null;
       pending.controller.abort();
       $('voiceInput').textContent = '🎙';
       $('voiceInput').disabled = false;
       $('voiceInput').title = '开始语音输入（Space；输入框内 Alt+Shift+V）';
     }
-    if (!state.mediaAgentId) return;
-    if (
-      backendId &&
-      splitResourceKey(state.mediaAgentId).backendId !== backendId &&
-      state.mediaBackendId !== backendId
-    )
-      return;
+    if (!state.mediaAgentId || (backendId && state.mediaBackendId !== backendId)) return;
     clearTimeout(state.mediaTimer);
     if (state.mediaRecorder) {
       state.mediaRecorder.onstop = null;
@@ -466,7 +456,8 @@
     state.voiceEnabled = backends.some(backend => backend.voiceEnabled);
     state.voiceSttEnabled = Boolean(transcriptionBackend());
     $('voicePlayback').hidden = !state.voiceEnabled;
-    $('voiceInput').hidden = !state.voiceSttEnabled && !state.voiceStream;
+    // A recording in progress stays stoppable even when a new one could not be started.
+    $('voiceInput').hidden = !state.voiceSttEnabled && !state.voiceStream && !state.mediaRecorder;
     $('voiceInput').title = '开始语音输入（Space；输入框内 Alt+Shift+V）';
     if (!state.voiceEnabled) stopVoiceAudio();
     updateVoiceButton();
@@ -2041,7 +2032,7 @@
     }
   }
   async function selectAgent(agent, openView = true) {
-    if (state.agent?.agentId !== agent.agentId) cancelVoiceRecording();
+    // The composer is shared by all Agents, so dictation and its correction carry on across a switch.
     state.selectedKind = 'agent';
     state.terminalWs?.close();
     state.terminalWs = null;
@@ -2237,6 +2228,24 @@
       if (state.followOutput) setFollowOutput(false);
     } else if (distance <= FOLLOW_SLACK && !state.followOutput) setFollowOutput(true);
     state.messagesScrollTop = top;
+  }
+  /**
+   * The composer takes its height from the transcript when it grows (voice correction, advice, queue, a
+   * taller textarea, a soft keyboard). The transcript's last lines are pushed up rather than hidden behind
+   * it: a following view stays at the end, and a scrolled-up one keeps its bottom line in view.
+   */
+  function onMessagesResize() {
+    const box = $('messages'),
+      height = box.clientHeight,
+      shrunk = state.messagesHeight - height;
+    state.messagesHeight = height;
+    // A hidden transcript (a Terminal, another mobile view) has no edge to keep.
+    if (!height) return;
+    if (state.followOutput) followLatest();
+    else if (shrunk > 0) {
+      box.scrollTop += shrunk;
+      state.messagesScrollTop = box.scrollTop;
+    }
   }
   /** Pi 0.99+ reports the recorded execution time of a finished tool call. */
   function setToolDuration(card, durationMs) {
@@ -3013,7 +3022,7 @@
     } else stopVoiceAudio();
   }
   function updateSottoDraft(voice) {
-    if (state.voiceStream !== voice || state.agent?.agentId !== voice.agentId) return;
+    if (state.voiceStream !== voice) return;
     const input = voice.input,
       text = [...voice.finals.values(), voice.partial].filter(Boolean).join(' ');
     if (text === voice.inserted) return;
@@ -3095,7 +3104,7 @@
       return finishSottoStream(voice, true, '实时语音连接中断或处理不过来，录音已停止');
     voice.socket.send(pcm);
   }
-  // Dictation survives switching views; it ends when the user stops it or nothing new is recognised.
+  // Dictation survives switching views and Agents; it ends when the user stops it or nothing new is recognised.
   const SOTTO_IDLE_MS = 60000;
   function touchSottoIdle(voice) {
     clearTimeout(voice.idleTimer);
@@ -3151,7 +3160,6 @@
       if (context.audioWorklet && window.AudioWorkletNode)
         await context.audioWorklet.addModule('/voice-pcm.js');
       if (state.voiceStream !== voice) return;
-      if (state.agent?.agentId !== agentId) throw Error('会话已切换');
       const backend = backendOf(voice.transcribeBackendId);
       if (backend?.status !== 'connected' || !backend.statusInfo?.sottoStt?.enabled)
         throw Error('语音识别 Backend 已断开');
@@ -3226,10 +3234,6 @@
   }
   async function toggleVoiceInput() {
     if (state.voiceStream) return stopSottoStream(state.voiceStream);
-    if ($('voiceInput').disabled) return;
-    if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
-    if (!state.agent) return toast('请先选择 Agent');
-    if (transcriptionBackend()?.statusInfo?.sottoStt?.enabled) return startSottoStream();
     if (state.mediaRecorder) {
       if (state.mediaRecorder.state === 'recording') {
         $('voiceInput').disabled = true;
@@ -3237,6 +3241,10 @@
       }
       return;
     }
+    if ($('voiceInput').disabled) return;
+    if (!state.voiceSttEnabled) return toast('服务端未启用语音识别');
+    if (!state.agent) return toast('请先选择 Agent');
+    if (transcriptionBackend()?.statusInfo?.sottoStt?.enabled) return startSottoStream();
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder)
       return toast('当前浏览器不支持麦克风录音');
     try {
@@ -3324,7 +3332,7 @@
       if (!response.ok) throw Error(body.error?.message || `HTTP ${response.status}`);
       const text = body.data?.text?.trim();
       if (text) {
-        if (state.agent?.agentId !== agentId) return;
+        // The composer is shared, so the text is kept even if another Agent is selected by now.
         const input = $('input'),
           prefix = input.value && !/\s$/.test(input.value) ? ' ' : '',
           at = input.value.length + prefix.length;
@@ -5513,7 +5521,6 @@
   };
   state.voiceCorrection = new window.RemotePiVoiceCorrection.VoiceCorrection({
     $,
-    getAgent: () => state.agent,
     getBackend: backendOf,
     getContext: (agentId, options) => requestAgent(agentId, '/voice-correction-context', options),
     request: requestBackend,
@@ -5949,6 +5956,7 @@
   };
   // Clearing hands the queued messages back, so nothing typed is lost when a run is redirected.
   $('messages').addEventListener('scroll', onMessagesScroll, {passive: true});
+  new ResizeObserver(onMessagesResize).observe($('messages'));
   $('jumpToLatest').onclick = () => followLatest(true);
   $('queueClear').onclick = async () => {
     if (!state.agent) return;

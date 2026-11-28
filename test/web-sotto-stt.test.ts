@@ -165,6 +165,54 @@ describe('Web Sotto input', () => {
     expect(correction.clear).toHaveBeenCalled();
   });
 
+  it('keeps dictating into the shared composer, and corrects it, after another Agent is selected', async () => {
+    const moduleLoad = deferred(),
+      h = harness({moduleLoad: moduleLoad.promise});
+    const correction = {begin: vi.fn(), observe: vi.fn(), end: vi.fn(), clear: vi.fn()};
+    h.state.voiceCorrection = correction;
+    const starting = h.api.startSottoStream();
+    await vi.waitFor(() => expect(h.contexts).toHaveLength(1));
+    // Selecting another Agent while the microphone starts does not cancel it either.
+    h.state.agent = {agentId: 'a:two', backendId: 'a'};
+    moduleLoad.resolve();
+    await starting;
+    h.message({type: 'ready'});
+    const voice = h.state.voiceStream;
+    expect(voice.phase).toBe('recording');
+    h.message({type: 'final', segment: 0, text: '第一句'});
+    h.state.agent = {agentId: 'a:three', backendId: 'a'};
+    h.message({type: 'partial', segment: 1, text: '第二句'});
+    expect(h.input.value).toBe('draft 第一句 第二句');
+    expect(correction.observe).toHaveBeenLastCalledWith(voice, '第一句 第二句');
+    h.api.stopSottoStream(voice);
+    voice.node.port.onmessage({data: {type: 'flushed'}});
+    h.message({type: 'final', segment: 1, text: '第二句。'});
+    h.sockets[0].onclose({code: 1000});
+    expect(h.input.value).toBe('draft 第一句 第二句。');
+    expect(correction.end).toHaveBeenCalledExactlyOnceWith(voice, '第一句 第二句。');
+    expect(correction.clear).not.toHaveBeenCalled();
+    expect(h.toast).not.toHaveBeenCalled();
+    // The context for correction stays with the Agent where dictation started.
+    expect(voice.agentId).toBe('a:one');
+  });
+
+  it('keeps dictating when only the dictating Agent backend disconnects', async () => {
+    const h = harness({remote: true});
+    await h.start();
+    h.api.cancelVoiceRecording('b');
+    expect(h.state.voiceStream.phase).toBe('recording');
+    h.message({type: 'final', segment: 0, text: '继续说'});
+    expect(h.input.value).toBe('draft 继续说');
+    h.api.cancelVoiceRecording('a'); // The local speech backend.
+    expect(h.state.voiceStream).toBeNull();
+  });
+
+  it('does not cancel dictation or correction when selecting an Agent', () => {
+    expect(section('  async function selectAgent(', '  async function loadSessionIdentity(')).not.toMatch(
+      /cancelVoiceRecording|voiceCorrection/
+    );
+  });
+
   it('stops live capture before navigating within the same Agent and keeps the finalized draft', async () => {
     const h = harness();
     await h.start();
@@ -410,6 +458,20 @@ describe('Web Sotto input', () => {
     expect(h.state.voiceStream.phase).toBe('draining');
     expect(h.track.stop).toHaveBeenCalledOnce();
     h.api.cancelVoiceRecording();
+  });
+
+  it('keeps a recorded (non-live) take stoppable and visible without a selected Agent', async () => {
+    const h = harness();
+    const recorder = {state: 'recording', stop: vi.fn()};
+    h.state.mediaRecorder = recorder;
+    h.state.agent = null;
+    h.api.updateVoiceAvailability();
+    expect(h.state.voiceSttEnabled).toBe(false);
+    expect(h.mic.hidden).toBe(false);
+    await h.api.toggleVoiceInput();
+    expect(recorder.stop).toHaveBeenCalledOnce();
+    expect(h.mic.disabled).toBe(true);
+    expect(h.toast).not.toHaveBeenCalled();
   });
 
   it('keeps recording while text keeps arriving and stops after one minute without new text', async () => {
